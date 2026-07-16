@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Tech Theme Colors -->
+    <!-- Tech Theme Colors -->
+    <color name="tech_bg_dark">#0B1221</color>
+    <color name="tech_bg_light">#152036</color>
+    <color name="tech_primary">#00F0FF</color>
+    <color name="tech_primary_dim">#3300F0FF</color>
+    <color name="tech_primary_gradient_start">#00F0FF</color>
+    <color name="tech_primary_gradient_end">#0080FF</color>
+    <color name="tech_accent">#7000FF</color>
+    <color name="tech_surface">#CC1A2233</color>
+    <color name="tech_surface_solid">#1A2233</color>
+    
+    <!-- Text Colors -->
+    <color name="tech_text_primary">#FFFFFF</color>
+    <color name="tech_text_secondary">#8A9BB8</color>
+    <color name="tech_text_hint">#4A5B78</color>
+
+    <!-- Status Colors -->
+    <color name="tech_success">#00FF9D</color>
+    <color name="tech_warning">#FFD700</color>
+    <color name="tech_error">#FF0055</color>
+    
+    <!-- Standard Colors -->
+    <color name="black">#000000</color>
+    <color name="white">#FFFFFF</color>
+    <color name="transparent">#00000000</color>
+</resources>

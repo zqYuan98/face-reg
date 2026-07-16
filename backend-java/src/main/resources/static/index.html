@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>人脸识别智能管理系统</title>
+    <!-- 引入样式 -->
+    <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css" />
+    <style>
+        :root {
+            --el-color-primary: #409EFF;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #f5f7fa;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+
+        #app {
+            height: 100vh;
+        }
+
+        .el-header {
+            background-color: #fff;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            z-index: 10;
+        }
+
+        .logo {
+            font-size: 20px;
+            font-weight: bold;
+            color: #333;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .el-aside {
+            background-color: #304156;
+            color: #fff;
+            transition: width 0.3s;
+        }
+
+        .el-menu {
+            border-right: none;
+            background-color: transparent;
+        }
+
+        .el-menu-item {
+            color: #bfcbd9;
+        }
+
+        .el-menu-item:hover,
+        .el-menu-item.is-active {
+            background-color: #263445;
+            color: #409EFF;
+        }
+
+        .el-main {
+            padding: 20px;
+        }
+
+        .page-header {
+            background: #fff;
+            padding: 20px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .page-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .card-container {
+            background: #fff;
+            padding: 20px;
+            border-radius: 4px;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+        }
+
+        .avatar-uploader .el-upload {
+            border: 1px dashed #d9d9d9;
+            border-radius: 6px;
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+            transition: var(--el-transition-duration-fast);
+        }
+
+        .avatar-uploader .el-upload:hover {
+            border-color: var(--el-color-primary);
+        }
+
+        .avatar-uploader-icon {
+            font-size: 28px;
+            color: #8c939d;
+            width: 178px;
+            height: 178px;
+            text-align: center;
+            line-height: 178px;
+        }
+
+        .avatar {
+            width: 178px;
+            height: 178px;
+            display: block;
+            object-fit: cover;
+        }
+
+        .small-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            object-fit: cover;
+            border: 1px solid #eee;
+        }
+
+        [v-cloak] {
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+
+    <body>
+        <div id="app" v-cloak>
+            <el-container style="height: 100vh;">
+                <el-aside width="220px">
+                    <div
+                        style="height: 60px; display: flex; align-items: center; padding: 0 15px; background-color: #304156; border-bottom: 1px solid #1f2d3d;">
+                        <img src="company_icon.png"
+                            style="width: 32px; height: 32px; margin-right: 10px; border-radius: 50%;">
+                        <div style="color: #fff; font-size: 13px; font-weight: bold; line-height: 1.4;">
+                            <div>安徽博诺思</div>
+                            <div>信息科技有限公司</div>
+                        </div>
+                    </div>
+                    <el-menu :default-active="activeMenu" @select="handleSelect">
+                        <el-menu-item index="overview">
+                            <el-icon>
+                                <Odometer />
+                            </el-icon>
+                            <span>系统概览</span>
+                        </el-menu-item>
+                        <el-menu-item index="users">
+                            <el-icon>
+                                <User />
+                            </el-icon>
+                            <span>用户管理</span>
+                        </el-menu-item>
+                        <el-menu-item index="groups">
+                            <el-icon><Office-Building /></el-icon>
+                            <span>分组管理</span>
+                        </el-menu-item>
+                    </el-menu>
+                </el-aside>
+                <el-container>
+                    <el-header>
+                        <div class="logo">人脸识别智能管理系统</div>
+                        <div style="display: flex; align-items: center; gap: 15px;">
+                            <el-avatar :size="32"
+                                src="https://cube.elemecdn.com/0/88/03b0d39583f48206768a7534e55bcpng.png"></el-avatar>
+                            <el-dropdown @command="handleCommand">
+                                <span style="cursor: pointer; display: flex; align-items: center;">
+                                    管理员 <el-icon class="el-icon--right"><arrow-down /></el-icon>
+                                </span>
+                                <template #dropdown>
+                                    <el-dropdown-menu>
+                                        <el-dropdown-item command="logout">退出登录</el-dropdown-item>
+                                    </el-dropdown-menu>
+                                </template>
+                            </el-dropdown>
+                        </div>
+                    </el-header>
+                    <el-main>
+
+                        <!-- 仪表盘试图 -->
+                        <div v-if="activeMenu === 'overview'">
+                            <el-row :gutter="20">
+                                <el-col :span="8">
+                                    <el-card shadow="hover">
+                                        <template #header><span>👤 总用户数</span></template>
+                                        <h2 style="margin: 0; color: #409EFF;">{{ totalUserCount }}</h2>
+                                    </el-card>
+                                </el-col>
+                                <el-col :span="8">
+                                    <el-card shadow="hover">
+                                        <template #header><span>🏢 总分组数</span></template>
+                                        <h2 style="margin: 0; color: #67C23A;">{{ groups.length }}</h2>
+                                    </el-card>
+                                </el-col>
+                            </el-row>
+                        </div>
+
+                        <!-- 用户管理视图 -->
+                        <div v-show="activeMenu === 'users'">
+                            <div class="page-header">
+                                <span class="page-title">用户列表</span>
+                                <div style="display: flex; gap: 10px; align-items: center;">
+                                    <el-select v-model="searchForm.groupId" placeholder="分组查询" clearable
+                                        style="width: 150px" @change="loadUsers">
+                                        <el-option v-for="g in groups" :key="g.id" :label="g.groupName"
+                                            :value="g.id"></el-option>
+                                    </el-select>
+                                    <el-input v-model="searchForm.name" placeholder="姓名查询" style="width: 150px"
+                                        clearable @clear="loadUsers" @keyup.enter="loadUsers">
+                                        <template #append>
+                                            <el-button :icon="Search" @click="loadUsers" />
+                                        </template>
+                                    </el-input>
+                                    <el-button @click="loadUsers" :icon="Refresh" circle></el-button>
+                                    <el-button type="danger" :disabled="selectedUsers.length === 0"
+                                        @click="handleBatchDelete">批量删除</el-button>
+                                    <el-button type="primary" @click="openUserDialog()">+ 新增用户</el-button>
+                                </div>
+                            </div>
+                            <div class="card-container">
+                                <el-table :data="users" style="width: 100%" v-loading="loading"
+                                    @selection-change="handleSelectionChange">
+                                    <el-table-column type="selection" width="55"></el-table-column>
+                                    <el-table-column prop="id" label="ID" width="80"></el-table-column>
+                                    <el-table-column label="头像" width="100">
+                                        <template #default="scope">
+                                            <img v-if="scope.row.photoUrl" :src="'/uploads/' + scope.row.photoUrl"
+                                                class="small-avatar" onerror="this.style.display='none'">
+                                            <el-tag v-else type="info" size="small">无</el-tag>
+                                        </template>
+                                    </el-table-column>
+                                    <el-table-column prop="name" label="姓名"></el-table-column>
+                                    <el-table-column label="所属分组">
+                                        <template #default="scope">
+                                            <el-tag v-if="scope.row.groupId" effect="plain">{{
+                                                getGroupName(scope.row.groupId) }}</el-tag>
+                                            <span v-else style="color: #999;">--</span>
+                                        </template>
+                                    </el-table-column>
+                                    <el-table-column label="特征状态">
+                                        <template #default="scope">
+                                            <el-tag v-if="hasFeature(scope.row)" type="success">已提取</el-tag>
+                                            <el-tag v-else type="danger">未提取</el-tag>
+                                        </template>
+                                    </el-table-column>
+                                    <el-table-column label="操作" width="200">
+                                        <template #default="scope">
+                                            <el-button size="small" @click="openUserDialog(scope.row)">编辑</el-button>
+                                            <el-button size="small" type="danger"
+                                                @click="handleDeleteUser(scope.row)">删除</el-button>
+                                        </template>
+                                    </el-table-column>
+                                </el-table>
+                            </div>
+                        </div>
+
+                        <!-- 分组管理视图 -->
+                        <div v-show="activeMenu === 'groups'">
+                            <div class="page-header">
+                                <span class="page-title">分组列表</span>
+                                <div>
+                                    <el-button @click="loadGroups" :icon="Refresh" circle></el-button>
+                                    <el-button type="primary" @click="openGroupDialog()">+ 新建分组</el-button>
+                                </div>
+                            </div>
+                            <div class="card-container">
+                                <el-table :data="groups" style="width: 100%" v-loading="loading">
+                                    <el-table-column prop="id" label="ID" width="80"></el-table-column>
+                                    <el-table-column prop="groupName" label="分组名称"></el-table-column>
+                                    <el-table-column prop="groupNo" label="分组编码"></el-table-column>
+                                    <el-table-column prop="createTime" label="创建时间"></el-table-column>
+                                    <el-table-column label="操作" width="150">
+                                        <template #default="scope">
+                                            <el-button size="small" type="danger"
+                                                @click="handleDeleteGroup(scope.row)">删除</el-button>
+                                        </template>
+                                    </el-table-column>
+                                </el-table>
+                            </div>
+                        </div>
+
+                    </el-main>
+                </el-container>
+            </el-container>
+
+            <!-- 用户编辑/新增弹窗 -->
+            <el-dialog v-model="userDialog.visible" :title="userDialog.isEdit ? '编辑用户' : '新增用户'" width="500px">
+                <el-form label-width="80px">
+                    <el-form-item label="姓名">
+                        <el-input v-model="userForm.name" placeholder="请输入姓名"></el-input>
+                    </el-form-item>
+                    <el-form-item label="分组">
+                        <el-select v-model="userForm.groupId" placeholder="请选择分组" style="width: 100%">
+                            <el-option v-for="g in groups" :key="g.id" :label="g.groupName" :value="g.id"></el-option>
+                        </el-select>
+                    </el-form-item>
+                    <el-form-item label="照片">
+                        <el-upload class="avatar-uploader" action="#" :show-file-list="false" :auto-upload="false"
+                            :on-change="handleFileChange">
+                            <img v-if="userForm.previewUrl" :src="userForm.previewUrl" class="avatar" />
+                            <el-icon v-else class="avatar-uploader-icon">
+                                <Plus />
+                            </el-icon>
+                        </el-upload>
+                    </el-form-item>
+                </el-form>
+                <template #footer>
+                    <span class="dialog-footer">
+                        <el-button @click="userDialog.visible = false">取消</el-button>
+                        <el-button type="primary" @click="submitUser" :loading="submitting">确定</el-button>
+                    </span>
+                </template>
+            </el-dialog>
+
+            <!-- 分组弹窗 -->
+            <el-dialog v-model="groupDialog.visible" title="新建分组" width="400px">
+                <el-form label-width="80px">
+                    <el-form-item label="分组名称">
+                        <el-input v-model="groupForm.groupName" placeholder="例如：研发部"></el-input>
+                    </el-form-item>
+                </el-form>
+                <template #footer>
+                    <span class="dialog-footer">
+                        <el-button @click="groupDialog.visible = false">取消</el-button>
+                        <el-button type="primary" @click="submitGroup" :loading="submitting">确定</el-button>
+                    </span>
+                </template>
+            </el-dialog>
+
+        </div>
+
+        <!-- 引入 Vue 和 Element Plus -->
+        <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+        <script src="https://unpkg.com/element-plus/dist/index.full.js"></script>
+        <!-- 引入 Icons -->
+        <script src="https://unpkg.com/@element-plus/icons-vue"></script>
+
+        <script>
+            const { createApp, ref, reactive, onMounted, computed } = Vue;
+
+            const app = createApp({
+                setup() {
+                    // Auth Check
+                    const token = sessionStorage.getItem('admin_token');
+                    if (!token) {
+                        window.location.href = 'login.html';
+                    }
+
+                    const activeMenu = ref('users');
+                    const loading = ref(false);
+                    const submitting = ref(false);
+
+                    const users = ref([]);
+                    const groups = ref([]);
+                    const groupMap = reactive({});
+
+                    const handleCommand = (cmd) => {
+                        if (cmd === 'logout') {
+                            sessionStorage.removeItem('admin_token');
+                            window.location.href = 'login.html';
+                        }
+                    };
+
+                    const selectedFile = ref(null);
+                    const selectedUsers = ref([]);
+
+                    // Stats
+                    const totalUserCount = ref(0);
+
+                    // Dialog States
+                    const userDialog = reactive({ visible: false, isEdit: false });
+                    const groupDialog = reactive({ visible: false });
+
+                    // Forms
+                    const userForm = reactive({ id: null, name: '', groupId: null, previewUrl: '' });
+                    const groupForm = reactive({ groupName: '' });
+
+                    // API Base
+                    const API_USER = '/api/users';
+                    const API_GROUP = '/api/groups';
+
+                    const handleSelect = (key) => activeMenu.value = key;
+
+                    // Load Data
+                    const loadGroups = async () => {
+                        try {
+                            const res = await fetch(`${API_GROUP}/list`).then(r => r.json());
+                            if (res.code === 200) {
+                                groups.value = res.data;
+                                res.data.forEach(g => groupMap[g.id] = g.groupName);
+                            }
+                        } catch (e) { console.error(e); }
+                    };
+
+                    const searchForm = reactive({ name: '', groupId: null });
+
+                    const loadUserCount = async () => {
+                        try {
+                            const res = await fetch(`${API_USER}/count`).then(r => r.json());
+                            if (res.code === 200) {
+                                totalUserCount.value = res.data;
+                            }
+                        } catch (e) {
+                            console.error("Failed to load user count", e);
+                        }
+                    };
+
+                    const loadUsers = async () => {
+                        loading.value = true;
+                        try {
+                            const params = new URLSearchParams();
+                            if (searchForm.name) params.append('name', searchForm.name);
+                            if (searchForm.groupId) params.append('groupId', searchForm.groupId);
+
+                            const res = await fetch(`${API_USER}/list?${params.toString()}`).then(r => r.json());
+                            if (res.code === 200) {
+                                users.value = res.data;
+                            }
+                        } catch (e) { ElementPlus.ElMessage.error('加载用户失败'); }
+                        loading.value = false;
+                    };
+
+                    const getGroupName = (id) => groupMap[id] || id;
+                    const hasFeature = (user) => user.featureData && user.featureData.length > 20;
+
+                    // User Operations
+                    const openUserDialog = (user) => {
+                        userDialog.visible = true;
+                        selectedFile.value = null;
+
+                        if (user) {
+                            userDialog.isEdit = true;
+                            userForm.id = user.id;
+                            userForm.name = user.name;
+                            userForm.groupId = user.groupId;
+                            userForm.previewUrl = user.photoUrl ? `/uploads/${user.photoUrl}` : '';
+                        } else {
+                            userDialog.isEdit = false;
+                            userForm.id = null;
+                            userForm.name = '';
+                            userForm.groupId = null;
+                            userForm.previewUrl = '';
+                        }
+                    };
+
+                    const handleFileChange = (uploadFile) => {
+                        const file = uploadFile.raw;
+                        if (file) {
+                            selectedFile.value = file;
+                            userForm.previewUrl = URL.createObjectURL(file);
+                        }
+                    };
+
+                    const submitUser = async () => {
+                        if (!userForm.name) return ElementPlus.ElMessage.warning('请输入姓名');
+                        if (!userDialog.isEdit && !selectedFile.value) return ElementPlus.ElMessage.warning('请选择照片');
+
+                        submitting.value = true;
+                        const formData = new FormData();
+                        formData.append('name', userForm.name);
+                        if (userForm.groupId) formData.append('groupId', userForm.groupId);
+                        if (selectedFile.value) formData.append('photo', selectedFile.value);
+
+                        try {
+                            const url = userDialog.isEdit ? `${API_USER}/update/${userForm.id}` : `${API_USER}/add`;
+                            const res = await fetch(url, { method: 'POST', body: formData }).then(r => r.json());
+
+                            if (res.code === 200) {
+                                ElementPlus.ElMessage.success(userDialog.isEdit ? '更新成功' : '注册成功');
+                                userDialog.visible = false;
+                                loadUsers();
+                                loadUserCount();
+                                loadData(); // Refresh all
+                            } else {
+                                ElementPlus.ElMessage.error(res.msg || '操作失败');
+                            }
+                        } catch (e) {
+                            ElementPlus.ElMessage.error('网络错误');
+                        }
+                        submitting.value = false;
+                    };
+
+                    const handleDeleteUser = (user) => {
+                        ElementPlus.ElMessageBox.confirm(`确定删除用户 ${user.name} 吗?`, '提示', { type: 'warning' })
+                            .then(async () => {
+                                const res = await fetch(`${API_USER}/${user.id}`, { method: 'DELETE' }).then(r => r.json());
+                                if (res.code === 200) {
+                                    ElementPlus.ElMessage.success('删除成功');
+                                    loadUsers();
+                                    loadUserCount();
+                                } else {
+                                    ElementPlus.ElMessage.error(res.msg);
+                                }
+                            }).catch(() => { });
+                    };
+
+                    const handleSelectionChange = (val) => {
+                        selectedUsers.value = val;
+                    };
+
+                    const handleBatchDelete = () => {
+                        if (selectedUsers.value.length === 0) return;
+
+                        ElementPlus.ElMessageBox.confirm(`确定删除选中的 ${selectedUsers.value.length} 名用户吗?`, '提示', { type: 'warning' })
+                            .then(async () => {
+                                const ids = selectedUsers.value.map(u => u.id);
+                                try {
+                                    const response = await fetch(`${API_USER}/deleteBatch`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify(ids)
+                                    });
+
+                                    if (!response.ok) {
+                                        throw new Error(`HTTP ${response.status} - 后端可能未更新`);
+                                    }
+
+                                    const res = await response.json();
+
+                                    if (res.code === 200) {
+                                        ElementPlus.ElMessage.success('批量删除成功');
+                                        loadUsers();
+                                        loadUserCount();
+                                    } else {
+                                        ElementPlus.ElMessage.error(res.msg);
+                                    }
+                                } catch (e) {
+                                    console.error(e);
+                                    ElementPlus.ElMessage.error('删除失败: ' + e.message);
+                                }
+                            }).catch(() => { });
+                    };
+
+                    // Group Operations
+                    const openGroupDialog = () => {
+                        groupDialog.visible = true;
+                        groupForm.groupName = '';
+                    };
+
+                    const submitGroup = async () => {
+                        if (!groupForm.groupName) return ElementPlus.ElMessage.warning('请输入分组名称');
+                        submitting.value = true;
+                        try {
+                            const res = await fetch(`${API_GROUP}/add`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ groupName: groupForm.groupName })
+                            }).then(r => r.json());
+
+                            if (res.code === 200) {
+                                ElementPlus.ElMessage.success('分组创建成功');
+                                groupDialog.visible = false;
+                                loadGroups();
+                            } else {
+                                ElementPlus.ElMessage.error(res.msg);
+                            }
+                        } catch (e) { ElementPlus.ElMessage.error('网络错误'); }
+                        submitting.value = false;
+                    };
+
+                    const handleDeleteGroup = (group) => {
+                        ElementPlus.ElMessageBox.confirm(`确定删除分组 ${group.groupName} 吗? 如果分组下有用户将无法删除。`, '提示', { type: 'warning' })
+                            .then(async () => {
+                                const res = await fetch(`${API_GROUP}/${group.id}`, { method: 'DELETE' }).then(r => r.json());
+                                if (res.code === 200) {
+                                    ElementPlus.ElMessage.success('删除成功');
+                                    loadGroups();
+                                } else {
+                                    ElementPlus.ElMessage.error('删除失败: ' + res.msg);
+                                }
+                            }).catch(() => { });
+                    };
+
+                    const loadData = async () => {
+                        await loadGroups();
+                        await loadUsers();
+                        await loadUserCount();
+                    };
+
+                    onMounted(() => {
+                        loadData();
+                    });
+
+                    return {
+                        activeMenu, handleSelect,
+                        users, groups, loading, submitting,
+                        getGroupName, hasFeature,
+                        userDialog, userForm, openUserDialog, submitUser, handleDeleteUser,
+                        handleSelectionChange, handleBatchDelete, selectedUsers,
+                        groupDialog, groupForm, openGroupDialog, submitGroup, handleDeleteGroup,
+                        loadUsers, loadGroups,
+                        handleFileChange,
+                        handleCommand,
+                        searchForm,
+                        totalUserCount,
+                        Plus: ElementPlusIconsVue.Plus,
+                        Refresh: ElementPlusIconsVue.Refresh,
+                        Search: ElementPlusIconsVue.Search
+                    }
+                }
+            });
+
+            // Register Icons
+            for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
+                app.component(key, component)
+            }
+
+            app.use(ElementPlus);
+            app.mount('#app');
+        </script>
+    </body>
+
+</html>

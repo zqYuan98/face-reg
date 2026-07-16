@@ -1,0 +1,44 @@
+-- 人员组表
+CREATE TABLE IF NOT EXISTS sys_user_group (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    group_no VARCHAR(64) NOT NULL UNIQUE COMMENT '分组编号',
+    group_name VARCHAR(100) NOT NULL COMMENT '分组名称',
+    description VARCHAR(255) COMMENT '描述',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='人员分组表';
+
+-- 人员表
+CREATE TABLE IF NOT EXISTS sys_user (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    user_no VARCHAR(64) NOT NULL UNIQUE COMMENT '人员编号',
+    name VARCHAR(100) NOT NULL COMMENT '姓名',
+    group_id BIGINT COMMENT '所属分组ID',
+    feature_data TEXT COMMENT '人脸特征数据(JSON或Base64)',
+    photo_url VARCHAR(255) COMMENT '照片路径',
+    status TINYINT DEFAULT 1 COMMENT '状态 1:正常 0:禁用',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    FOREIGN KEY (group_id) REFERENCES sys_user_group(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='人员信息表';
+
+-- 设备表
+CREATE TABLE IF NOT EXISTS sys_device (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    device_sn VARCHAR(64) NOT NULL UNIQUE COMMENT '设备序列号',
+    device_name VARCHAR(100) COMMENT '设备名称',
+    ip_address VARCHAR(50) COMMENT 'IP地址',
+    status TINYINT DEFAULT 1 COMMENT '状态 1:在线 0:离线',
+    last_heartbeat DATETIME COMMENT '最后心跳时间',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='设备管理表';
+
+-- 识别记录表
+CREATE TABLE IF NOT EXISTS sys_recognition_log (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    device_id BIGINT COMMENT '设备ID',
+    user_id BIGINT COMMENT '识别到的人员ID',
+    similarity FLOAT COMMENT '相似度',
+    capture_photo VARCHAR(255) COMMENT '抓拍照片路径',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '识别时间'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='识别记录表';

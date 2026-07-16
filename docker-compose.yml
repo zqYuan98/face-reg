@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  # 1. MySQL 数据库
+  mysql:
+    image: mysql:8.0
+    container_name: face-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: face_db
+      MYSQL_TZ: Asia/Shanghai
+    ports:
+      - "13307:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./backend-java/src/main/resources/db/schema.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - face-net
+
+  # 2. 算法服务 (Python)
+  face-algorithm:
+    build: 
+      context: ./FaceFeatureExtractorAPI
+      dockerfile: Dockerfile
+    container_name: face-algorithm
+    restart: always
+    ports:
+      - "18000:8000"
+    volumes:
+      - ./FaceFeatureExtractorAPI/models:/app/models
+      - ./FaceFeatureExtractorAPI/checkpoints:/app/checkpoints
+    networks:
+      - face-net
+
+  # 3. 后端服务 (Java)
+  face-backend:
+    build: 
+      context: ./backend-java
+      dockerfile: Dockerfile
+    container_name: face-backend
+    restart: always
+    depends_on:
+      - mysql
+      - face-algorithm
+    ports:
+      - "18080:8080"
+    environment:
+      # 覆盖 application.yml 配置
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/face_db?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=GMT%2B8&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+      # 配置文件上传路径 (覆盖代码中的 Windows 路径)
+      SPRING_SERVLET_MULTIPART_LOCATION: /app/uploads
+      # 算法服务地址 (使用服务名)
+      FACE_EXTRACTOR_API_URL: http://face-algorithm:8000
+    volumes:
+      - ./backend-java/uploads:/app/uploads
+    networks:
+      - face-net
+
+volumes:
+  mysql-data:
+
+networks:
+  face-net:
+    driver: bridge

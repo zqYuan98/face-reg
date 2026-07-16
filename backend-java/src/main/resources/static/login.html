@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 - 人脸识别智能管理系统</title>
+    <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css" />
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: linear-gradient(135deg, #1f2d3d 0%, #304156 100%);
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+
+        .login-card {
+            width: 400px;
+            padding: 40px;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 12px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+        }
+
+        .login-title {
+            text-align: center;
+            color: #fff;
+            font-size: 24px;
+            margin-bottom: 30px;
+            font-weight: 600;
+        }
+
+        .login-btn {
+            width: 100%;
+            padding: 12px 0;
+            font-size: 16px;
+        }
+
+        /* Override Element form labels and inputs for dark theme */
+        .el-form-item__label {
+            color: #ccc !important;
+        }
+
+        .el-input__wrapper {
+            background-color: rgba(255, 255, 255, 0.05) !important;
+            box-shadow: none !important;
+            border: 1px solid rgba(255, 255, 255, 0.2) !important;
+        }
+
+        .el-input__wrapper:hover,
+        .el-input__wrapper.is-focus {
+            border-color: #409EFF !important;
+        }
+
+        .el-input__inner {
+            color: #fff !important;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="app">
+        <div class="login-card">
+            <div class="login-title">
+                <div style="display: flex; align-items: center; justify-content: center; margin-bottom: 20px;">
+                    <img src="company_icon.png"
+                        style="width: 40px; height: 40px; margin-right: 15px; border-radius: 50%;">
+                    <span style="font-size: 24px; font-weight: bold;">安徽博诺思信息科技有限公司</span>
+                </div>
+                <div style="font-size: 18px; opacity: 0.8; font-weight: normal;">人脸识别智能管理系统</div>
+            </div>
+            <el-form label-position="top" size="large">
+                <el-form-item label="账号">
+                    <el-input v-model="form.username" placeholder="请输入账号" :prefix-icon="User"></el-input>
+                </el-form-item>
+                <el-form-item label="密码">
+                    <el-input v-model="form.password" type="password" placeholder="请输入密码" :prefix-icon="Lock"
+                        @keyup.enter="handleLogin"></el-input>
+                </el-form-item>
+                <el-form-item style="margin-top: 30px;">
+                    <el-button type="primary" class="login-btn" :loading="loading" @click="handleLogin">登 录</el-button>
+                </el-form-item>
+            </el-form>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://unpkg.com/element-plus/dist/index.full.js"></script>
+    <script src="https://unpkg.com/@element-plus/icons-vue"></script>
+
+    <script>
+        const { createApp, reactive, ref } = Vue;
+        const app = createApp({
+            setup() {
+                const loading = ref(false);
+                const form = reactive({
+                    username: '',
+                    password: ''
+                });
+
+                const handleLogin = async () => {
+                    if (!form.username || !form.password) {
+                        return ElementPlus.ElMessage.warning('请输入账号和密码');
+                    }
+                    loading.value = true;
+                    try {
+                        const response = await fetch('/api/login', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(form)
+                        });
+                        const result = await response.json();
+
+                        if (result.code === 200) {
+                            ElementPlus.ElMessage.success('登录成功');
+                            sessionStorage.setItem('admin_token', result.token);
+                            setTimeout(() => {
+                                window.location.href = 'index.html';
+                            }, 500);
+                        } else {
+                            ElementPlus.ElMessage.error(result.msg || '登录失败');
+                        }
+                    } catch (error) {
+                        ElementPlus.ElMessage.error('网络错误，请稍后重试');
+                    } finally {
+                        loading.value = false;
+                    }
+                };
+
+                return {
+                    form,
+                    loading,
+                    handleLogin,
+                    User: ElementPlusIconsVue.User,
+                    Lock: ElementPlusIconsVue.Lock,
+                    Platform: ElementPlusIconsVue.Platform
+                }
+            }
+        });
+
+        for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
+            app.component(key, component)
+        }
+        app.use(ElementPlus);
+        app.mount('#app');
+    </script>
+</body>
+
+</html>
