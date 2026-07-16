@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.FaceApp" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <!-- Primary brand color. -->
+        <item name="colorPrimary">@color/tech_primary</item>
+        <item name="colorPrimaryVariant">@color/tech_primary_dim</item>
+        <item name="colorOnPrimary">@color/tech_bg_dark</item>
+        <!-- Secondary brand color. -->
+        <item name="colorSecondary">@color/tech_accent</item>
+        <item name="colorSecondaryVariant">@color/tech_accent</item>
+        <item name="colorOnSecondary">@color/white</item>
+        <!-- Status bar color. -->
+        <item name="android:statusBarColor">@color/tech_bg_dark</item>
+        <!-- Customize your theme here. -->
+        <item name="android:windowBackground">@color/tech_bg_dark</item>
+    </style>
+</resources>
