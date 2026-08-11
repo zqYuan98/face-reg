@@ -1,0 +1,101 @@
+{
+  "manifest_version": "2026-08-04-v1",
+  "models": [
+    {
+      "name": "face_detector",
+      "version": "legacy-v1",
+      "path": "checkpoints/faceboxesv2-640x640.onnx",
+      "sha256": "6d073d97dc31bc2e02064c0b5e3edb8d5b36581dde5c20090913fb008cfb9dfd",
+      "size": 4107099,
+      "required": true,
+      "backend": "onnxruntime",
+      "providers": ["CPUExecutionProvider"],
+      "expected": {"output_dimension": null},
+      "feature_version": null
+    },
+    {
+      "name": "face_landmark_primary",
+      "version": "legacy-v1",
+      "path": "checkpoints/face_landmarker_pts5_net1.onnx",
+      "sha256": "cfc73217d8771d2c2ee6ef4ba439172078c81dc0502d422a04cff7ec8df32a2a",
+      "size": 410856,
+      "required": true,
+      "backend": "onnxruntime",
+      "providers": ["CPUExecutionProvider"],
+      "expected": {"output_dimension": 10},
+      "feature_version": null
+    },
+    {
+      "name": "face_landmark_secondary",
+      "version": "legacy-v1",
+      "path": "checkpoints/face_landmarker_pts5_net2.onnx",
+      "sha256": "7358437179b52192b254ee0b5e3482788038841295d0a94280c8399cb6f40eb9",
+      "size": 409270,
+      "required": true,
+      "backend": "onnxruntime",
+      "providers": ["CPUExecutionProvider"],
+      "expected": {"output_dimension": 10},
+      "feature_version": null
+    },
+    {
+      "name": "face_recognizer",
+      "version": "recognizer-v1",
+      "path": "checkpoints/face_recognizer.onnx",
+      "sha256": "ecdbd21b1a9fb637b9780e9bd25cc1818fa3f16f54f8871f8c8658791b48bc37",
+      "size": 102528794,
+      "required": true,
+      "backend": "onnxruntime",
+      "providers": ["CPUExecutionProvider"],
+      "expected": {"output_dimension": 1024},
+      "feature_version": "recognizer_v1_1024"
+    },
+    {
+      "name": "rotation_classifier",
+      "version": "legacy-v1",
+      "path": "checkpoints/model_gray_mobilenetv2_rotcls.onnx",
+      "sha256": "8108b82212b947d803b9af58b95f8e125ad6cbc42a0fc282cb59c12b779fbb65",
+      "size": 8862670,
+      "required": true,
+      "backend": "onnxruntime",
+      "providers": ["CPUExecutionProvider"],
+      "expected": {"output_dimension": null},
+      "feature_version": null
+    },
+    {
+      "name": "pose_var",
+      "version": "legacy-v1",
+      "path": "checkpoints/fsanet-var.onnx",
+      "sha256": "2877b1db98e3dc66468e90df8db4a21059facd1c3f107af91c6d4fe6476a03e1",
+      "size": 1246963,
+      "required": true,
+      "backend": "onnxruntime",
+      "providers": ["CPUExecutionProvider"],
+      "expected": {"output_dimension": null},
+      "feature_version": null
+    },
+    {
+      "name": "pose_conv",
+      "version": "legacy-v1",
+      "path": "checkpoints/fsanet-conv.onnx",
+      "sha256": "d85e90cb4b9d3a87e81bbfdcfcd130cbe0e175407042e439a570aa396c44eda6",
+      "size": 1247488,
+      "required": true,
+      "backend": "onnxruntime",
+      "providers": ["CPUExecutionProvider"],
+      "expected": {"output_dimension": null},
+      "feature_version": null
+    },
+    {
+      "name": "portrait_matting",
+      "version": "28165a451e4610c9d77cfdf925a94610bb2810fb",
+      "path": "checkpoints/modnet_photographic_portrait_matting.ckpt",
+      "sha256": "7c22235f0925deba15d4d63e53afcb654c47055bbcd98f56e393ab2584007ed8",
+      "size": 26255603,
+      "required": false,
+      "backend": "pytorch",
+      "providers": ["CPUExecutionProvider"],
+      "expected": {"output_dimension": null},
+      "feature_version": null
+    }
+  ]
+}

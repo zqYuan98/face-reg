@@ -210,12 +210,12 @@ def create_tensor(mat, tensor_dims, memory_info_handler, data_format):
         return ort.OrtValue.ortvalue_from_numpy(mat, 'cpu')
 
 class BasicOrtHandler:
-    def __init__(self, onnx_path, num_threads=1):
+    def __init__(self, onnx_path=None, num_threads=1, session=None):
         self.onnx_path = onnx_path
         self.num_threads = num_threads
-        self.initialize_handler()
+        self.initialize_handler(session=session)
 
-    def initialize_handler(self):
+    def initialize_handler(self, session=None):
         # self.ort_env = ort.Env(ort.logging.ERROR)
         session_options = ort.SessionOptions()
         session_options.intra_op_num_threads = self.num_threads
@@ -225,7 +225,12 @@ class BasicOrtHandler:
         # self.memory_info_handler = ort.OrtMemoryInfo("cpu", ort.OrtAllocatorType.ORT_ARENA_ALLOCATOR)
 
         # Initialize session
-        self.ort_session = ort.InferenceSession(self.onnx_path, session_options)
+        if session is not None:
+            self.ort_session = session
+        else:
+            if self.onnx_path is None:
+                raise ValueError("onnx_path is required when session is not supplied")
+            self.ort_session = ort.InferenceSession(self.onnx_path, session_options)
         self.memory_info_handler = ort.OrtMemoryInfo("Cpu", ort.OrtAllocatorType.ORT_ARENA_ALLOCATOR, 0, ort.OrtMemType.DEFAULT)
 
 
@@ -238,11 +243,12 @@ class BasicOrtHandler:
         self.num_outputs = len(self.output_node_names)
 
     def __del__(self):
-        del self.ort_session
+        if hasattr(self, "ort_session"):
+            del self.ort_session
 
 class FaceBoxesV2(BasicOrtHandler):
-    def __init__(self, onnx_path, num_threads=1):
-        super().__init__(onnx_path, num_threads)
+    def __init__(self, onnx_path=None, num_threads=1, session=None):
+        super().__init__(onnx_path, num_threads, session=session)
         self.mean_vals = np.array([104.0, 117.0, 123.0], dtype=np.float32)
         self.scale_vals = np.array([1.0, 1.0, 1.0], dtype=np.float32)
         self.variance = [0.1, 0.2]

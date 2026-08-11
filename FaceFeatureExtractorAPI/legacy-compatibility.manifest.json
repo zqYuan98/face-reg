@@ -1,0 +1,13 @@
+{
+  "manifest_version": "2026-08-04-v1",
+  "feature_version": "recognizer_v1_1024",
+  "feature_dimension": 1024,
+  "recognizer": {
+    "name": "face_recognizer",
+    "sha256": "ecdbd21b1a9fb637b9780e9bd25cc1818fa3f16f54f8871f8c8658791b48bc37"
+  },
+  "accepted_provenance": [
+    "face_recognizer.onnx:verified-export-v1"
+  ],
+  "models_manifest": "models.manifest.json"
+}

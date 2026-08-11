@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools==83.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "face-algorithm"
+version = "0.1.0"
+description = "Private-deployment face algorithm modules"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "cryptography==46.0.3",
+    "fastapi==0.137.1",
+    "numpy==2.5.1",
+    "opencv-python-headless==5.0.0.93",
+    "onnxruntime==1.28.0",
+    "pydantic==2.12.4",
+    "python-multipart==0.0.20",
+    "PyYAML==6.0.3",
+    "uvicorn==0.52.1",
+]
+
+[project.optional-dependencies]
+portrait = ["torch==2.13.0"]
+
+[tool.setuptools]
+include-package-data = false
+py-modules = ["face_feature_extractor", "feature_server"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["face_algorithm*", "models*", "api*"]
+exclude = ["tests*"]
+
+[tool.setuptools.data-files]
+"." = ["models.manifest.json", "legacy-compatibility.manifest.json", "THIRD_PARTY_NOTICES.md"]
+config = ["config/algorithm.yaml"]
+checkpoints = ["checkpoints/README.md", "checkpoints/*.onnx"]
+scripts = ["scripts/prepare_modnet.py", "scripts/generate_fixture_video.py"]
+"third_party/MODNet" = ["third_party/MODNet/LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: exercises real model files and may be slower than unit tests",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["face_algorithm"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 0

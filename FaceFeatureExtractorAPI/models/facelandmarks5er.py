@@ -120,12 +120,27 @@ def crop_face(image:np.ndarray, face, H, W):
 
 
 class Landmark5er():
-    def __init__(self, onnx_path1, onnx_path2, num_threads=1) -> None:
+    def __init__(
+        self,
+        onnx_path1=None,
+        onnx_path2=None,
+        num_threads=1,
+        session1=None,
+        session2=None,
+    ) -> None:
         session_options = ort.SessionOptions()
         session_options.intra_op_num_threads = num_threads
         # 初始化 InferenceSession 时传入 SessionOptions 对象
-        self.ort_session1 = ort.InferenceSession(onnx_path1, session_options=session_options)
-        self.ort_session2 = ort.InferenceSession(onnx_path2, session_options=session_options)
+        if session1 is None:
+            if onnx_path1 is None:
+                raise ValueError("onnx_path1 is required when session1 is not supplied")
+            session1 = ort.InferenceSession(onnx_path1, session_options=session_options)
+        if session2 is None:
+            if onnx_path2 is None:
+                raise ValueError("onnx_path2 is required when session2 is not supplied")
+            session2 = ort.InferenceSession(onnx_path2, session_options=session_options)
+        self.ort_session1 = session1
+        self.ort_session2 = session2
         self.first_input_name = self.ort_session1.get_inputs()[0].name
         self.second_input_name = self.ort_session2.get_inputs()[0].name
 
@@ -133,12 +148,6 @@ class Landmark5er():
         # face_img = image[int(box[1]):int(box[3]), int(box[0]):int(box[2])]  # 这种裁剪不对,不合适
         H,W,C = image.shape
         face_img, box = crop_face(image,box,H,W)
-
-        x1,y1,x2,y2 = int(box[0]) ,int(box[1]), int(box[2]),int(box[3])
-        if x1 < 0 or x1 > W-1 or x2 < 0 or x2 > W: 
-            print("x超出边界")
-        if y1 < 0 or y1 > H-1 or y2 < 0 or y2 > H: 
-            print("y超出边界")
 
         face_img = cv2.resize(face_img,(112,112))
 

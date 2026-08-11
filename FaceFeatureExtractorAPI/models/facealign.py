@@ -5,8 +5,6 @@
 
 import numpy as np
 import cv2
-import time
-import os 
 
 # image_data: src image   
 # image_width, image_height,image_channels: width and height, channels of  src image
@@ -152,7 +150,7 @@ class FaceAlign:
     def align(self, image, landmarks5):  # 原图image  landmarks5
         success, transformation = transformation_maker(self.crop_width, self.crop_height, landmarks5, self.mean_face, self.mean_shape_width, self.mean_shape_height)
         if not success:
-            print("Failed to compute transformation matrix.")
+            raise ValueError("failed to compute face alignment transformation")
         
         img_height, img_width, img_channels = image.shape
 
@@ -161,13 +159,8 @@ class FaceAlign:
                                     crop_data, self.crop_width, self.crop_height,
                                     transformation,
                                     )
-        if success:
-            if os.path.exists("./images/result1.jpg"):
-                cv2.imwrite("./images/result2.jpg", crop_data, [cv2.IMWRITE_JPEG_QUALITY, 100])
-            else: 
-                cv2.imwrite("./images/result1.jpg", crop_data, [cv2.IMWRITE_JPEG_QUALITY, 100])
-        else: 
-            print("error when spatial_transform...")
+        if not success:
+            raise ValueError("face alignment spatial transform failed")
 
         return crop_data
 

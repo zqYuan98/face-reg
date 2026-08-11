@@ -39,11 +39,12 @@ class QualityOfClarity:
         s_VHor = np.sum(np.maximum(0.0, D_FHor - D_BHor))
 
         
-        b_FVer = (s_FVer - s_Vver) / s_FVer
-        b_FHor = (s_FHor - s_VHor) / s_FHor
+        eps = np.finfo(np.float32).eps
+        b_FVer = 1.0 if not np.isfinite(s_FVer) or s_FVer <= eps else (s_FVer - s_Vver) / s_FVer
+        b_FHor = 1.0 if not np.isfinite(s_FHor) or s_FHor <= eps else (s_FHor - s_VHor) / s_FHor
         blur_val = max(b_FVer, b_FHor)
         
-        return blur_val
+        return float(np.clip(blur_val if np.isfinite(blur_val) else 1.0, 0.0, 1.0))
 
     def grid_max_reblur(self, img, rows, cols):
         height, width = img.shape
@@ -78,7 +79,7 @@ class QualityOfClarity:
         else:
             clarity = (clarity - T1) / (T2 - T1)
 
-        return clarity
+        return float(clarity if np.isfinite(clarity) else 0.0)
 
     def check(self, image):
         clarity = self.clarity_estimate(image)
@@ -90,6 +91,14 @@ class QualityOfClarity:
             level = "HIGH"
         return level != 'LOW'
         # return {'level': level, "score": clarity}
+
+    def evaluate(self, image):
+        clarity = self.clarity_estimate(image)
+        return {
+            "value": clarity,
+            "passed": bool(clarity >= self.low_thresh),
+            "reason": None if clarity >= self.low_thresh else "TOO_BLURRY",
+        }
 
 
 class QualityChecker:  # check resolution and clarity of image
@@ -132,6 +141,18 @@ class QualityChecker:  # check resolution and clarity of image
             level = "HIGH"
 
         return level == "HIGH"
+
+    def evaluate_brightness(self, face_image):
+        gray = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY) if len(face_image.shape) == 3 else face_image
+        value = float(self.grid_max_bright(gray, 3, 3))
+        passed = bool(self.bright_thresh1 <= value <= self.bright_thresh2)
+        if value < self.bright_thresh1:
+            reason = "TOO_DARK"
+        elif value > self.bright_thresh2:
+            reason = "TOO_BRIGHT"
+        else:
+            reason = None
+        return {"value": value, "passed": passed, "reason": reason}
     
     def check_resolution(self, face_image):
         H, W = face_image.shape[:2]
@@ -139,16 +160,27 @@ class QualityChecker:  # check resolution and clarity of image
             return False 
         return True
 
+    def evaluate_resolution(self, face_image):
+        height, width = face_image.shape[:2]
+        value = float(min(height / self.rolu_thrds[0], width / self.rolu_thrds[1]))
+        passed = bool(value >= 1.0 and np.isfinite(value))
+        return {
+            "value": value if np.isfinite(value) else 0.0,
+            "passed": passed,
+            "reason": None if passed else "FACE_TOO_SMALL",
+        }
+
 
 class QualityOfPose:
-    def __init__(self, pad=0.3, yaw_thrd=30, pitch_thrd=25, var_onnx_path = './checkpoints/fsanet-var.onnx', conv_onnx_path='./checkpoints/fsanet-conv.onnx') -> None:
+    def __init__(self, pad=0.3, yaw_thrd=30, pitch_thrd=25, roll_thrd=180, var_onnx_path = './checkpoints/fsanet-var.onnx', conv_onnx_path='./checkpoints/fsanet-conv.onnx', var_session=None, conv_session=None) -> None:
         self.pad = pad
         self.input_width = 64
         self.input_height = 64
         self.yaw_thrd = abs(yaw_thrd) 
         self.pitch_thrd = abs(pitch_thrd)
-        self.var_fsanet = ort.InferenceSession(var_onnx_path)
-        self.conv_fsanet = ort.InferenceSession(conv_onnx_path)
+        self.roll_thrd = abs(roll_thrd)
+        self.var_fsanet = var_session or ort.InferenceSession(var_onnx_path)
+        self.conv_fsanet = conv_session or ort.InferenceSession(conv_onnx_path)
 
         self.var_input_names = [input_.name for input_ in self.var_fsanet.get_inputs()]
         self.var_output_names = [output.name for output in self.var_fsanet.get_outputs()]
@@ -194,12 +226,12 @@ class QualityOfPose:
         )[0]
         yaw, pitch, roll = np.mean(np.vstack((var_output,conv_output)), axis=0)
         
-        return yaw, pitch, roll
+        return float(yaw), float(pitch), float(roll)
 
     def check(self, image):
         yaw, pitch, roll = self.detect_angle(image)
 
-        if abs(yaw) <= self.yaw_thrd and abs(pitch) <= self.pitch_thrd: 
+        if abs(yaw) <= self.yaw_thrd and abs(pitch) <= self.pitch_thrd and abs(roll) <= self.roll_thrd:
             return "frontFace"
         elif yaw < -1.0 * self.yaw_thrd:
             return "rightFace" 
@@ -211,6 +243,21 @@ class QualityOfPose:
             return "downFace"
         else:
             return "implementError"
+
+    def evaluate(self, image):
+        yaw, pitch, roll = self.detect_angle(image)
+        passed = (
+            abs(yaw) <= self.yaw_thrd
+            and abs(pitch) <= self.pitch_thrd
+            and abs(roll) <= self.roll_thrd
+        )
+        return {
+            "yaw": yaw,
+            "pitch": pitch,
+            "roll": roll,
+            "passed": passed,
+            "reason": None if passed else "BAD_POSE",
+        }
     
 
 if __name__ == "__main__":

@@ -13,11 +13,15 @@ import numpy as np
 ort.set_default_logger_severity(3)  # 3表示ERROR级别
 
 class FaceRecoger():
-    def __init__(self, onnx_path, num_threads=1) -> None:
+    def __init__(self, onnx_path=None, num_threads=1, session=None) -> None:
         session_options = ort.SessionOptions()
         session_options.intra_op_num_threads = num_threads
         # 初始化 InferenceSession 时传入 SessionOptions 对象
-        self.ort_session = ort.InferenceSession(onnx_path, session_options=session_options)
+        if session is None:
+            if onnx_path is None:
+                raise ValueError("onnx_path is required when session is not supplied")
+            session = ort.InferenceSession(onnx_path, session_options=session_options)
+        self.ort_session = session
         
         output_node_dims = [out.shape for out in self.ort_session.get_outputs()]
         self.len_feat = output_node_dims[0][1] # feature 的长度为...
@@ -30,8 +34,9 @@ class FaceRecoger():
         input_data = crop_img.transpose((2, 0, 1))
         input_feed['_input_123'] = input_data.reshape((1, 3, 248, 248)).astype(np.float32)
         pred_result = self.ort_session.run([], input_feed=input_feed)
-        temp_result = np.sqrt(pred_result[0])
-        norm = temp_result / np.linalg.norm(temp_result, axis=1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            temp_result = np.sqrt(pred_result[0])
+            norm = temp_result / np.linalg.norm(temp_result, axis=1)
         return norm.flatten()   # return normalize  feature
 
     @staticmethod

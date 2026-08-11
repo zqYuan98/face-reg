@@ -1,53 +1,24 @@
-# 模型文件目录
+# 模型文件
 
-此目录用于存放ONNX模型文件。
+服务运行时不联网下载模型。所有模型必须由运维离线放入本目录，并通过
+`models.manifest.json` 中的文件大小、SHA-256、后端、Provider 和输出契约校验。
 
-## 需要的模型文件
+已跟踪的七个 ONNX 模型：
 
-请将以下模型文件放置到此目录：
+- `faceboxesv2-640x640.onnx`：人脸检测；
+- `face_landmarker_pts5_net1.onnx`、`face_landmarker_pts5_net2.onnx`：5 点关键点；
+- `face_recognizer.onnx`：输出固定为 1024 维，协议为 `recognizer_v1_1024`；
+- `model_gray_mobilenetv2_rotcls.onnx`：方向校正；
+- `fsanet-var.onnx`、`fsanet-conv.onnx`：人脸姿态。
 
-1. **faceboxesv2-640x640.onnx** (约30MB)
-   - 人脸检测模型
-   - 基于FaceBoxes架构
+白底照另需 MODNet checkpoint。按照以下命令离线准备并校验：
 
-2. **face_landmarker_pts5_net1.onnx** (约1MB)
-   - 人脸关键点检测模型（网络1）
-   - 检测5个关键点：双眼、鼻尖、嘴角
-
-3. **face_landmarker_pts5_net2.onnx** (约1MB)
-   - 人脸关键点检测模型（网络2）
-   - 用于精细化关键点定位
-
-4. **face_recognizer.onnx** (约100MB)
-   - 人脸特征提取模型
-   - 输出512维特征向量
-
-5. **model_gray_mobilenetv2_rotcls.onnx** (约10MB)
-   - 图像旋转角度分类模型
-   - 检测0°/90°/180°/270°旋转
-
-6. **fsanet-var.onnx** (约2MB)
-   - 人脸姿态估计模型VAR
-   - 估计yaw和pitch角度
-
-7. **fsanet-conv.onnx** (约2MB)
-   - 人脸姿态估计模型CONV
-   - 用于姿态估计
-
-## 模型来源
-
-这些模型文件需要从原始FaceRegWeb项目的checkpoints目录复制。
-
-如果没有这些文件，请联系项目维护者或参考原项目获取。
-
-## 文件大小参考
-
-总计约150MB左右的模型文件。
-
-## 验证模型
-
-确保所有模型文件都已正确放置后，可以运行以下命令验证：
-
-```bash
-python -c "import os; files=['faceboxesv2-640x640.onnx','face_landmarker_pts5_net1.onnx','face_landmarker_pts5_net2.onnx','face_recognizer.onnx','model_gray_mobilenetv2_rotcls.onnx','fsanet-var.onnx','fsanet-conv.onnx']; missing=[f for f in files if not os.path.exists(f'checkpoints/{f}')]; print('缺失文件:', missing) if missing else print('所有模型文件已就绪')"
+```powershell
+python scripts/prepare_modnet.py --help
+python scripts/verify_model_manifest.py --manifest models.manifest.json
 ```
+
+`*.ckpt` 被 `.dockerignore` 排除，禁止把下载模型或客户数据打入代码镜像。生产部署应把
+已经校验的 checkpoint 以只读卷挂载到 `/app/checkpoints`。缺少必需 ONNX 时 readiness
+为 `unhealthy`；未启用或缺少可选 MODNet 时为 `degraded`，白底照接口返回
+`MODEL_UNAVAILABLE`，不会伪降级为普通裁剪。

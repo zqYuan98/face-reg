@@ -1,0 +1,37 @@
+# Isolated worktrees
+.worktrees/
+
+# Python environments and caches
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage
+**/htmlcov/
+
+# Secrets and local environment overrides
+**/.env
+**/.env.*
+!**/.env.example
+
+# Dependency and build outputs
+**/node_modules/
+**/dist/
+**/build/
+**/target/
+**/.gradle/
+**/.cxx/
+
+# Runtime and test artifacts
+**/reports/*.json
+**/reports/*.html
+**/tmp/
+**/temp/
+**/uploads/
+**/tests/fixtures/generated/*.mp4
+**/tests/fixtures/generated/*.avi
+
+# Optional downloaded portrait-matting weights
+**/checkpoints/*.ckpt
