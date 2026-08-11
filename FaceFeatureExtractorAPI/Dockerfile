@@ -4,8 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
-    FACE_ALGO_CONFIG=/app/config/algorithm.yaml \
-    TMPDIR=/app/tmp
+    FACE_ALGO_CONFIG=/app/config/algorithm.yaml
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates libgomp1 \
@@ -20,6 +19,7 @@ RUN python -m pip install --requirement requirements-cpu.txt
 
 COPY --chown=facealgo:facealgo . /app
 RUN mkdir -p /app/tmp && chown facealgo:facealgo /app/tmp
+ENV TMPDIR=/app/tmp
 
 USER facealgo
 EXPOSE 8000

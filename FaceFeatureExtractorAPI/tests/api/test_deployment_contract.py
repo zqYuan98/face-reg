@@ -20,6 +20,16 @@ def test_cpu_dockerfile_matches_python_contract_and_runs_non_root_single_worker(
     assert "allow_origins=[\"*\"]" not in dockerfile
 
 
+def test_runtime_tmpdir_is_enabled_only_after_the_directory_exists() -> None:
+    dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    create_tmpdir = dockerfile.index("RUN mkdir -p /app/tmp")
+    enable_tmpdir = dockerfile.index("TMPDIR=/app/tmp")
+    switch_to_non_root = dockerfile.index("USER facealgo")
+
+    assert create_tmpdir < enable_tmpdir < switch_to_non_root
+
+
 def test_cpu_requirements_are_exact_and_never_mix_gpu_onnxruntime() -> None:
     requirements = (PROJECT_ROOT / "requirements-cpu.txt").read_text(encoding="utf-8")
     live_lines = [
