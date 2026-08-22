@@ -1,6 +1,9 @@
 # Isolated worktrees
 .worktrees/
 
+# Local Superpowers visual-design scratch files
+.superpowers/
+
 # Python environments and caches
 **/.venv/
 **/__pycache__/
