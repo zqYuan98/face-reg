@@ -1,0 +1,9 @@
+{
+  "name": "face-algorithm-visual-console",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:unit": "node --test tests/core.test.mjs"
+  }
+}

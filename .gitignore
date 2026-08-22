@@ -28,6 +28,8 @@
 **/.cxx/
 
 # Runtime and test artifacts
+**/.playwright-cli/
+**/output/playwright/
 **/reports/*.json
 **/reports/*.html
 **/tmp/

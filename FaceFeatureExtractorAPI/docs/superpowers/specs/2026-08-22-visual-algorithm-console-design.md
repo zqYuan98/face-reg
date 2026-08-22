@@ -71,21 +71,18 @@ FaceFeatureExtractorAPI/tools/visual-console/
 ├── server.py
 ├── Dockerfile
 ├── .dockerignore
-├── package.json        # 仅含开发期浏览器测试依赖
-├── playwright.config.mjs
+├── package.json        # 仅声明 ESM 和 Node 内置测试命令
 ├── README.md
 └── tests/
     ├── test_server.py
-    ├── core.test.mjs
-    ├── mock_upstream.py
-    └── console.spec.mjs
+    └── core.test.mjs
 ```
 
 - `index.html`、`styles.css`、`app.js`：无框架、无 CDN、无第三方遥测的浏览器界面；
 - `core.js`：原因码翻译、状态推导、输入规格和响应格式化等纯函数；
 - `server.py`：仅使用 Python 标准库，提供静态文件、精简 readiness 和受限流式代理；
 - `Dockerfile`：生成不包含模型、算法代码和密钥的最小测试台镜像；
-- `package.json` 和 Playwright 文件只用于开发期端到端测试，不进入运行镜像；
+- `package.json` 只用于 Node 内置单元测试，不含运行依赖，也不进入运行镜像；
 - 测试台不得 import `face_algorithm` 或 `api`，只依赖公开 HTTP v2 契约。
 
 测试台文件不加入 Python wheel，避免成为算法库的运行依赖。
@@ -123,8 +120,9 @@ face-algorithm <server-37>:18002
 | 视频快检 | `/api/v2/verify/video/quick` | `reference_image`, `video` | 60 秒 |
 | 视频全检 | `/api/v2/verify/video/full` | `reference_image`, `video` | 600 秒 |
 
-浏览器把原始 `File` 直接加入 `FormData`，不手工设置 multipart `Content-Type`，保证
-boundary 原样生成。代理保留 `Content-Type` 和 `Content-Length`，以固定大小块把请求体
+浏览器把原始 `File` 加入 `FormData`，但将 multipart filename 固定改为无敏感信息的
+安全文件名；不手工设置 multipart `Content-Type`，保证 boundary 原样生成。代理保留
+`Content-Type` 和 `Content-Length`，以固定大小块把请求体
 发给上游；响应也分块写回浏览器，不把 500 MiB 视频或约 20 MiB Base64 JSON 整体复制
 到代理内存。
 
@@ -195,6 +193,7 @@ URL 调用 `URL.revokeObjectURL()`。用户主动点击下载是唯一持久化�
 ### 同源代理
 
 允许的服务端路径只有：静态 `/`、`/index.html`、`/styles.css`、`/core.js`、`/app.js`，
+以及返回 `204` 的 `/favicon.ico`，
 测试台自身 `GET /health/live`，`GET /api/console/session`，精简
 `GET /api/console/ready`，以及五条精确的 v2 POST。全部拒绝查询参数；不代理 legacy
 `/api/extract_feature`、`/api/detect_face` 或任意 URL。
@@ -255,10 +254,10 @@ Node 内置测试覆盖 `core.js`：
 - 原因码翻译、未知字段和恶意字符串按纯文本处理。
 
 `core.js` 是浏览器和 Node 共用的 ESM；`package.json` 声明 `type=module`。固定命令
-`npm run test:unit` 执行 Node 内置测试，`npm run test:e2e` 启动
-`tests/mock_upstream.py` 和测试台后执行 Playwright。浏览器自动化验证五种表单切换、
-拖放/选择、运行态、结果面板、派生图 Object URL 回收、全检提示和手机/桌面布局。
-Playwright 只属于开发测试依赖，不进入 Docker 运行镜像。
+`npm run test:unit` 执行 Node 内置测试。浏览器验收使用临时下载的 `playwright-cli`
+直接驱动真实页面，不向仓库增加 Playwright 运行依赖；验证五种表单切换、文件选择、
+运行态、真实算法结果、派生图、全检提示和手机/桌面布局。截图与会话文件仅写入已忽略的
+`.playwright-cli/` 和 `output/playwright/`，不进入 Git 或 Docker 运行镜像。
 
 ### 真实算法冒烟
 

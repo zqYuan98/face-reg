@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#153c31">
+    <meta name="description" content="模块化人脸算法服务的内网可视化验收工作台">
+    <title>人脸算法可视化测试台</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#console-workspace">跳到测试工作区</a>
+
+    <header class="topbar">
+      <div class="topbar__inner">
+        <div class="brand" aria-label="人脸算法可视化测试台">
+          <span class="brand__mark" aria-hidden="true">
+            <span>FA</span>
+          </span>
+          <span class="brand__copy">
+            <span class="brand__eyebrow">FACE ALGORITHM / LAB CONSOLE</span>
+            <span class="brand__title">人脸算法可视化测试台</span>
+          </span>
+        </div>
+
+        <section class="service-strip" aria-label="算法服务健康状态">
+          <div
+            id="service-status"
+            class="service-status"
+            data-state="checking"
+            role="status"
+            aria-live="polite"
+          >
+            <span class="service-status__signal" aria-hidden="true"></span>
+            <span>
+              <span class="service-status__label">服务状态</span>
+              <strong id="service-status-label">正在检测</strong>
+            </span>
+          </div>
+
+          <dl class="service-facts">
+            <div class="service-fact service-fact--endpoint">
+              <dt>算法服务</dt>
+              <dd><code id="algorithm-endpoint"><server-37>:18002</code></dd>
+            </div>
+            <div class="service-fact">
+              <dt>模型就绪</dt>
+              <dd id="ready-model-count">— / —</dd>
+            </div>
+            <div class="service-fact">
+              <dt>能力就绪</dt>
+              <dd id="ready-capability-count">— / 5</dd>
+            </div>
+            <div class="service-fact service-fact--time">
+              <dt>最近检查</dt>
+              <dd><time id="readiness-checked-at">尚未检查</time></dd>
+            </div>
+          </dl>
+
+          <button
+            id="refresh-readiness"
+            class="icon-button"
+            type="button"
+            aria-label="重新检查算法服务状态"
+            title="重新检查"
+          >
+            <span class="refresh-glyph" aria-hidden="true"></span>
+          </button>
+        </section>
+      </div>
+    </header>
+
+    <main id="console-workspace" class="console-workspace">
+      <aside class="capability-rail" aria-labelledby="capability-heading">
+        <div class="rail-heading">
+          <p class="section-kicker"><span>01</span> 能力目录</p>
+          <h2 id="capability-heading">选择测试任务</h2>
+          <p>每次只运行一项能力，避免高耗时任务互相干扰。</p>
+        </div>
+
+        <nav class="capability-list" aria-label="算法能力">
+          <button
+            id="capability-portrait"
+            class="capability-button"
+            type="button"
+            data-capability="portrait"
+            data-readiness-key="portrait"
+            data-endpoint="/api/v2/portrait/generate"
+            data-input-mode="single-image"
+            aria-current="false"
+            aria-controls="input-panel"
+          >
+            <span class="capability-button__index" aria-hidden="true">01</span>
+            <span class="capability-button__copy">
+              <strong>白底头肩照</strong>
+              <small>单图 · 标准证照生成</small>
+            </span>
+            <span class="capability-state" data-capability-status data-state="checking">
+              <span class="capability-state__dot" aria-hidden="true"></span>
+              <span data-capability-status-label>检测中</span>
+            </span>
+          </button>
+
+          <button
+            id="capability-witness"
+            class="capability-button"
+            type="button"
+            data-capability="witness_blur"
+            data-readiness-key="witness_blur"
+            data-endpoint="/api/v2/witness/blur-background"
+            data-input-mode="single-image"
+            aria-current="false"
+            aria-controls="input-panel"
+          >
+            <span class="capability-button__index" aria-hidden="true">02</span>
+            <span class="capability-button__copy">
+              <strong>见证照虚化</strong>
+              <small>单图 · 人物与证卡保护</small>
+            </span>
+            <span class="capability-state" data-capability-status data-state="checking">
+              <span class="capability-state__dot" aria-hidden="true"></span>
+              <span data-capability-status-label>检测中</span>
+            </span>
+          </button>
+
+          <button
+            id="capability-images"
+            class="capability-button is-active"
+            type="button"
+            data-capability="image_verification"
+            data-readiness-key="image_verification"
+            data-endpoint="/api/v2/verify/images"
+            data-input-mode="image-pair"
+            aria-current="page"
+            aria-controls="input-panel"
+          >
+            <span class="capability-button__index" aria-hidden="true">03</span>
+            <span class="capability-button__copy">
+              <strong>两图身份比对</strong>
+              <small>双图 · 1024 维特征契约</small>
+            </span>
+            <span class="capability-state" data-capability-status data-state="checking">
+              <span class="capability-state__dot" aria-hidden="true"></span>
+              <span data-capability-status-label>检测中</span>
+            </span>
+          </button>
+
+          <button
+            id="capability-video-quick"
+            class="capability-button"
+            type="button"
+            data-capability="video_quick"
+            data-readiness-key="video_verification"
+            data-endpoint="/api/v2/verify/video/quick"
+            data-input-mode="image-video"
+            aria-current="false"
+            aria-controls="input-panel"
+          >
+            <span class="capability-button__index" aria-hidden="true">04</span>
+            <span class="capability-button__copy">
+              <strong>视频快速核验</strong>
+              <small>参考照 + 视频 · 12 帧抽样</small>
+            </span>
+            <span class="capability-state" data-capability-status data-state="checking">
+              <span class="capability-state__dot" aria-hidden="true"></span>
+              <span data-capability-status-label>检测中</span>
+            </span>
+          </button>
+
+          <button
+            id="capability-video-full"
+            class="capability-button"
+            type="button"
+            data-capability="video_full"
+            data-readiness-key="video_verification"
+            data-endpoint="/api/v2/verify/video/full"
+            data-input-mode="image-video"
+            aria-current="false"
+            aria-controls="input-panel"
+          >
+            <span class="capability-button__index" aria-hidden="true">05</span>
+            <span class="capability-button__copy">
+              <strong>视频完整核验</strong>
+              <small>参考照 + 视频 · 高耗时手工测试</small>
+            </span>
+            <span class="capability-state" data-capability-status data-state="checking">
+              <span class="capability-state__dot" aria-hidden="true"></span>
+              <span data-capability-status-label>检测中</span>
+            </span>
+          </button>
+        </nav>
+
+        <div class="rail-legend" aria-label="能力状态说明">
+          <span><i class="legend-dot legend-dot--ready" aria-hidden="true"></i>可测试</span>
+          <span><i class="legend-dot legend-dot--off" aria-hidden="true"></i>暂不可用</span>
+        </div>
+      </aside>
+
+      <section id="input-panel" class="workbench-panel" aria-labelledby="active-capability-title">
+        <header class="panel-heading">
+          <div>
+            <p id="workspace-eyebrow" class="section-kicker section-kicker--ink">
+              <span>02</span> IMAGE VERIFICATION
+            </p>
+            <h1 id="active-capability-title">图片身份比对</h1>
+            <p id="active-capability-description">
+              上传参考照片和待核验照片，查看相似度、质检结果与算法建议。
+            </p>
+          </div>
+          <div class="endpoint-tag" aria-label="当前接口">
+            <span>POST</span>
+            <code id="active-endpoint">/api/v2/verify/images</code>
+          </div>
+        </header>
+
+        <form id="algorithm-form" class="algorithm-form" novalidate>
+          <div
+            id="input-fields"
+            class="input-fields"
+            aria-live="polite"
+            aria-busy="false"
+          >
+            <div class="input-empty-state" data-input-placeholder>
+              <span class="input-empty-state__seal" aria-hidden="true">LAB</span>
+              <p>正在准备输入规格…</p>
+            </div>
+          </div>
+
+          <div id="input-guidance" class="input-guidance">
+            <div>
+              <span class="guidance-label">文件规格</span>
+              <p id="input-requirements">JPEG / PNG · 不超过 15 MiB · 不超过 25 MP</p>
+            </div>
+            <div>
+              <span class="guidance-label">算法截止</span>
+              <p id="input-deadline">75 秒截止</p>
+            </div>
+          </div>
+
+          <p id="form-error" class="form-error" role="alert" hidden></p>
+
+          <div class="action-bar">
+            <div
+              id="request-status"
+              class="request-status"
+              role="status"
+              aria-live="polite"
+            >
+              <span id="request-progress" class="request-spinner" aria-hidden="true" hidden></span>
+              <span id="request-status-text">选择素材后即可运行</span>
+            </div>
+            <div class="action-bar__buttons">
+              <button id="reset-button" class="button button--quiet" type="reset">重置</button>
+              <button id="run-button" class="button button--primary" type="submit" disabled>
+                <span class="button-label">开始图片比对</span>
+                <span class="button__arrow" aria-hidden="true">→</span>
+              </button>
+            </div>
+          </div>
+        </form>
+
+        <aside id="privacy-note" class="privacy-note" aria-labelledby="privacy-note-title">
+          <span class="privacy-note__lock" aria-hidden="true"></span>
+          <div>
+            <h2 id="privacy-note-title">会话内临时处理</h2>
+            <p>
+              浏览器不持久化素材；文件会发送到内网测试台和算法服务临时处理。更换素材、
+              重置、刷新或关闭页面后，浏览器预览与结果会被清空。
+            </p>
+          </div>
+        </aside>
+      </section>
+
+      <aside id="result-panel" class="result-panel" aria-labelledby="result-panel-title">
+        <header class="result-panel__heading">
+          <div>
+            <p class="section-kicker section-kicker--gold"><span>03</span> 分析结果</p>
+            <h2 id="result-panel-title">业务建议优先</h2>
+          </div>
+          <span class="result-panel__rule" aria-hidden="true"></span>
+        </header>
+
+        <div id="result-empty" class="result-empty">
+          <div class="result-empty__instrument" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <h3>等待一次算法运行</h3>
+          <p>结果会先给出业务建议，再展开分数、质量与技术明细。</p>
+          <ol class="result-order" aria-label="结果阅读顺序">
+            <li><span>1</span>业务建议</li>
+            <li><span>2</span>关键指标</li>
+            <li><span>3</span>技术明细</li>
+          </ol>
+        </div>
+
+        <div id="result-content" class="result-content" hidden>
+          <section
+            id="result-summary"
+            class="result-summary"
+            data-suggestion="REVIEW"
+            aria-labelledby="result-suggestion"
+          >
+            <div class="result-summary__topline">
+              <span id="result-status" class="result-status">算法结果</span>
+              <span id="result-duration" class="result-duration"></span>
+            </div>
+            <h3 id="result-suggestion">建议人工复核</h3>
+            <p id="result-message"></p>
+            <ul id="result-reasons" class="reason-list" aria-label="结果原因"></ul>
+          </section>
+
+          <dl id="result-metrics" class="metric-grid" aria-label="关键指标"></dl>
+
+          <figure id="derived-image-panel" class="derived-image-panel" hidden>
+            <div class="derived-image-frame">
+              <img id="derived-image" alt="算法生成的派生图片">
+            </div>
+            <figcaption>
+              <span>派生图预览</span>
+              <a id="download-result" class="button button--download" href="#" download>
+                主动下载
+              </a>
+            </figcaption>
+          </figure>
+
+          <div class="result-meta">
+            <span>TRACE</span>
+            <code id="result-trace-id">—</code>
+          </div>
+
+          <details id="raw-json-details" class="raw-json-panel">
+            <summary>
+              <span>原始 JSON</span>
+              <small>开发排查</small>
+            </summary>
+            <pre id="raw-json" tabindex="0" aria-label="原始 JSON 响应"></pre>
+          </details>
+        </div>
+      </aside>
+    </main>
+
+    <template id="upload-field-template">
+      <article class="upload-field" data-upload-field>
+        <header class="upload-field__heading">
+          <div>
+            <span class="upload-field__index" data-field-index aria-hidden="true"></span>
+            <h3 data-field-title></h3>
+          </div>
+          <span class="upload-field__requirement" data-field-requirement></span>
+        </header>
+        <label class="drop-zone" data-drop-zone>
+          <input class="file-input" type="file" data-file-input>
+          <span class="drop-zone__glyph" aria-hidden="true"></span>
+          <strong data-drop-title>拖放文件到这里</strong>
+          <span>或按 Enter / 空格选择本地文件</span>
+        </label>
+        <div class="file-selection" data-file-selection hidden>
+          <div class="file-preview" data-file-preview></div>
+          <div class="file-selection__copy">
+            <strong data-file-name></strong>
+            <span data-file-meta></span>
+          </div>
+          <button class="clear-file-button" type="button" data-clear-file>移除</button>
+        </div>
+        <p class="field-error" data-field-error role="alert" hidden></p>
+      </article>
+    </template>
+
+    <div
+      id="notification-region"
+      class="notification-region"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    ></div>
+
+    <noscript>
+      <div class="noscript-banner">此测试台需要启用 JavaScript 才能上传素材并运行算法。</div>
+    </noscript>
+  </body>
+</html>
