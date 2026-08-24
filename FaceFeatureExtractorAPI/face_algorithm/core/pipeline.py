@@ -301,7 +301,7 @@ class FacePipeline:
                 suggestion=Suggestion.REVIEW,
                 completed=False,
             )
-        if selected.landmarks is not None:
+        if selected.landmark_output_received:
             steps.append("landmarks")
         if selected.reason_code is not None:
             if (

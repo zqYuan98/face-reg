@@ -627,14 +627,15 @@ class RaisingLandmarker:
 
 
 @pytest.mark.parametrize(
-    "landmarker",
+    ("landmarker", "landmark_step_completed"),
     [
-        RaisingLandmarker(),
-        FakeLandmarker(np.zeros((4, 2), dtype=np.float32)),
+        (RaisingLandmarker(), False),
+        (FakeLandmarker(np.zeros((4, 2), dtype=np.float32)), True),
     ],
 )
 def test_exact_one_landmark_system_failure_preserves_detected_face_box(
     landmarker,
+    landmark_step_completed: bool,
 ) -> None:
     result = _pipeline(landmarker=landmarker).analyze_public(
         _textured_image(),
@@ -646,6 +647,35 @@ def test_exact_one_landmark_system_failure_preserves_detected_face_box(
     assert result.reason_codes == (ReasonCode.INFERENCE_ERROR,)
     assert result.box == GOOD_BOX
     assert result.landmarks is None
+    assert ("landmarks" in result.processing_steps) is landmark_step_completed
+
+
+@pytest.mark.parametrize(
+    "secondary",
+    [
+        FaceBox(
+            x1=-300.0,
+            y1=50.0,
+            x2=-250.0,
+            y2=100.0,
+            confidence=0.99,
+        ),
+        SimpleNamespace(x1="malformed"),
+    ],
+)
+def test_pipeline_exact_one_uses_raw_candidate_count_before_landmarks(
+    secondary: object,
+) -> None:
+    landmarker = FakeLandmarker()
+
+    result = _pipeline(
+        detector=FakeDetector([GOOD_BOX, secondary]),
+        landmarker=landmarker,
+    ).analyze_public(_textured_image(), _profile())
+
+    assert result.reason_codes == (ReasonCode.MULTIPLE_FACES,)
+    assert result.suggestion is Suggestion.RECAPTURE
+    assert landmarker.calls == 0
 
 
 class RaisingAligner:

@@ -28,6 +28,7 @@ class FaceCandidateBatch(Sequence[FaceBox]):
     """Bounded detector output plus a fail-closed truncation marker."""
 
     candidates: tuple[FaceBox, ...]
+    raw_candidate_count: int
     saturated: bool = False
 
     def __post_init__(self) -> None:
@@ -37,6 +38,15 @@ class FaceCandidateBatch(Sequence[FaceBox]):
             raise TypeError("candidates must be a tuple of FaceBox values")
         if not isinstance(self.saturated, bool):
             raise TypeError("saturated must be boolean")
+        if (
+            isinstance(self.raw_candidate_count, bool)
+            or not isinstance(self.raw_candidate_count, int)
+        ):
+            raise TypeError("raw_candidate_count must be an integer")
+        if self.raw_candidate_count < len(self.candidates):
+            raise ValueError(
+                "raw_candidate_count cannot be below the filtered candidate count"
+            )
 
     def __len__(self) -> int:
         return len(self.candidates)
@@ -74,6 +84,7 @@ class FaceSelectionPreparation:
     reason_code: ReasonCode | None
     selection: Any = field(repr=False, compare=False)
     geometry: Any = field(repr=False, compare=False)
+    landmark_output_received: bool = False
 
     @property
     def raw_box(self) -> FaceBox | None:
@@ -107,6 +118,7 @@ class FaceSelectionResult:
     reason_code: ReasonCode | None
     candidate_count: int
     saturated: bool
+    landmark_output_received: bool = False
     secondary_area_ratio: float | None = None
 
     @property
@@ -156,7 +168,20 @@ class FaceCandidateSelector:
         geometry: Any,
     ) -> FaceSelectionPreparation:
         mode = getattr(selection, "mode", None)
-        raw_candidate_count = _safe_candidate_count(candidates)
+        try:
+            raw_candidate_count = _raw_candidate_count(candidates)
+        except (TypeError, ValueError):
+            return _early_preparation(
+                mode=(
+                    mode
+                    if mode in ("exact_one", "dominant_primary")
+                    else "exact_one"
+                ),
+                candidate_count=_safe_candidate_count(candidates),
+                reason_code=ReasonCode.INFERENCE_ERROR,
+                selection=selection,
+                geometry=geometry,
+            )
         if mode not in ("exact_one", "dominant_primary"):
             return _early_preparation(
                 mode="exact_one",
@@ -183,6 +208,15 @@ class FaceCandidateSelector:
                 selection=selection,
                 geometry=geometry,
             )
+        if mode == "exact_one" and raw_candidate_count >= 2:
+            return _early_preparation(
+                mode=mode,
+                candidate_count=raw_candidate_count,
+                reason_code=ReasonCode.MULTIPLE_FACES,
+                selection=selection,
+                geometry=geometry,
+                saturated=provider_saturated,
+            )
         try:
             normalized = _normalize_candidates(image.shape, candidates)
         except (AttributeError, TypeError, ValueError):
@@ -203,15 +237,6 @@ class FaceCandidateSelector:
                 selection=selection,
                 geometry=geometry,
                 saturated=True,
-            )
-
-        if mode == "exact_one" and candidate_count >= 2:
-            return _early_preparation(
-                mode=mode,
-                candidate_count=candidate_count,
-                reason_code=ReasonCode.MULTIPLE_FACES,
-                selection=selection,
-                geometry=geometry,
             )
 
         if mode == "dominant_primary":
@@ -258,12 +283,16 @@ class FaceCandidateSelector:
 
         assessments: list[_LandmarkAssessment | None] = [None] * len(normalized)
         primary_index: int | None = None
+        landmark_output_received = False
         for index, candidate in enumerate(normalized):
-            assessment, error = _assess_landmarks(
+            assessment, error, output_received = _assess_landmarks(
                 image,
                 candidate.box,
                 landmarker,
                 geometry,
+            )
+            landmark_output_received = (
+                landmark_output_received or output_received
             )
             if error is not None:
                 return FaceSelectionPreparation(
@@ -276,6 +305,7 @@ class FaceCandidateSelector:
                     reason_code=error,
                     selection=selection,
                     geometry=geometry,
+                    landmark_output_received=landmark_output_received,
                 )
             assert assessment is not None
             assessments[index] = assessment
@@ -293,6 +323,7 @@ class FaceCandidateSelector:
                     reason_code=ReasonCode.LANDMARK_FAILED,
                     selection=selection,
                     geometry=geometry,
+                    landmark_output_received=landmark_output_received,
                 )
 
         if primary_index is None:
@@ -306,6 +337,7 @@ class FaceCandidateSelector:
                 reason_code=ReasonCode.LANDMARK_FAILED,
                 selection=selection,
                 geometry=geometry,
+                landmark_output_received=landmark_output_received,
             )
         return FaceSelectionPreparation(
             mode=mode,
@@ -317,6 +349,7 @@ class FaceCandidateSelector:
             reason_code=None,
             selection=selection,
             geometry=geometry,
+            landmark_output_received=landmark_output_received,
         )
 
     def finalize(
@@ -376,7 +409,7 @@ class FaceCandidateSelector:
 
             assessment = prepared.assessments[index]
             if assessment is None:
-                assessment, error = _assess_landmarks(
+                assessment, error, _ = _assess_landmarks(
                     image,
                     candidate.box,
                     landmarker,
@@ -418,6 +451,17 @@ def _safe_candidate_count(candidates: object) -> int:
         return len(candidates)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return -1
+
+
+def _raw_candidate_count(candidates: object) -> int:
+    marker = getattr(candidates, "raw_candidate_count", None)
+    count = _safe_candidate_count(candidates) if marker is None else marker
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise TypeError("raw candidate count must be a non-negative integer")
+    filtered_count = _safe_candidate_count(candidates)
+    if filtered_count < 0 or count < filtered_count:
+        raise ValueError("raw candidate count is below the candidate sequence length")
+    return count
 
 
 def _valid_image_shape(image: object) -> bool:
@@ -468,6 +512,7 @@ def _result_from_preparation(
         reason_code=effective_reason,
         candidate_count=prepared.candidate_count,
         saturated=prepared.saturated,
+        landmark_output_received=prepared.landmark_output_received,
         secondary_area_ratio=secondary_area_ratio,
     )
 
@@ -540,23 +585,23 @@ def _assess_landmarks(
     box: FaceBox,
     landmarker: LandmarkDetector,
     geometry: Any,
-) -> tuple[_LandmarkAssessment | None, ReasonCode | None]:
+) -> tuple[_LandmarkAssessment | None, ReasonCode | None, bool]:
     try:
         landmarks = np.asarray(
             landmarker.detect(image, box),
             dtype=np.float32,
         )
     except Exception:
-        return None, ReasonCode.INFERENCE_ERROR
+        return None, ReasonCode.INFERENCE_ERROR, False
     if landmarks.shape != (5, 2) or not np.all(np.isfinite(landmarks)):
-        return None, ReasonCode.INFERENCE_ERROR
+        return None, ReasonCode.INFERENCE_ERROR, True
     landmarks = landmarks.copy()
     landmarks.setflags(write=False)
     try:
         valid = valid_landmark_geometry(landmarks, box, geometry)
     except (AttributeError, TypeError, ValueError):
-        return None, ReasonCode.INFERENCE_ERROR
-    return _LandmarkAssessment(valid=valid, landmarks=landmarks), None
+        return None, ReasonCode.INFERENCE_ERROR, True
+    return _LandmarkAssessment(valid=valid, landmarks=landmarks), None, True
 
 
 def valid_landmark_geometry(

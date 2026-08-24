@@ -72,6 +72,7 @@ def test_face_boxes_adapter_filters_fully_outside_boxes_before_public_cap(
     assert isinstance(result, FaceCandidateBatch)
     assert len(result) == 1
     assert result[0].x1 == inside.x1
+    assert result.raw_candidate_count == 6
     assert result.saturated is False
 
 
@@ -99,6 +100,7 @@ def test_face_boxes_adapter_scans_beyond_six_before_filtering(
     assert detector.kwargs["topk"] > 6
     assert len(result) == 2
     assert [box.confidence for box in result] == [0.99, 0.80]
+    assert result.raw_candidate_count == 7
     assert result.saturated is False
 
 
@@ -117,6 +119,7 @@ def test_face_boxes_adapter_marks_unresolved_raw_scan_saturation(
     result = adapter.detect(np.zeros((100, 100, 3), dtype=np.uint8))
 
     assert len(result) == 1
+    assert result.raw_candidate_count == adapter.raw_candidate_scan_limit + 1
     assert result.saturated is True
 
 
@@ -135,6 +138,7 @@ def test_face_boxes_adapter_does_not_mark_an_exhausted_full_scan_as_saturated(
     result = adapter.detect(np.zeros((100, 100, 3), dtype=np.uint8))
 
     assert len(result) == 1
+    assert result.raw_candidate_count == adapter.raw_candidate_scan_limit
     assert result.saturated is False
 
 

@@ -183,9 +183,81 @@ def test_five_fully_outside_boxes_do_not_create_false_saturation() -> None:
     assert len(landmarker.calls) == 1
 
 
+@pytest.mark.parametrize(
+    "secondary",
+    [
+        FaceBox(
+            x1=-300.0,
+            y1=50.0,
+            x2=-250.0,
+            y2=100.0,
+            confidence=0.99,
+        ),
+        SimpleNamespace(x1="malformed"),
+    ],
+)
+def test_exact_one_uses_raw_count_before_normalization(
+    secondary: object,
+) -> None:
+    primary = _box(250, 100, 200)
+    landmarker = GeometryLandmarker()
+
+    result = FaceCandidateSelector().select(
+        IMAGE,
+        [primary, secondary],
+        landmarker,
+        EXACT,
+        GEOMETRY,
+    )
+
+    assert result.reason_code is ReasonCode.MULTIPLE_FACES
+    assert result.candidate_count == 2
+    assert landmarker.calls == []
+
+
+def test_exact_one_uses_production_batch_raw_count_before_normalization() -> None:
+    primary = _box(250, 100, 200)
+    candidates = FaceCandidateBatch(
+        (primary,),
+        raw_candidate_count=2,
+        saturated=False,
+    )
+    landmarker = GeometryLandmarker()
+
+    result = FaceCandidateSelector().select(
+        IMAGE,
+        candidates,
+        landmarker,
+        EXACT,
+        GEOMETRY,
+    )
+
+    assert result.reason_code is ReasonCode.MULTIPLE_FACES
+    assert result.candidate_count == 2
+    assert landmarker.calls == []
+
+
+@pytest.mark.parametrize("invalid_count", [True, "2", -1, 0])
+def test_candidate_batch_strictly_validates_raw_candidate_count(
+    invalid_count: object,
+) -> None:
+    primary = _box(250, 100, 200)
+
+    with pytest.raises((TypeError, ValueError)):
+        FaceCandidateBatch(
+            (primary,),
+            raw_candidate_count=invalid_count,
+            saturated=False,
+        )
+
+
 def test_provider_saturation_marker_fails_closed_after_outside_filtering() -> None:
     primary = _box(250, 100, 200)
-    candidates = FaceCandidateBatch((primary,), saturated=True)
+    candidates = FaceCandidateBatch(
+        (primary,),
+        raw_candidate_count=65,
+        saturated=True,
+    )
     landmarker = GeometryLandmarker()
 
     result = FaceCandidateSelector().select(

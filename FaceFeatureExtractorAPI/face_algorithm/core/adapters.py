@@ -214,6 +214,7 @@ class FaceBoxesAdapter:
             topk=self.raw_candidate_scan_limit + 1,
         )
         raw_boxes = [] if boxes is None else list(boxes)
+        observed_raw_candidate_count = len(raw_boxes)
         raw_scan_saturated = len(raw_boxes) > self.raw_candidate_scan_limit
         raw_boxes = raw_boxes[: self.raw_candidate_scan_limit]
         result: list[FaceBox] = []
@@ -252,6 +253,7 @@ class FaceBoxesAdapter:
                 )
         return FaceCandidateBatch(
             candidates=tuple(result),
+            raw_candidate_count=observed_raw_candidate_count,
             saturated=(
                 raw_scan_saturated
                 or valid_intersection_count > self.max_faces_to_detect
