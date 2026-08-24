@@ -12,6 +12,10 @@ from face_algorithm.portrait.contracts import (
     PortraitMattingQuality,
     PortraitPlacement,
 )
+from face_algorithm.portrait.subject_validator import (
+    PortraitSubjectValidationError,
+    validate_portrait_subject,
+)
 from face_algorithm.schemas import FaceBox, FaceLandmarks, ReasonCode
 
 __all__: list[str] = []
@@ -101,11 +105,16 @@ def _select_subject_matte(
     if subject_area_ratio < float(template.min_subject_area_ratio):
         raise _PortraitGenerationError(ReasonCode.MATTING_LOW_CONFIDENCE)
 
+    try:
+        subject_validation = validate_portrait_subject(core, face, template)
+    except PortraitSubjectValidationError as error:
+        raise _PortraitGenerationError(error.reason_code) from error
+
     soft = np.asarray(
         matte >= float(template.edge_alpha_threshold),
         dtype=np.uint8,
     )
-    soft_count, soft_labels, soft_stats, _ = cv2.connectedComponentsWithStats(
+    soft_count, soft_labels, _soft_stats, _ = cv2.connectedComponentsWithStats(
         soft,
         connectivity=8,
     )
@@ -118,17 +127,16 @@ def _select_subject_matte(
     if label_counts[soft_label] <= 0:
         raise _PortraitGenerationError(ReasonCode.MATTING_LOW_CONFIDENCE)
     soft_component = np.asarray(soft_labels == soft_label, dtype=np.uint8)
-    x = int(soft_stats[soft_label, cv2.CC_STAT_LEFT])
-    y = int(soft_stats[soft_label, cv2.CC_STAT_TOP])
-    component_width = int(soft_stats[soft_label, cv2.CC_STAT_WIDTH])
-    component_height = int(soft_stats[soft_label, cv2.CC_STAT_HEIGHT])
-    bounds = (x, y, x + component_width, y + component_height)
-
-    margin_x = int(np.ceil(width * float(template.source_edge_margin_ratio)))
-    margin_y = int(np.ceil(height * float(template.source_edge_margin_ratio)))
-    x1, y1, x2, _y2 = bounds
-    if x1 <= margin_x or y1 <= margin_y or x2 >= width - margin_x:
-        raise _PortraitGenerationError(ReasonCode.SUBJECT_CROPPED)
+    core_x = int(stats[best_label, cv2.CC_STAT_LEFT])
+    core_y = int(stats[best_label, cv2.CC_STAT_TOP])
+    core_width = int(stats[best_label, cv2.CC_STAT_WIDTH])
+    core_height = int(stats[best_label, cv2.CC_STAT_HEIGHT])
+    bounds = (
+        core_x,
+        subject_validation.robust_core_top,
+        core_x + core_width,
+        core_y + core_height,
+    )
 
     radius = int(template.feather_radius_pixels)
     closed = core
@@ -193,36 +201,12 @@ def _select_subject_matte(
     ):
         raise _PortraitGenerationError(ReasonCode.MATTING_LOW_CONFIDENCE)
 
-    shoulder_depth_ratio = max(0.0, (float(bounds[3]) - face.y2) / face.height)
-    if shoulder_depth_ratio < float(template.min_shoulder_depth_ratio):
-        raise _PortraitGenerationError(ReasonCode.SHOULDERS_NOT_VISIBLE)
-    shoulder_y1 = max(0, min(height, int(np.floor(face.y2))))
-    shoulder_y2 = max(
-        0,
-        min(
-            height,
-            int(
-                np.ceil(
-                    face.y2
-                    + float(template.min_shoulder_depth_ratio) * face.height
-                )
-            ),
-        ),
-    )
-    if shoulder_y2 <= shoulder_y1:
-        raise _PortraitGenerationError(ReasonCode.SHOULDERS_NOT_VISIBLE)
-    shoulder_band = core[shoulder_y1:shoulder_y2, face_x]
-    shoulder_band_coverage = float(np.count_nonzero(shoulder_band)) / float(
-        shoulder_band.size
-    )
-    if shoulder_band_coverage < float(template.min_shoulder_band_coverage):
-        raise _PortraitGenerationError(ReasonCode.SHOULDERS_NOT_VISIBLE)
     quality = PortraitMattingQuality(
         face_mean=face_mean,
         face_coverage=face_coverage,
         subject_area_ratio=subject_area_ratio,
-        shoulder_depth_ratio=shoulder_depth_ratio,
-        shoulder_band_coverage=shoulder_band_coverage,
+        shoulder_depth_ratio=subject_validation.shoulder_depth_ratio,
+        shoulder_band_coverage=subject_validation.shoulder_band_coverage,
     )
     return cleaned, quality, bounds
 

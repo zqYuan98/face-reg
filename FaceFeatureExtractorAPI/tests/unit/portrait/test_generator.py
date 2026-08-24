@@ -235,22 +235,20 @@ def test_small_internal_matting_hole_is_repaired_without_a_white_pinpoint() -> N
     )
 
 
-@pytest.mark.parametrize("edge", ["top", "left", "right"])
-def test_source_subject_touching_top_left_or_right_requests_recapture(edge: str) -> None:
+@pytest.mark.parametrize("edge", ["left", "right"])
+def test_clothing_touching_side_is_allowed(edge: str) -> None:
     alpha = _alpha()
-    if edge == "top":
-        alpha[0:52, 80:400] = 1.0
-    elif edge == "left":
+    if edge == "left":
         alpha[52:640, 0:80] = 1.0
     else:
         alpha[52:640, 400:480] = 1.0
 
     result = _runtime(alpha=alpha).generate(_image())
 
-    assert result.success is False
-    assert result.suggestion is Suggestion.RECAPTURE
-    assert result.reason_codes == (ReasonCode.SUBJECT_CROPPED,)
-    assert result.image is None
+    assert result.success is True
+    assert result.suggestion is Suggestion.PASS
+    assert result.reason_codes == ()
+    assert result.image is not None
 
 
 def test_source_subject_touching_only_bottom_is_allowed_for_torso_continuation() -> None:
@@ -283,12 +281,51 @@ def test_one_pixel_tail_cannot_satisfy_the_shoulder_visibility_contract() -> Non
     assert result.image is None
 
 
-def test_connected_soft_subject_touching_side_requests_recapture() -> None:
+def test_connected_soft_subject_tail_touching_side_is_allowed() -> None:
     alpha = _alpha()
     alpha[300:303, 0:80] = 0.49
 
     result = _runtime(alpha=alpha).generate(_image())
 
+    assert result.success is True
+    assert result.suggestion is Suggestion.PASS
+    assert result.reason_codes == ()
+    assert result.image is not None
+
+
+def test_sparse_hard_tail_touching_top_does_not_change_placement_geometry() -> None:
+    alpha = _alpha()
+    alpha[0:52, 239:240] = 1.0
+
+    result = _runtime(alpha=alpha).generate(_image())
+
+    assert result.success is True
+    assert result.reason_codes == ()
+    assert result.image is not None
+
+
+def test_true_head_top_crop_requests_recapture() -> None:
+    face = FaceBox(
+        x1=150.0,
+        y1=5.0,
+        x2=330.0,
+        y2=210.0,
+        confidence=0.99,
+    )
+    analysis = FaceQualityAnalysis(
+        public=_public_analysis(box=face),
+        corrected_image=_image(),
+        aligned_face=np.zeros((256, 256, 3), dtype=np.uint8),
+    )
+    alpha = np.zeros((640, 480), dtype=np.float32)
+    alpha[:, 80:400] = 1.0
+
+    result = _runtime(
+        alpha=alpha,
+        face_pipeline=FakeFacePipeline(analysis),
+    ).generate(_image())
+
+    assert result.success is False
     assert result.suggestion is Suggestion.RECAPTURE
     assert result.reason_codes == (ReasonCode.SUBJECT_CROPPED,)
     assert result.image is None
@@ -322,15 +359,15 @@ def test_subject_area_below_configured_minimum_requests_recapture() -> None:
     assert result.suggestion is Suggestion.RECAPTURE
 
 
-def test_max_upscale_ratio_is_inclusive_and_larger_scale_is_rejected() -> None:
-    exact_height = 307.2 / 1.5
+def test_required_face_height_is_checked_before_matting() -> None:
+    required_height = 205.0
     scale_alpha = np.zeros((640, 480), dtype=np.float32)
     scale_alpha[120:540, 150:330] = 1.0
     exact_face = FaceBox(
         x1=180.0,
         y1=180.0,
         x2=300.0,
-        y2=180.0 + exact_height,
+        y2=180.0 + required_height,
         confidence=0.99,
     )
     exact_analysis = FaceQualityAnalysis(
@@ -338,29 +375,35 @@ def test_max_upscale_ratio_is_inclusive_and_larger_scale_is_rejected() -> None:
         corrected_image=_image(),
         aligned_face=np.zeros((256, 256, 3), dtype=np.uint8),
     )
+    accepted_matting = FakeMatting(scale_alpha)
     accepted = _runtime(
         alpha=scale_alpha,
         face_pipeline=FakeFacePipeline(exact_analysis),
+        matting=accepted_matting,
     ).generate(_image())
 
     too_small_face = exact_face.model_copy(
-        update={"y2": 180.0 + exact_height - 0.01}
+        update={"y2": 180.0 + required_height - 0.01}
     )
     rejected_analysis = FaceQualityAnalysis(
         public=_public_analysis(box=too_small_face),
         corrected_image=_image(),
         aligned_face=np.zeros((256, 256, 3), dtype=np.uint8),
     )
+    rejected_matting = FakeMatting(scale_alpha)
     rejected = _runtime(
         alpha=scale_alpha,
         face_pipeline=FakeFacePipeline(rejected_analysis),
+        matting=rejected_matting,
     ).generate(_image())
 
     assert accepted.success is True
     assert accepted.placement is not None
-    assert accepted.placement.scale == pytest.approx(1.5)
+    assert accepted.placement.scale <= 1.5
+    assert accepted_matting.calls == 1
     assert rejected.suggestion is Suggestion.RECAPTURE
-    assert rejected.reason_codes == (ReasonCode.PORTRAIT_GEOMETRY_INVALID,)
+    assert rejected.reason_codes == (ReasonCode.FACE_TOO_SMALL,)
+    assert rejected_matting.calls == 0
 
 
 def test_template_top_margin_is_checked_after_placement() -> None:

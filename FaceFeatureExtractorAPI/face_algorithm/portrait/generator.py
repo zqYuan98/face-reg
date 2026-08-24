@@ -188,6 +188,26 @@ class PortraitGeneratorRuntime:
                 reasons=(ReasonCode.INFERENCE_ERROR,),
             )
 
+        required_face_height = int(
+            np.ceil(
+                float(self._template.output_height)
+                * float(self._template.face_height_ratio)
+                / float(self._template.max_upscale_ratio)
+            )
+        )
+        minimum_face_width = float(self._profile.resolution.width)
+        minimum_face_height = float(
+            max(self._profile.resolution.height, required_face_height)
+        )
+        if (
+            analysis.public.box.width < minimum_face_width
+            or analysis.public.box.height < minimum_face_height
+        ):
+            return finish(
+                suggestion=Suggestion.RECAPTURE,
+                reasons=(ReasonCode.FACE_TOO_SMALL,),
+            )
+
         try:
             matte = self._matte(corrected)
             if not (
