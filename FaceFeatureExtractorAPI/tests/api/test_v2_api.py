@@ -277,6 +277,64 @@ def test_witness_route_returns_only_encoded_blurred_image_and_safe_summary(
     _assert_no_private_payload(body)
 
 
+def test_witness_encoding_uses_bounded_quality_ladder(
+    algorithm_config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class WitnessServices(FakeServices):
+        def blur_witness_background(self, image, *, deadline_monotonic):
+            return witness_result(np.full_like(image, 96))
+
+    config = config_with(algorithm_config, max_image_bytes=1024)
+    upload = _image_file("witness.jpg")
+    qualities: list[int] = []
+
+    def sized_encode(_extension, _image, parameters):
+        quality = int(parameters[1])
+        qualities.append(quality)
+        size = 1025 if quality > 84 else 1000
+        return True, np.zeros(size, dtype=np.uint8)
+
+    monkeypatch.setattr("api.serialization.cv2.imencode", sized_encode)
+    with _client(config, WitnessServices()) as client:
+        response = client.post(
+            "/api/v2/witness/blur-background",
+            files={"image": upload},
+        )
+
+    assert response.status_code == 200
+    assert qualities == [92, 88, 84]
+    assert len(base64.b64decode(response.json()["image_base64"], validate=True)) == 1000
+
+
+def test_witness_encoding_exhaustion_is_http_413_not_contract_500(
+    algorithm_config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class WitnessServices(FakeServices):
+        def blur_witness_background(self, image, *, deadline_monotonic):
+            return witness_result(np.full_like(image, 96))
+
+    config = config_with(algorithm_config, max_image_bytes=1024)
+    upload = _image_file("witness.jpg")
+    qualities: list[int] = []
+
+    def oversized_encode(_extension, _image, parameters):
+        qualities.append(int(parameters[1]))
+        return True, np.zeros(1025, dtype=np.uint8)
+
+    monkeypatch.setattr("api.serialization.cv2.imencode", oversized_encode)
+    with _client(config, WitnessServices()) as client:
+        response = client.post(
+            "/api/v2/witness/blur-background",
+            files={"image": upload},
+        )
+
+    assert response.status_code == 413
+    assert response.json()["reason_codes"] == ["IMAGE_TOO_LARGE"]
+    assert qualities == [92, 88, 84, 80, 76]
+
+
 def test_witness_pixel_limit_is_rejected_from_header_before_decode_or_adapter(
     algorithm_config,
     monkeypatch: pytest.MonkeyPatch,

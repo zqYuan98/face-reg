@@ -25,6 +25,8 @@ from face_algorithm.schemas import (
 
 from .errors import ApiError
 
+_WITNESS_JPEG_QUALITY_STEPS = (92, 88, 84, 80, 76)
+
 
 def _contract_error() -> ApiError:
     return ApiError(
@@ -161,14 +163,52 @@ def derived_image_payload(
     if output_format == "png":
         extension = ".png"
         parameters: list[int] = []
+        ok, encoded = cv2.imencode(extension, image, parameters)
+        if not ok:
+            raise ApiError(
+                500,
+                ReasonCode.INFERENCE_ERROR,
+                "derived image encoding failed",
+            )
+        if encoded.size > max_encoded_bytes:
+            raise _contract_error()
+    elif kind == "witness":
+        extension = ".jpg"
+        encoded = None
+        for quality in _WITNESS_JPEG_QUALITY_STEPS:
+            ok, candidate = cv2.imencode(
+                extension,
+                image,
+                [cv2.IMWRITE_JPEG_QUALITY, quality],
+            )
+            if not ok:
+                raise ApiError(
+                    500,
+                    ReasonCode.INFERENCE_ERROR,
+                    "derived image encoding failed",
+                )
+            if candidate.size <= max_encoded_bytes:
+                encoded = candidate
+                break
+            del candidate
+        if encoded is None:
+            raise ApiError(
+                413,
+                ReasonCode.IMAGE_TOO_LARGE,
+                "derived witness image exceeds the encoded byte limit",
+            )
     else:
         extension = ".jpg"
         quality = int(payload.get("jpeg_quality", 95))
         parameters = [cv2.IMWRITE_JPEG_QUALITY, max(1, min(quality, 100))]
-    ok, encoded = cv2.imencode(extension, image, parameters)
-    if not ok:
-        raise ApiError(500, ReasonCode.INFERENCE_ERROR, "derived image encoding failed")
-    if encoded.size > max_encoded_bytes:
-        raise _contract_error()
+        ok, encoded = cv2.imencode(extension, image, parameters)
+        if not ok:
+            raise ApiError(
+                500,
+                ReasonCode.INFERENCE_ERROR,
+                "derived image encoding failed",
+            )
+        if encoded.size > max_encoded_bytes:
+            raise _contract_error()
     payload["image_base64"] = base64.b64encode(bytes(encoded)).decode("ascii")
     return payload
