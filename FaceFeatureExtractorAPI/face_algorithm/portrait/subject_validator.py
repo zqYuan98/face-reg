@@ -128,13 +128,14 @@ def validate_portrait_subject(
 
     shoulder_depth_ratio = _setting(template, "min_shoulder_depth_ratio", 0.60)
     shoulder_y1 = max(0, min(height, int(np.floor(face.y2))))
-    shoulder_y2 = max(
-        0,
-        min(
-            height,
-            int(np.ceil(face.y2 + shoulder_depth_ratio * face.height)),
-        ),
-    )
+    required_shoulder_y2 = face.y2 + shoulder_depth_ratio * face.height
+    # Do not shrink the required shoulder band to the source image and then
+    # recompute coverage over the shorter denominator.  That would let a face
+    # near the bottom edge pass even though most required shoulder depth is
+    # outside the photograph.
+    if required_shoulder_y2 > float(height):
+        raise PortraitSubjectValidationError(ReasonCode.SHOULDERS_NOT_VISIBLE)
+    shoulder_y2 = max(0, min(height, int(np.ceil(required_shoulder_y2))))
     shoulder_width = _setting(template, "shoulder_roi_width_ratio", 1.30) * face.width
     face_center_x = (face.x1 + face.x2) / 2.0
     shoulder_x1 = max(

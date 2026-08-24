@@ -486,9 +486,19 @@ def test_portrait_geometry_and_alpha_quality_limits_are_explicit() -> None:
     assert template.min_face_alpha_coverage == pytest.approx(0.80)
     assert template.min_subject_area_ratio == pytest.approx(0.05)
     assert template.edge_alpha_threshold == pytest.approx(0.10)
-    assert template.source_edge_margin_ratio == pytest.approx(0.002)
+    assert template.head_roi_expansion_ratio == pytest.approx(0.25)
+    assert template.top_edge_band_ratio == pytest.approx(0.005)
+    assert template.top_edge_min_pixels == 2
+    assert template.min_top_edge_core_coverage == pytest.approx(0.15)
+    assert template.robust_top_min_row_width_ratio == pytest.approx(0.05)
+    assert template.required_headroom_ratio == pytest.approx(0.12)
     assert template.min_shoulder_depth_ratio == pytest.approx(0.60)
+    assert template.shoulder_roi_width_ratio == pytest.approx(1.30)
     assert template.min_shoulder_band_coverage == pytest.approx(0.35)
+    assert template.min_shoulder_half_coverage == pytest.approx(0.20)
+    assert template.min_shoulder_valid_row_ratio == pytest.approx(0.60)
+    assert template.min_shoulder_row_coverage == pytest.approx(0.25)
+    assert not hasattr(template, "source_edge_margin_ratio")
     assert not hasattr(template, "shoulder_margin_ratio")
 
 
@@ -500,9 +510,18 @@ def test_portrait_geometry_and_alpha_quality_limits_are_explicit() -> None:
         ("min_face_alpha_coverage", -0.01),
         ("min_subject_area_ratio", 1.0),
         ("edge_alpha_threshold", 0.0),
-        ("source_edge_margin_ratio", 0.5),
+        ("head_roi_expansion_ratio", 1.01),
+        ("top_edge_band_ratio", 0.0),
+        ("top_edge_min_pixels", 0),
+        ("min_top_edge_core_coverage", 0.0),
+        ("robust_top_min_row_width_ratio", 1.01),
+        ("required_headroom_ratio", 1.01),
         ("min_shoulder_depth_ratio", -0.01),
+        ("shoulder_roi_width_ratio", 0.0),
         ("min_shoulder_band_coverage", 1.01),
+        ("min_shoulder_half_coverage", 1.01),
+        ("min_shoulder_valid_row_ratio", -0.01),
+        ("min_shoulder_row_coverage", 1.01),
     ],
 )
 def test_portrait_quality_limits_are_strictly_validated(
@@ -515,6 +534,16 @@ def test_portrait_quality_limits_are_strictly_validated(
 
     with pytest.raises(ValidationError):
         load_config(_write_config(tmp_path / f"invalid-portrait-{field}.yaml", payload))
+
+
+def test_portrait_template_rejects_obsolete_global_edge_margin(
+    tmp_path: Path,
+) -> None:
+    payload = deepcopy(_default_payload())
+    payload["portrait_template"]["source_edge_margin_ratio"] = 0.002
+
+    with pytest.raises(ValidationError, match="source_edge_margin_ratio"):
+        load_config(_write_config(tmp_path / "obsolete-portrait-edge-margin.yaml", payload))
 
 
 def test_portrait_background_contract_rejects_non_white_configuration(

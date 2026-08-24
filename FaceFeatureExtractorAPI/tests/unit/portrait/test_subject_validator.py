@@ -125,6 +125,22 @@ def test_shoulder_coverage_must_span_enough_rows() -> None:
     assert captured.value.reason_code is ReasonCode.SHOULDERS_NOT_VISIBLE
 
 
+def test_required_shoulder_depth_cannot_be_clipped_by_source_bottom() -> None:
+    core = np.ones((640, 480), dtype=np.uint8)
+    face = FaceBox(
+        x1=180.0,
+        y1=422.0,
+        x2=300.0,
+        y2=627.0,
+        confidence=0.99,
+    )
+
+    with pytest.raises(PortraitSubjectValidationError) as captured:
+        validate_portrait_subject(core, face, _settings())
+
+    assert captured.value.reason_code is ReasonCode.SHOULDERS_NOT_VISIBLE
+
+
 def test_exact_shoulder_coverage_boundaries_are_inclusive() -> None:
     core = _complete_core()
     core[100:136, :] = 0

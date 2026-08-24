@@ -150,9 +150,18 @@ portrait_template:
   min_face_alpha_coverage: 0.80
   min_subject_area_ratio: 0.05
   edge_alpha_threshold: 0.10
-  source_edge_margin_ratio: 0.002
+  head_roi_expansion_ratio: 0.25
+  top_edge_band_ratio: 0.005
+  top_edge_min_pixels: 2
+  min_top_edge_core_coverage: 0.15
+  robust_top_min_row_width_ratio: 0.05
+  required_headroom_ratio: 0.12
   min_shoulder_depth_ratio: 0.60
+  shoulder_roi_width_ratio: 1.30
   min_shoulder_band_coverage: 0.35
+  min_shoulder_half_coverage: 0.20
+  min_shoulder_valid_row_ratio: 0.60
+  min_shoulder_row_coverage: 0.25
   background_rgb: [255, 255, 255]
 
 witness:
