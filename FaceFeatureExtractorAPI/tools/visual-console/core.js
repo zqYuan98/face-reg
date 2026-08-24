@@ -180,6 +180,14 @@ export function safeUploadFilename(field, file) {
   return `${SAFE_UPLOAD_BASENAMES[kind]}${extension === ".jpeg" ? ".jpg" : extension}`;
 }
 
+export function isCapabilityReady(capabilities, readinessKey) {
+  return Boolean(
+    capabilities
+      && typeof capabilities === "object"
+      && capabilities[readinessKey] === "ready",
+  );
+}
+
 const CAPABILITIES_BY_ID = new Map(CAPABILITIES.map((item) => [item.id, item]));
 const CAPABILITY_ALIASES = new Map([
   ["portrait-generate", "portrait"],

@@ -9,6 +9,7 @@ import {
   dataUrlToBlob,
   getCapability,
   getSuggestionView,
+  isCapabilityReady,
   safeUploadFilename,
   safeJsonText,
   translateReasons,
@@ -59,6 +60,19 @@ test("CAPABILITIES freezes the exact five deployed v2 contracts", () => {
   assert.deepEqual(CAPABILITIES.map(({ timeoutMs }) => timeoutMs), [30_000, 30_000, 30_000, 60_000, 600_000]);
   assert.equal(Object.isFrozen(CAPABILITIES), true);
   assert.equal(Object.isFrozen(CAPABILITIES[0].fields[0]), true);
+});
+
+test("capability readiness is independent from the global core state", () => {
+  const capabilities = {
+    portrait: "unavailable",
+    witness_blur: "ready",
+    image_verification: "unavailable",
+  };
+
+  assert.equal(isCapabilityReady(capabilities, "witness_blur"), true);
+  assert.equal(isCapabilityReady(capabilities, "portrait"), false);
+  assert.equal(isCapabilityReady({}, "witness_blur"), false);
+  assert.equal(isCapabilityReady(null, "witness_blur"), false);
 });
 
 test("getCapability supports canonical IDs, aliases and endpoints", () => {

@@ -4,6 +4,7 @@ import {
   dataUrlToBlob,
   getCapability,
   getSuggestionView,
+  isCapabilityReady,
   safeUploadFilename,
   safeJsonText,
   translateReasons,
@@ -163,7 +164,7 @@ function currentCapability() {
 
 function currentCapabilityReady() {
   const key = READINESS_KEYS[state.capabilityId];
-  return state.ready && state.capabilities[key] === "ready";
+  return isCapabilityReady(state.capabilities, key);
 }
 
 function fieldLimitLabel(capability, field) {
@@ -680,7 +681,7 @@ function applyReadiness(payload) {
 
   document.querySelectorAll(".capability-button").forEach((button) => {
     const key = button.dataset.readinessKey ?? READINESS_KEYS[button.dataset.capability];
-    const available = state.ready && state.capabilities[key] === "ready";
+    const available = isCapabilityReady(state.capabilities, key);
     button.dataset.available = available ? "true" : "false";
     button.disabled = state.running || !available;
     const indicator = button.querySelector(".capability-state");
