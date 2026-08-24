@@ -140,9 +140,10 @@ API runtime 仅负责输入校验、调用模块、组装结果和转换异常�
 - 必要源图头顶空间初始值为 `0.12 * face_height`。
 - “有效顶部占用”分子为顶部边缘带与头部 ROI 交集内的硬核心像素数，
   分母为该交集总像素数，覆盖率不低于 `0.15`。
-- 主体稳健顶部边界 `robust_core_top` 取头部 ROI 中首个硬核心像素数达到
-  `ceil(0.05 * face_width)` 的行索引；所有 ROI 采用左/上 `floor`、右/下
-  `ceil` 后的左闭右开整数区间，忽略稀疏软尾。
+- 主体稳健放置顶部 `robust_core_top` 取头部 ROI 中首个硬核心像素数同时达到
+  `ceil(0.05 * face_width)` 和 `ceil(0.15 * head_roi_width)` 的行索引；所有 ROI
+  采用左/上 `floor`、右/下 `ceil` 后的左闭右开整数区间，忽略不足以代表人物
+  稳定顶部的稀疏硬尾。
 - `available_headroom = face.y1 - robust_core_top`。仅当
   `robust_core_top < top_edge_band_height`、顶部有效占用成立且
   `available_headroom < 0.12 * face_height` 时，判定头顶真实裁剪。
@@ -157,6 +158,8 @@ API runtime 仅负责输入校验、调用模块、组装结果和转换异常�
   `min_shoulder_band_coverage=0.35`；左右半区覆盖均不得低于 `0.20`；
   至少 60% 的 ROI 行，其硬核心行覆盖率不得低于 `0.25`。任一条件不满足时
   返回 `SHOULDERS_NOT_VISIBLE`，避免细长躯干仅靠整体平均通过。
+- 肩部纵向 ROI 不允许因源图底边而缩短；理论下界超出源图时直接返回
+  `SHOULDERS_NOT_VISIBLE`，恰好落在源图底边时按包含边界处理。
 - 衣服、身体或头发在必要头肩区域之外触及侧边和底边时允许生成。
 
 最终放置校验使用稳健顶部边界而不是软蒙版最小坐标，保证脸、头顶边距和肩部构图满足模板要求。上述新阈值进入严格配置并校验取值关系。

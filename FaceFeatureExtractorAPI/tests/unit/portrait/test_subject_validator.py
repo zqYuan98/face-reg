@@ -141,6 +141,14 @@ def test_required_shoulder_depth_cannot_be_clipped_by_source_bottom() -> None:
     assert captured.value.reason_code is ReasonCode.SHOULDERS_NOT_VISIBLE
 
 
+def test_required_shoulder_depth_exactly_at_source_bottom_is_inclusive() -> None:
+    core = np.ones((136, 200), dtype=np.uint8)
+
+    validation = validate_portrait_subject(core, FACE, _settings())
+
+    assert validation.shoulder_depth_ratio == pytest.approx(0.60)
+
+
 def test_exact_shoulder_coverage_boundaries_are_inclusive() -> None:
     core = _complete_core()
     core[100:136, :] = 0
