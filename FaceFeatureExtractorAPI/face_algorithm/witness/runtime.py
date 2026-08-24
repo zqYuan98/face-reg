@@ -1,4 +1,4 @@
-"""Owned witness-photo runtime orchestrating quality, matting, cards and blur."""
+"""Owned person-first witness runtime orchestrating face hints, matting and blur."""
 
 from __future__ import annotations
 
@@ -11,29 +11,95 @@ from types import MappingProxyType
 
 import numpy as np
 
-from face_algorithm.core.adapters import build_owned_face_quality_pipeline
+from face_algorithm.core.adapters import (
+    FaceBoxesAdapter,
+    Landmark5Adapter,
+    RotationAdapter,
+)
 from face_algorithm.core.contracts import (
     ImageTooLargeError,
     InvalidImageError,
     validate_image_input,
 )
+from face_algorithm.core.face_selection import (
+    FaceCandidateSelector,
+    FaceSelectionPreparation,
+)
 from face_algorithm.core.pipeline import FaceQualityAnalysis
 from face_algorithm.portrait.runtime import build_portrait_matting_runtime
 from face_algorithm.runtime.config import AlgorithmConfig
-from face_algorithm.runtime.model_registry import ModelRegistry
-from face_algorithm.schemas import CardRegion, LandmarkPoint, ReasonCode, Suggestion
+from face_algorithm.runtime.model_registry import (
+    ModelRegistry,
+    VerifiedModelEvidence,
+)
+from face_algorithm.schemas import (
+    CardRegion,
+    FaceBox,
+    LandmarkPoint,
+    ReasonCode,
+    Suggestion,
+)
 from face_algorithm.witness.blur import (
-    _WitnessBlurError,
     _blur_witness_pixels,
-    _select_witness_subject_matte,
 )
 from face_algorithm.witness.card_detector import (
     _CardDetectionResult,
     _detect_card_regions,
 )
-from face_algorithm.witness.contracts import WitnessBlurResult
+from face_algorithm.witness.contracts import WitnessBlurResult, _WitnessBlurError
+from face_algorithm.witness.protection import _build_witness_protection_mask
+from face_algorithm.witness.subject_selector import _analyze_witness_subject
 
-__all__ = ["WitnessBlurRuntime", "WitnessBlurResult", "build_witness_blur_runtime"]
+__all__ = [
+    "WITNESS_FACE_MODEL_NAMES",
+    "WITNESS_REQUIRED_MODEL_NAMES",
+    "WitnessBlurRuntime",
+    "WitnessBlurResult",
+    "build_witness_blur_runtime",
+]
+
+WITNESS_FACE_MODEL_NAMES = (
+    "rotation_classifier",
+    "face_detector",
+    "face_landmark_primary",
+    "face_landmark_secondary",
+)
+WITNESS_REQUIRED_MODEL_NAMES = WITNESS_FACE_MODEL_NAMES + ("portrait_matting",)
+
+
+@dataclass(frozen=True, slots=True)
+class _WitnessFaceProbe:
+    corrected_image: np.ndarray = field(repr=False, compare=False)
+    rotation_quarter_turns: int
+    face: FaceBox | None
+    reason_code: ReasonCode | None
+    finalize: Callable[[tuple[CardRegion, ...]], ReasonCode | None] = field(
+        repr=False, compare=False
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnedWitnessFaceProbe:
+    """Privately owned models required by the witness face-only path."""
+
+    rotator: object = field(repr=False, compare=False)
+    detector: object = field(repr=False, compare=False)
+    landmarker: object = field(repr=False, compare=False)
+    selector: FaceCandidateSelector = field(repr=False, compare=False)
+    model_versions: Mapping[str, str]
+    model_evidence: Mapping[str, VerifiedModelEvidence] = field(
+        repr=False, compare=False
+    )
+
+    def probe(self, image: np.ndarray, profile: object) -> _WitnessFaceProbe:
+        return _probe_with_components(
+            image,
+            profile,
+            rotator=self.rotator,
+            detector=self.detector,
+            landmarker=self.landmarker,
+            selector=self.selector,
+        )
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -42,7 +108,7 @@ class WitnessBlurRuntime:
 
     model_versions: Mapping[str, str]
     config_version: str
-    _analyze_quality: Callable[[np.ndarray, object], FaceQualityAnalysis] = field(
+    _probe_face: Callable[[np.ndarray, object], _WitnessFaceProbe] = field(
         repr=False, compare=False
     )
     _matte: Callable[[np.ndarray], np.ndarray] = field(repr=False, compare=False)
@@ -68,22 +134,24 @@ class WitnessBlurRuntime:
     ) -> "WitnessBlurRuntime":
         analyze = getattr(face_pipeline, "analyze_quality", None)
         matte = getattr(matting_runtime, "matte", None)
-        if not callable(analyze):
-            raise TypeError("face pipeline must provide analyze_quality")
         if not callable(matte):
             raise TypeError("matting runtime must provide matte")
         if not callable(card_detector):
             raise TypeError("card detector must be callable")
+        probe_face = _make_witness_face_probe(face_pipeline, analyze)
         model_info = getattr(matting_runtime, "model_info", None)
         version = getattr(model_info, "version", None)
         if not isinstance(version, str) or not version:
             raise TypeError("matting runtime must provide safe model metadata")
-        versions = dict(getattr(face_pipeline, "model_versions", {}))
+        raw_versions = getattr(face_pipeline, "model_versions", None)
+        if not isinstance(raw_versions, Mapping) or not raw_versions:
+            raise TypeError("face probe must provide executed model versions")
+        versions = dict(raw_versions)
         versions["portrait_matting"] = version
         instance = object.__new__(cls)
         object.__setattr__(instance, "model_versions", MappingProxyType(versions))
         object.__setattr__(instance, "config_version", config.config_version)
-        object.__setattr__(instance, "_analyze_quality", analyze)
+        object.__setattr__(instance, "_probe_face", probe_face)
         object.__setattr__(instance, "_matte", matte)
         object.__setattr__(instance, "_detect_cards", card_detector)
         object.__setattr__(instance, "_profile", config.quality_profiles.witness)
@@ -165,26 +233,21 @@ class WitnessBlurRuntime:
             return finish(Suggestion.RECAPTURE, (ReasonCode.IMAGE_TOO_LARGE,))
 
         try:
-            analysis = self._analyze_quality(image, self._profile)
+            probe = self._probe_face(image, self._profile)
         except Exception:
             return finish(Suggestion.REVIEW, (ReasonCode.INFERENCE_ERROR,))
-        if not isinstance(analysis, FaceQualityAnalysis):
+        if not isinstance(probe, _WitnessFaceProbe):
             return finish(Suggestion.REVIEW, (ReasonCode.INFERENCE_ERROR,))
-        turns = analysis.public.rotation_quarter_turns
-        if (
-            not analysis.public.success
-            or analysis.public.suggestion is not Suggestion.PASS
-            or analysis.public.reason_codes
-        ):
-            suggestion = analysis.public.suggestion
-            if suggestion is Suggestion.PASS:
-                suggestion = Suggestion.REVIEW
-            reasons = analysis.public.reason_codes or (ReasonCode.INFERENCE_ERROR,)
-            return finish(suggestion, reasons)
-        corrected = analysis.corrected_image
-        face = analysis.public.box
-        if corrected is None or face is None or analysis.public.landmarks is None:
-            return finish(Suggestion.REVIEW, (ReasonCode.INFERENCE_ERROR,))
+        turns = probe.rotation_quarter_turns
+        if probe.reason_code is not None:
+            suggestion = (
+                Suggestion.REVIEW
+                if probe.reason_code is ReasonCode.INFERENCE_ERROR
+                else Suggestion.RECAPTURE
+            )
+            return finish(suggestion, (probe.reason_code,))
+        corrected = probe.corrected_image
+        face = probe.face
         try:
             validate_image_input(corrected, self._max_image_pixels)
         except ValueError:
@@ -205,39 +268,229 @@ class WitnessBlurRuntime:
         except Exception:
             return finish(Suggestion.REVIEW, (ReasonCode.MATTING_FAILED,))
         try:
-            subject, quality = _select_witness_subject_matte(
-                matte, face, self._options
+            selection = _analyze_witness_subject(matte, face, self._options)
+            subject = selection.matte
+            quality = selection.quality
+            del matte, selection
+        except _WitnessBlurError as error:
+            return finish(Suggestion.RECAPTURE, (error.reason_code,))
+        except Exception:
+            return finish(Suggestion.REVIEW, (ReasonCode.MATTING_FAILED,))
+
+        detection: _CardDetectionResult | None = None
+        if face is not None:
+            try:
+                detected = self._detect_cards(
+                    corrected, face, subject, self._options
+                )
+                if not isinstance(detected, _CardDetectionResult):
+                    raise TypeError("invalid card detection result")
+                if (
+                    isinstance(detected.candidate_count, bool)
+                    or not isinstance(detected.candidate_count, int)
+                    or detected.candidate_count < 0
+                    or detected.candidate_count < len(detected.cards)
+                ):
+                    raise TypeError("invalid card candidate count")
+                if not (
+                    isinstance(detected.cards, tuple)
+                    and isinstance(detected.protection_cards, tuple)
+                    and all(isinstance(card, CardRegion) for card in detected.cards)
+                    and all(
+                        isinstance(card, CardRegion)
+                        for card in detected.protection_cards
+                    )
+                ):
+                    raise TypeError("invalid card regions")
+                detection = detected
+                candidate_count = detected.candidate_count
+            except Exception:
+                # Card enhancement is optional. Any detector failure degrades
+                # to the bounded person envelope instead of blocking output.
+                detection = None
+        protection_cards = () if detection is None else detection.protection_cards
+        try:
+            protection = _build_witness_protection_mask(
+                subject,
+                face,
+                protection_cards,
+                self._options,
             )
+            del subject
         except _WitnessBlurError as error:
             return finish(Suggestion.RECAPTURE, (error.reason_code,))
         except Exception:
             return finish(Suggestion.REVIEW, (ReasonCode.MATTING_FAILED,))
 
         try:
-            detection = self._detect_cards(
-                corrected, face, subject, self._options
-            )
-            if not isinstance(detection, _CardDetectionResult):
-                raise TypeError("invalid card detection result")
-            candidate_count = detection.candidate_count
+            # Only candidates that survived contact, area and final 92%
+            # protection budgets may suppress a secondary printed face.
+            final_reason = probe.finalize(protection.cards)
         except Exception:
             return finish(Suggestion.REVIEW, (ReasonCode.INFERENCE_ERROR,))
-        if detection.reason_code is not None:
-            return finish(Suggestion.RECAPTURE, (detection.reason_code,))
+        if final_reason is not None:
+            suggestion = (
+                Suggestion.REVIEW
+                if final_reason is ReasonCode.INFERENCE_ERROR
+                else Suggestion.RECAPTURE
+            )
+            return finish(suggestion, (final_reason,))
+
+        trusted_cards = (
+            ()
+            if detection is None
+            else tuple(card for card in detection.cards if card in protection.cards)
+        )
+        del detection, probe
         try:
             output, summary = _blur_witness_pixels(
-                corrected, subject, detection.cards, self._options
+                corrected, protection.matte, (), self._options
             )
+        except _WitnessBlurError as error:
+            return finish(Suggestion.RECAPTURE, (error.reason_code,))
         except Exception:
             return finish(Suggestion.REVIEW, (ReasonCode.INFERENCE_ERROR,))
         return finish(
             Suggestion.PASS,
             (),
-            cards=detection.cards,
+            cards=trusted_cards,
             quality=quality,
             summary=summary,
             output=output,
         )
+
+
+def _probe_with_components(
+    image: np.ndarray,
+    profile: object,
+    *,
+    rotator: object,
+    detector: object,
+    landmarker: object,
+    selector: FaceCandidateSelector,
+) -> _WitnessFaceProbe:
+    rotation = rotator.correct(image.copy())
+    corrected = getattr(rotation, "corrected_image", None)
+    turns = int(getattr(rotation, "quarter_turns", -1))
+    original_height, original_width = image.shape[:2]
+    corrected_height, corrected_width = validate_image_input(
+        corrected,
+        original_height * original_width,
+    )
+    expected = (
+        (original_height, original_width)
+        if turns in (0, 2)
+        else (original_width, original_height)
+    )
+    if turns not in range(4) or (corrected_height, corrected_width) != expected:
+        raise ValueError("invalid rotation result")
+    # Preserve FaceCandidateBatch.saturated. Converting to tuple here would
+    # erase fail-closed overflow evidence from the bounded detector adapter.
+    candidates = detector.detect(corrected)
+    prepared = selector.prepare(
+        corrected,
+        candidates,
+        landmarker,
+        getattr(profile, "face_selection"),
+        getattr(profile, "landmark_geometry"),
+    )
+    if not isinstance(prepared, FaceSelectionPreparation):
+        raise TypeError("invalid face selection preparation")
+    hard_reason = (
+        None
+        if prepared.reason_code in (None, ReasonCode.NO_FACE)
+        else prepared.reason_code
+    )
+
+    def finalize(ignore_regions: tuple[CardRegion, ...]) -> ReasonCode | None:
+        if prepared.reason_code is ReasonCode.NO_FACE:
+            return None
+        result = selector.finalize(
+            corrected,
+            landmarker,
+            prepared,
+            ignore_regions=ignore_regions,
+        )
+        return result.reason_code
+
+    return _WitnessFaceProbe(
+        corrected_image=corrected,
+        rotation_quarter_turns=turns,
+        face=prepared.box,
+        reason_code=hard_reason,
+        finalize=finalize,
+    )
+
+
+def _make_witness_face_probe(
+    face_pipeline: object,
+    analyze_quality: Callable[[np.ndarray, object], FaceQualityAnalysis] | None,
+) -> Callable[[np.ndarray, object], _WitnessFaceProbe]:
+    """Bind production face-only probe or an explicit compatibility double."""
+
+    direct = getattr(face_pipeline, "probe", None)
+    if callable(direct):
+        return direct
+
+    rotator = getattr(face_pipeline, "rotator", None)
+    detector = getattr(face_pipeline, "detector", None)
+    landmarker = getattr(face_pipeline, "landmarker", None)
+    if (
+        callable(getattr(rotator, "correct", None))
+        and callable(getattr(detector, "detect", None))
+        and callable(getattr(landmarker, "detect", None))
+    ):
+        selector = getattr(face_pipeline, "face_selector", None)
+        if not isinstance(selector, FaceCandidateSelector):
+            selector = FaceCandidateSelector()
+
+        def native(image: np.ndarray, profile: object) -> _WitnessFaceProbe:
+            return _probe_with_components(
+                image,
+                profile,
+                rotator=rotator,
+                detector=detector,
+                landmarker=landmarker,
+                selector=selector,
+            )
+
+        return native
+
+    if not callable(analyze_quality):
+        raise TypeError("face probe must provide probe or face-only components")
+
+    def compatibility(image: np.ndarray, profile: object) -> _WitnessFaceProbe:
+        analysis = analyze_quality(image, profile)
+        if not isinstance(analysis, FaceQualityAnalysis):
+            raise TypeError("invalid face quality analysis")
+        corrected = analysis.corrected_image
+        if corrected is None:
+            raise TypeError("face analysis did not retain the corrected image")
+        reasons = tuple(analysis.public.reason_codes)
+        hard_reason = next(
+            (
+                reason
+                for reason in reasons
+                if reason
+                in {
+                    ReasonCode.MULTIPLE_FACES,
+                    ReasonCode.LANDMARK_FAILED,
+                    ReasonCode.INFERENCE_ERROR,
+                    ReasonCode.INVALID_IMAGE,
+                    ReasonCode.IMAGE_TOO_LARGE,
+                }
+            ),
+            None,
+        )
+        return _WitnessFaceProbe(
+            corrected_image=corrected,
+            rotation_quarter_turns=analysis.public.rotation_quarter_turns,
+            face=analysis.public.box,
+            reason_code=hard_reason,
+            finalize=lambda _regions: None,
+        )
+
+    return compatibility
 
 
 def _restore_image_orientation(image: np.ndarray, turns: int) -> np.ndarray:
@@ -284,6 +537,42 @@ def _restore_card_regions(
     )
 
 
+def _build_owned_witness_face_probe(
+    *,
+    config: AlgorithmConfig,
+    registry: ModelRegistry,
+) -> _OwnedWitnessFaceProbe:
+    """Build only the privately owned face models executed by witness blur."""
+
+    if not isinstance(config, AlgorithmConfig):
+        raise TypeError("config must be an AlgorithmConfig")
+    if not isinstance(registry, ModelRegistry):
+        raise TypeError("registry must be a ModelRegistry")
+    isolated = registry.spawn_isolated(WITNESS_FACE_MODEL_NAMES)
+    handles = {
+        name: isolated.get_with_evidence(name)
+        for name in WITNESS_FACE_MODEL_NAMES
+    }
+    sessions = {name: handle.instance for name, handle in handles.items()}
+    evidence = MappingProxyType(
+        {name: handle.evidence for name, handle in handles.items()}
+    )
+    versions = MappingProxyType(
+        {name: handle.evidence.version for name, handle in handles.items()}
+    )
+    return _OwnedWitnessFaceProbe(
+        rotator=RotationAdapter(sessions["rotation_classifier"]),
+        detector=FaceBoxesAdapter(sessions["face_detector"]),
+        landmarker=Landmark5Adapter(
+            sessions["face_landmark_primary"],
+            sessions["face_landmark_secondary"],
+        ),
+        selector=FaceCandidateSelector(),
+        model_versions=versions,
+        model_evidence=evidence,
+    )
+
+
 def _bind_witness_blur_runtime(
     *,
     face_pipeline: object,
@@ -306,7 +595,7 @@ def _bind_witness_blur_runtime(
 def build_witness_blur_runtime(
     *, config: AlgorithmConfig, registry: ModelRegistry
 ) -> WitnessBlurRuntime:
-    """Build a runtime owning isolated six-model quality and MODNet graphs."""
+    """Build a runtime owning only its face-probe and MODNet graphs."""
 
     if not isinstance(config, AlgorithmConfig):
         raise TypeError("config must be an AlgorithmConfig")
@@ -315,7 +604,7 @@ def build_witness_blur_runtime(
     matting_runtime = build_portrait_matting_runtime(
         config=config, registry=registry
     )
-    face_pipeline = build_owned_face_quality_pipeline(
+    face_pipeline = _build_owned_witness_face_probe(
         config=config, registry=registry
     )
     return _bind_witness_blur_runtime(

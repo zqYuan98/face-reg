@@ -14,9 +14,13 @@ import pytest
 from face_algorithm.core.adapters import create_model_registry
 from face_algorithm.runtime.config import load_config
 from face_algorithm.schemas import CardRegion, LandmarkPoint, ReasonCode, Suggestion
-from face_algorithm.witness import build_witness_blur_runtime
+from face_algorithm.witness import (
+    WITNESS_REQUIRED_MODEL_NAMES,
+    build_witness_blur_runtime,
+)
 from face_algorithm.witness.blur import _blur_witness_pixels
 from face_algorithm.witness.card_detector import _detect_card_regions
+from face_algorithm.witness.subject_selector import _analyze_witness_subject
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -73,32 +77,7 @@ def _integration_config():
             )
         }
     )
-    witness = config.quality_profiles.witness
-    witness = witness.model_copy(
-        update={
-            "brightness": witness.brightness.model_copy(
-                update={"v0": 0.0, "v1": 1.0, "v2": 254.0, "v3": 255.0}
-            ),
-            "clarity": witness.clarity.model_copy(
-                update={"low_threshold": 0.001, "high_threshold": 0.002}
-            ),
-            "pose": witness.pose.model_copy(
-                update={
-                    "yaw_threshold": 90.0,
-                    "pitch_threshold": 90.0,
-                    "roll_threshold": 180.0,
-                }
-            ),
-        }
-    )
-    return config.model_copy(
-        update={
-            "models": models,
-            "quality_profiles": config.quality_profiles.model_copy(
-                update={"witness": witness}
-            ),
-        }
-    )
+    return config.model_copy(update={"models": models})
 
 
 @pytest.mark.integration
@@ -115,13 +94,14 @@ def test_real_models_blur_visible_background_and_keep_the_held_card() -> None:
 
     runtime = build_witness_blur_runtime(config=config, registry=registry)
     result = runtime.blur(image)
-    analysis = runtime._analyze_quality(image, config.quality_profiles.witness)
-    assert analysis.corrected_image is not None and analysis.public.box is not None
-    matte = runtime._matte(analysis.corrected_image)
+    probe = runtime._probe_face(image, config.quality_profiles.witness)
+    assert probe.reason_code is None and probe.face is not None
+    matte = runtime._matte(probe.corrected_image)
+    subject = _analyze_witness_subject(matte, probe.face, config.witness).matte
     detection = _detect_card_regions(
-        analysis.corrected_image,
-        analysis.public.box,
-        matte,
+        probe.corrected_image,
+        probe.face,
+        subject,
         config.witness,
     )
 
@@ -142,7 +122,7 @@ def test_real_models_blur_visible_background_and_keep_the_held_card() -> None:
     )
 
     # Every visible subject pixel remains protected through the image edge;
-    # face quality separately enforces that the face itself is not cropped.
+    # the witness face probe separately enforces primary-face geometry.
     assert result.success is True
     assert result.suggestion is Suggestion.PASS
     assert result.reason_codes == ()
@@ -160,8 +140,8 @@ def test_real_models_blur_visible_background_and_keep_the_held_card() -> None:
     assert np.array_equal(image, original)
     card_x, card_y = int(round(center_x)), int(round(center_y))
     np.testing.assert_array_equal(result.image[card_y, card_x], image[card_y, card_x])
-    face_x = int(round((analysis.public.box.x1 + analysis.public.box.x2) * 0.5))
-    face_y = int(round((analysis.public.box.y1 + analysis.public.box.y2) * 0.5))
+    face_x = int(round((probe.face.x1 + probe.face.x2) * 0.5))
+    face_y = int(round((probe.face.y1 + probe.face.y2) * 0.5))
     np.testing.assert_array_equal(result.image[face_y, face_x], image[face_y, face_x])
     background_slice = np.s_[40:300, 40:340]
     before_frequency = float(
@@ -172,11 +152,13 @@ def test_real_models_blur_visible_background_and_keep_the_held_card() -> None:
     )
     assert after_frequency < before_frequency * 0.75
 
+    assert set(runtime.model_versions) == set(WITNESS_REQUIRED_MODEL_NAMES)
     assert registry._slots["face_recognizer"].state == "idle"
-    assert "face_recognizer" not in runtime.model_versions
-    owned_pipeline = runtime._analyze_quality.__self__
+    assert registry._slots["pose_var"].state == "idle"
+    assert registry._slots["pose_conv"].state == "idle"
+    owned_probe = runtime._probe_face.__self__
     owned_matting = runtime._matte.__self__
-    assert owned_pipeline.detector.detector.ort_session is not registry.get("face_detector")
+    assert owned_probe.detector.detector.ort_session is not registry.get("face_detector")
     assert owned_matting is not registry.get("portrait_matting")
     names = {field.name.casefold() for field in fields(result)}
     assert not ({"embedding", "feature", "alpha", "model", "session"} & names)

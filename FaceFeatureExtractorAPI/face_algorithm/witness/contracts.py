@@ -17,6 +17,14 @@ __all__ = [
 ]
 
 
+class _WitnessBlurError(ValueError):
+    """Internal fail-closed signal carrying only a public-safe reason code."""
+
+    def __init__(self, reason_code: ReasonCode) -> None:
+        self.reason_code = reason_code
+        super().__init__(reason_code.value)
+
+
 @dataclass(frozen=True, slots=True)
 class WitnessMattingQuality:
     """Aggregate matting evidence; raw alpha is deliberately absent."""

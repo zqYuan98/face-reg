@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 import pytest
 
+from face_algorithm.core.face_selection import FaceCandidateBatch
 from face_algorithm.core.pipeline import FaceQualityAnalysis
 from face_algorithm.runtime.config import load_config
 from face_algorithm.runtime.model_registry import ModelRegistry
@@ -30,6 +31,7 @@ from face_algorithm.witness.card_detector import _CardDetectionResult
 from face_algorithm.witness.runtime import (
     WitnessBlurRuntime,
     _bind_witness_blur_runtime,
+    _build_owned_witness_face_probe,
     build_witness_blur_runtime,
 )
 
@@ -176,18 +178,22 @@ def test_success_returns_safe_original_size_image_and_card_summaries() -> None:
 
 
 @pytest.mark.parametrize(
-    ("reason", "suggestion"),
+    "reason",
     [
-        (ReasonCode.NO_FACE, Suggestion.RECAPTURE),
-        (ReasonCode.MULTIPLE_FACES, Suggestion.RECAPTURE),
-        (ReasonCode.FACE_TOO_SMALL, Suggestion.RECAPTURE),
+        ReasonCode.NO_FACE,
+        ReasonCode.FACE_TOO_SMALL,
     ],
 )
-def test_face_quality_failure_is_preserved_and_later_models_are_skipped(
-    reason, suggestion
+def test_no_face_or_identity_photo_size_gate_does_not_block_reliable_subject(
+    reason,
 ) -> None:
     analysis = FaceQualityAnalysis(
-        public=_public(suggestion=suggestion, reasons=(reason,), box=None, landmarks=None),
+        public=_public(
+            suggestion=Suggestion.RECAPTURE,
+            reasons=(reason,),
+            box=None,
+            landmarks=None,
+        ),
         corrected_image=_image(),
         aligned_face=None,
     )
@@ -198,12 +204,35 @@ def test_face_quality_failure_is_preserved_and_later_models_are_skipped(
         _image()
     )
 
-    assert result.success is False
-    assert result.suggestion is suggestion
-    assert result.reason_codes == (reason,)
-    assert result.image is None
-    assert matting.calls == 0
+    assert result.success is True
+    assert result.suggestion is Suggestion.PASS
+    assert result.reason_codes == ()
+    assert result.image is not None
+    assert matting.calls == 1
     assert detector.calls == 0
+
+
+def test_true_multiple_face_failure_is_preserved_and_later_models_are_skipped() -> None:
+    analysis = FaceQualityAnalysis(
+        public=_public(
+            suggestion=Suggestion.RECAPTURE,
+            reasons=(ReasonCode.MULTIPLE_FACES,),
+            box=None,
+            landmarks=None,
+        ),
+        corrected_image=_image(),
+        aligned_face=None,
+    )
+    matting = FakeMatting()
+    detector = FakeCardDetector()
+
+    result = _runtime(
+        face=FakeFacePipeline(analysis), matte=matting, detector=detector
+    ).blur(_image())
+
+    assert result.success is False
+    assert result.reason_codes == (ReasonCode.MULTIPLE_FACES,)
+    assert matting.calls == detector.calls == 0
 
 
 @pytest.mark.parametrize(
@@ -215,21 +244,188 @@ def test_face_quality_failure_is_preserved_and_later_models_are_skipped(
         ReasonCode.CARD_DETECTION_UNCERTAIN,
     ],
 )
-def test_card_detection_failures_request_recapture_without_partial_image(reason) -> None:
+def test_card_detection_failures_degrade_to_person_only_output(reason) -> None:
     detector = FakeCardDetector(
         _CardDetectionResult(cards=(), candidate_count=2, reason_code=reason)
     )
 
     result = _runtime(detector=detector).blur(_image())
 
-    assert result.success is False
-    assert result.suggestion is Suggestion.RECAPTURE
-    assert result.reason_codes == (reason,)
-    assert result.image is None
+    assert result.success is True
+    assert result.suggestion is Suggestion.PASS
+    assert result.reason_codes == ()
+    assert result.image is not None
+    assert result.card_regions == ()
     assert result.card_candidate_count == 2
 
 
-def test_matting_or_internal_detection_failure_is_hard_review() -> None:
+def test_detector_reason_does_not_discard_a_trusted_protected_card() -> None:
+    detector = FakeCardDetector(
+        _CardDetectionResult(
+            cards=(CARD,),
+            candidate_count=2,
+            reason_code=ReasonCode.CARD_TOO_SMALL,
+            protection_cards=(CARD,),
+        )
+    )
+
+    result = _runtime(detector=detector).blur(_image())
+
+    assert result.success is True
+    assert result.reason_codes == ()
+    assert result.card_regions == (CARD,)
+
+
+def test_near_full_person_matte_is_rejected_instead_of_returning_clear_image() -> None:
+    alpha = np.zeros((240, 240), np.float32)
+    alpha[:220, :230] = 1.0  # 87.85%: below component max, above person budget.
+
+    result = _runtime(matte=FakeMatting(alpha)).blur(_image())
+
+    assert result.success is False
+    assert result.suggestion is Suggestion.RECAPTURE
+    assert result.reason_codes == (ReasonCode.MATTING_LOW_CONFIDENCE,)
+    assert result.image is None
+
+
+def test_native_two_stage_face_probe_uses_protection_card_context() -> None:
+    secondary = FaceBox(
+        x1=100.0,
+        y1=155.0,
+        x2=130.0,
+        y2=190.0,
+        confidence=0.99,
+    )
+
+    class Rotator:
+        def correct(self, image):
+            return SimpleNamespace(
+                corrected_image=np.ascontiguousarray(image.copy()),
+                quarter_turns=0,
+            )
+
+    class Detector:
+        def detect(self, _image):
+            return (FACE, secondary)
+
+    class Landmarker:
+        def detect(self, _image, box):
+            return np.asarray(
+                (
+                    (box.x1 + 0.30 * box.width, box.y1 + 0.32 * box.height),
+                    (box.x1 + 0.70 * box.width, box.y1 + 0.32 * box.height),
+                    (box.x1 + 0.50 * box.width, box.y1 + 0.52 * box.height),
+                    (box.x1 + 0.34 * box.width, box.y1 + 0.75 * box.height),
+                    (box.x1 + 0.66 * box.width, box.y1 + 0.75 * box.height),
+                ),
+                np.float32,
+            )
+
+    class NativeFacePipeline:
+        rotator = Rotator()
+        detector = Detector()
+        landmarker = Landmarker()
+        model_versions = {"face_detector": "test-face-v1"}
+
+        def analyze_quality(self, *_args):
+            raise AssertionError("witness must not invoke full identity quality")
+
+    protected = FakeCardDetector(
+        _CardDetectionResult(
+            cards=(CARD,),
+            candidate_count=1,
+            reason_code=None,
+            protection_cards=(CARD,),
+        )
+    )
+    without_context = FakeCardDetector(
+        _CardDetectionResult(
+            cards=(),
+            candidate_count=0,
+            reason_code=ReasonCode.CARD_NOT_FOUND,
+            protection_cards=(),
+        )
+    )
+    oversized_context = CardRegion(
+        corners=tuple(
+            LandmarkPoint(x=float(x), y=float(y))
+            for x, y in ((0, 130), (200, 130), (200, 239), (0, 239))
+        ),
+        confidence=0.99,
+    )
+    over_budget = FakeCardDetector(
+        _CardDetectionResult(
+            cards=(),
+            candidate_count=1,
+            reason_code=ReasonCode.CARD_DETECTION_UNCERTAIN,
+            protection_cards=(oversized_context,),
+        )
+    )
+
+    protected_result = _runtime(
+        face=NativeFacePipeline(), detector=protected
+    ).blur(_image())
+    ambiguous_result = _runtime(
+        face=NativeFacePipeline(), detector=without_context
+    ).blur(_image())
+    over_budget_result = _runtime(
+        face=NativeFacePipeline(), detector=over_budget
+    ).blur(_image())
+
+    assert protected_result.success is True
+    assert protected_result.card_regions == (CARD,)
+    assert ambiguous_result.success is False
+    assert ambiguous_result.reason_codes == (ReasonCode.MULTIPLE_FACES,)
+    assert over_budget_result.success is False
+    assert over_budget_result.reason_codes == (ReasonCode.MULTIPLE_FACES,)
+
+
+def test_saturated_native_face_batch_fails_before_matting_and_cards() -> None:
+    class Pipeline:
+        model_versions = {
+            "rotation_classifier": "rotation-v1",
+            "face_detector": "detector-v1",
+            "face_landmark_primary": "landmark-primary-v1",
+            "face_landmark_secondary": "landmark-secondary-v1",
+        }
+        rotator = SimpleNamespace(
+            correct=lambda image: SimpleNamespace(
+                corrected_image=np.ascontiguousarray(image.copy()),
+                quarter_turns=0,
+            )
+        )
+        detector = SimpleNamespace(
+            detect=lambda _image: FaceCandidateBatch(
+                candidates=(FACE,),
+                saturated=True,
+                raw_candidate_count=65,
+            )
+        )
+        landmarker = SimpleNamespace(
+            detect=lambda *_args: (_ for _ in ()).throw(
+                AssertionError("saturated batches must not run landmarks")
+            )
+        )
+
+        def analyze_quality(self, *_args):
+            raise AssertionError("native witness probe must not run quality")
+
+    matting = FakeMatting()
+    detector = FakeCardDetector()
+
+    result = _runtime(
+        face=Pipeline(),
+        matte=matting,
+        detector=detector,
+    ).blur(_image())
+
+    assert result.success is False
+    assert result.reason_codes == (ReasonCode.MULTIPLE_FACES,)
+    assert matting.calls == 0
+    assert detector.calls == 0
+
+
+def test_matting_failure_is_hard_but_card_detector_exception_is_optional() -> None:
     matting_result = _runtime(matte=FakeMatting(error=RuntimeError("secret"))).blur(
         _image()
     )
@@ -239,10 +435,26 @@ def test_matting_or_internal_detection_failure_is_hard_review() -> None:
 
     assert matting_result.suggestion is Suggestion.REVIEW
     assert matting_result.reason_codes == (ReasonCode.MATTING_FAILED,)
-    assert detector_result.suggestion is Suggestion.REVIEW
-    assert detector_result.reason_codes == (ReasonCode.INFERENCE_ERROR,)
+    assert detector_result.suggestion is Suggestion.PASS
+    assert detector_result.reason_codes == ()
+    assert detector_result.image is not None
     assert "secret" not in repr(matting_result)
     assert "private" not in repr(detector_result)
+
+
+def test_malformed_card_detector_output_also_degrades_to_person_only() -> None:
+    malformed = _CardDetectionResult(
+        cards=[],  # type: ignore[arg-type]
+        candidate_count=0,
+        reason_code=None,
+        protection_cards=(),
+    )
+
+    result = _runtime(detector=FakeCardDetector(result=malformed)).blur(_image())
+
+    assert result.success is True
+    assert result.reason_codes == ()
+    assert result.card_regions == ()
 
 
 def test_malformed_matting_output_is_review() -> None:
@@ -454,7 +666,7 @@ def test_runtime_cannot_be_constructed_directly() -> None:
         WitnessBlurRuntime()
 
 
-def test_builder_wires_owned_quality_and_matting_runtimes(monkeypatch) -> None:
+def test_builder_wires_owned_witness_probe_and_matting_runtimes(monkeypatch) -> None:
     import face_algorithm.witness.runtime as runtime_module
 
     config = load_config(PROJECT_ROOT / "config" / "algorithm.yaml")
@@ -465,7 +677,7 @@ def test_builder_wires_owned_quality_and_matting_runtimes(monkeypatch) -> None:
 
     monkeypatch.setattr(
         runtime_module,
-        "build_owned_face_quality_pipeline",
+        "_build_owned_witness_face_probe",
         lambda *, config, registry: calls.append(("face", registry)) or face,
     )
     monkeypatch.setattr(
@@ -478,3 +690,54 @@ def test_builder_wires_owned_quality_and_matting_runtimes(monkeypatch) -> None:
 
     assert isinstance(runtime, WitnessBlurRuntime)
     assert calls == [("matte", registry), ("face", registry)]
+
+
+def test_owned_witness_probe_loads_only_models_it_executes(monkeypatch) -> None:
+    import face_algorithm.witness.runtime as runtime_module
+
+    config = load_config(PROJECT_ROOT / "config" / "algorithm.yaml")
+    source = object.__new__(ModelRegistry)
+    requested: list[tuple[str, ...]] = []
+
+    class Isolated:
+        def get_with_evidence(self, name):
+            return SimpleNamespace(
+                instance=f"session:{name}",
+                evidence=SimpleNamespace(version=f"{name}-v1"),
+            )
+
+    monkeypatch.setattr(
+        ModelRegistry,
+        "spawn_isolated",
+        lambda self, names: requested.append(tuple(names)) or Isolated(),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "RotationAdapter",
+        lambda session: ("rotation", session),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "FaceBoxesAdapter",
+        lambda session: ("detector", session),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "Landmark5Adapter",
+        lambda primary, secondary: ("landmarks", primary, secondary),
+    )
+
+    probe = _build_owned_witness_face_probe(config=config, registry=source)
+
+    expected = (
+        "rotation_classifier",
+        "face_detector",
+        "face_landmark_primary",
+        "face_landmark_secondary",
+    )
+    assert requested == [expected]
+    assert set(probe.model_versions) == set(expected)
+    assert "pose_var" not in probe.model_versions
+    assert "pose_conv" not in probe.model_versions
+    assert "face_recognizer" not in probe.model_versions
+    assert not hasattr(probe, "analyze_quality")

@@ -18,6 +18,13 @@ class _CardDetectionResult:
     cards: tuple[CardRegion, ...]
     candidate_count: int
     reason_code: ReasonCode | None
+    protection_cards: tuple[CardRegion, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Internal test seams and older owned detectors that only return trusted
+        # cards remain safe: every trusted card is also a protection candidate.
+        if self.cards and not self.protection_cards:
+            object.__setattr__(self, "protection_cards", self.cards)
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -27,6 +34,7 @@ class _Candidate:
     confidence: float
     cropped: bool
     too_small: bool
+    contact: float = 0.0
 
 
 def _order_quad(points: np.ndarray) -> np.ndarray:
@@ -120,6 +128,49 @@ def _nms(
         ):
             kept.append(candidate)
     return kept
+
+
+def _regions_from_candidates(
+    candidates: list[_Candidate],
+    *,
+    detection_scale: float,
+    original_width: int,
+    original_height: int,
+) -> tuple[CardRegion, ...]:
+    return tuple(
+        CardRegion(
+            corners=tuple(
+                LandmarkPoint(x=float(point[0]), y=float(point[1]))
+                if detection_scale == 1.0
+                else LandmarkPoint(
+                    x=float(
+                        np.clip(
+                            point[0] / detection_scale,
+                            0.0,
+                            original_width - 1.0,
+                        )
+                    ),
+                    y=float(
+                        np.clip(
+                            point[1] / detection_scale,
+                            0.0,
+                            original_height - 1.0,
+                        )
+                    ),
+                )
+                for point in candidate.quad
+            ),
+            confidence=candidate.confidence,
+        )
+        for candidate in sorted(
+            candidates,
+            key=lambda item: (
+                float(np.mean(item.quad[:, 1])),
+                float(np.mean(item.quad[:, 0])),
+                -item.confidence,
+            ),
+        )
+    )
 
 
 def _detect_card_regions(
@@ -365,6 +416,7 @@ def _detect_card_regions(
                 confidence=confidence,
                 cropped=cropped,
                 too_small=too_small,
+                contact=contact,
             )
         )
 
@@ -378,6 +430,57 @@ def _detect_card_regions(
         float(options.card_nms_iou_threshold),
         float(options.card_margin_ratio),
         1.0 / detection_scale,
+    )
+
+    # Protection candidates deliberately use a lower confidence gate than the
+    # public trusted-card list, but remain bounded by person contact, count and
+    # area. Runtime performs the final 92% soft-protection budget check.
+    protection_min_contact = float(
+        getattr(options, "min_protection_card_contact_ratio", 0.20)
+    )
+    protection_max_area = float(
+        getattr(options, "max_protection_card_area_ratio", 0.12)
+    )
+    protection_max_total = float(
+        getattr(options, "max_total_protection_card_area_ratio", 0.20)
+    )
+    protection_max_count = int(
+        getattr(options, "max_protection_card_count", options.max_card_count)
+    )
+    protection_pool = [
+        candidate
+        for candidate in candidates
+        if candidate.contact >= protection_min_contact
+        and candidate.area / image_area <= protection_max_area
+    ]
+    protection_pool = _nms(
+        protection_pool,
+        float(options.card_nms_iou_threshold),
+        float(options.card_margin_ratio),
+        1.0 / detection_scale,
+    )
+    protection_selected: list[_Candidate] = []
+    protection_area = 0.0
+    for candidate in sorted(
+        protection_pool,
+        key=lambda item: (
+            -item.confidence,
+            item.area,
+            float(np.mean(item.quad[:, 1])),
+            float(np.mean(item.quad[:, 0])),
+        ),
+    ):
+        if len(protection_selected) >= protection_max_count:
+            break
+        if (protection_area + candidate.area) / image_area > protection_max_total:
+            continue
+        protection_selected.append(candidate)
+        protection_area += candidate.area
+    protection_regions = _regions_from_candidates(
+        protection_selected,
+        detection_scale=detection_scale,
+        original_width=original_width,
+        original_height=original_height,
     )
 
     # Suppress a secondary contour only after proving that a final trusted
@@ -400,13 +503,30 @@ def _detect_card_regions(
             )
         )
     ]
+    trusted_public = [candidate for candidate in trusted if not candidate.cropped]
+    trusted_regions = _regions_from_candidates(
+        trusted_public,
+        detection_scale=detection_scale,
+        original_width=original_width,
+        original_height=original_height,
+    )
     if any(candidate.cropped for candidate in unresolved):
-        return _CardDetectionResult((), candidate_count, ReasonCode.CARD_CROPPED)
-    # A second plausible card that cannot be protected reliably must prevent a
-    # PASS even when another card is trusted. Otherwise private card content
-    # could be exposed in the unprotected background.
+        return _CardDetectionResult(
+            cards=trusted_regions,
+            candidate_count=candidate_count,
+            reason_code=ReasonCode.CARD_CROPPED,
+            protection_cards=protection_regions,
+        )
+    # Preserve unresolved evidence for internal diagnostics. Runtime treats
+    # every CARD_* status as an optional-enhancement miss and falls back to the
+    # bounded person envelope; it never exposes an unaccepted card as trusted.
     if any(candidate.too_small for candidate in unresolved):
-        return _CardDetectionResult((), candidate_count, ReasonCode.CARD_TOO_SMALL)
+        return _CardDetectionResult(
+            cards=trusted_regions,
+            candidate_count=candidate_count,
+            reason_code=ReasonCode.CARD_TOO_SMALL,
+            protection_cards=protection_regions,
+        )
     unresolved_ambiguous = [
         candidate
         for candidate in unresolved
@@ -414,39 +534,21 @@ def _detect_card_regions(
     ]
     if unresolved_ambiguous or len(trusted) > int(options.max_card_count):
         return _CardDetectionResult(
-            (), candidate_count, ReasonCode.CARD_DETECTION_UNCERTAIN
+            cards=() if len(trusted) > int(options.max_card_count) else trusted_regions,
+            candidate_count=candidate_count,
+            reason_code=ReasonCode.CARD_DETECTION_UNCERTAIN,
+            protection_cards=protection_regions,
         )
     if not trusted:
-        return _CardDetectionResult((), candidate_count, ReasonCode.CARD_NOT_FOUND)
-
-    regions = tuple(
-        CardRegion(
-            corners=tuple(
-                LandmarkPoint(x=float(point[0]), y=float(point[1]))
-                if detection_scale == 1.0
-                else LandmarkPoint(
-                    x=float(
-                        np.clip(
-                            point[0] / detection_scale,
-                            0.0,
-                            original_width - 1.0,
-                        )
-                    ),
-                    y=float(
-                        np.clip(
-                            point[1] / detection_scale,
-                            0.0,
-                            original_height - 1.0,
-                        )
-                    ),
-                )
-                for point in candidate.quad
-            ),
-            confidence=candidate.confidence,
+        return _CardDetectionResult(
+            cards=(),
+            candidate_count=candidate_count,
+            reason_code=ReasonCode.CARD_NOT_FOUND,
+            protection_cards=protection_regions,
         )
-        for candidate in sorted(
-            trusted,
-            key=lambda item: (float(np.mean(item.quad[:, 1])), float(np.mean(item.quad[:, 0]))),
-        )
+    return _CardDetectionResult(
+        cards=trusted_regions,
+        candidate_count=candidate_count,
+        reason_code=None,
+        protection_cards=protection_regions,
     )
-    return _CardDetectionResult(regions, candidate_count, None)

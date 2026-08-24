@@ -7,99 +7,11 @@ from typing import Any
 import cv2
 import numpy as np
 
-from face_algorithm.schemas import CardRegion, FaceBox, ReasonCode
-from face_algorithm.witness.contracts import WitnessBlurSummary, WitnessMattingQuality
+from face_algorithm.schemas import CardRegion, ReasonCode
+from face_algorithm.witness.contracts import WitnessBlurSummary, _WitnessBlurError
+from face_algorithm.witness.subject_selector import _select_witness_subject_matte
 
 __all__: list[str] = []
-
-
-class _WitnessBlurError(ValueError):
-    def __init__(self, reason_code: ReasonCode) -> None:
-        self.reason_code = reason_code
-        super().__init__(reason_code.value)
-
-
-def _face_slices(face: FaceBox, shape: tuple[int, int]) -> tuple[slice, slice]:
-    height, width = shape
-    x1 = max(0, min(width, int(np.floor(face.x1))))
-    y1 = max(0, min(height, int(np.floor(face.y1))))
-    x2 = max(0, min(width, int(np.ceil(face.x2))))
-    y2 = max(0, min(height, int(np.ceil(face.y2))))
-    if x2 <= x1 or y2 <= y1:
-        raise _WitnessBlurError(ReasonCode.MATTING_LOW_CONFIDENCE)
-    return slice(y1, y2), slice(x1, x2)
-
-
-def _select_witness_subject_matte(
-    matte: np.ndarray,
-    face: FaceBox,
-    options: Any,
-) -> tuple[np.ndarray, WitnessMattingQuality]:
-    if not (
-        isinstance(matte, np.ndarray)
-        and matte.dtype == np.float32
-        and matte.ndim == 2
-        and matte.size > 0
-        and matte.flags.c_contiguous
-        and np.all(np.isfinite(matte))
-        and float(matte.min()) >= 0.0
-        and float(matte.max()) <= 1.0
-    ):
-        raise TypeError("matting output violates the float32 alpha contract")
-    height, width = matte.shape
-    face_y, face_x = _face_slices(face, (height, width))
-    hard = np.asarray(matte >= float(options.mask_threshold), np.uint8)
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(hard, connectivity=8)
-    selected_label = 0
-    selected_key = (0, 0)
-    for label in range(1, count):
-        overlap = int(np.count_nonzero(labels[face_y, face_x] == label))
-        area = int(stats[label, cv2.CC_STAT_AREA])
-        if overlap > 0 and (overlap, area) > selected_key:
-            selected_key = (overlap, area)
-            selected_label = label
-    if selected_label == 0:
-        raise _WitnessBlurError(ReasonCode.MATTING_LOW_CONFIDENCE)
-    core = np.asarray(labels == selected_label, np.uint8)
-    area_ratio = float(np.count_nonzero(core)) / float(height * width)
-    if area_ratio < float(options.min_subject_area_ratio):
-        raise _WitnessBlurError(ReasonCode.MATTING_LOW_CONFIDENCE)
-
-    soft_binary = np.asarray(matte >= float(options.subject_edge_alpha), np.uint8)
-    soft_count, soft_labels, _soft_stats, _ = cv2.connectedComponentsWithStats(
-        soft_binary, connectivity=8
-    )
-    overlapping = soft_labels[core > 0]
-    counts = np.bincount(overlapping, minlength=soft_count)
-    if counts.size <= 1:
-        raise _WitnessBlurError(ReasonCode.MATTING_LOW_CONFIDENCE)
-    counts[0] = 0
-    soft_label = int(np.argmax(counts))
-    if counts[soft_label] <= 0:
-        raise _WitnessBlurError(ReasonCode.MATTING_LOW_CONFIDENCE)
-    soft_component = np.asarray(soft_labels == soft_label, np.uint8)
-    soft_area_ratio = float(np.count_nonzero(soft_component)) / float(height * width)
-    if soft_area_ratio > float(options.max_subject_area_ratio):
-        raise _WitnessBlurError(ReasonCode.MATTING_LOW_CONFIDENCE)
-    cleaned = np.where(soft_component > 0, matte, np.float32(0.0)).astype(
-        np.float32, copy=False
-    )
-    cleaned = np.ascontiguousarray(cleaned)
-    face_values = cleaned[face_y, face_x]
-    face_mean = float(np.mean(face_values, dtype=np.float64))
-    face_coverage = float(
-        np.count_nonzero(face_values >= float(options.mask_threshold))
-    ) / float(face_values.size)
-    if (
-        face_mean < float(options.min_face_alpha_mean)
-        or face_coverage < float(options.min_face_alpha_coverage)
-    ):
-        raise _WitnessBlurError(ReasonCode.MATTING_LOW_CONFIDENCE)
-    return cleaned, WitnessMattingQuality(
-        face_mean=face_mean,
-        face_coverage=face_coverage,
-        subject_area_ratio=area_ratio,
-    )
 
 
 def _srgb_to_linear(values: np.ndarray) -> np.ndarray:
@@ -204,6 +116,9 @@ def _blur_witness_pixels(
     )
     background_weight = np.asarray(1 - blur_exclusion, np.uint8)
     del blur_exclusion
+    background_pixel_count = int(np.count_nonzero(background_weight))
+    if background_pixel_count <= 0:
+        raise _WitnessBlurError(ReasonCode.MATTING_LOW_CONFIDENCE)
     background_weight_float = background_weight.astype(np.float32)
     if working_scale < 1.0:
         weight_working = cv2.resize(
@@ -236,6 +151,9 @@ def _blur_witness_pixels(
     for channel in range(3):
         weighted = np.take(_SRGB_TO_LINEAR_LUT, image[:, :, channel])
         np.multiply(weighted, background_weight, out=weighted)
+        fallback_linear = np.float32(
+            np.sum(weighted, dtype=np.float64) / float(background_pixel_count)
+        )
         if working_scale < 1.0:
             numerator = cv2.resize(
                 weighted,
@@ -264,7 +182,11 @@ def _blur_witness_pixels(
             blurred = numerator
         del numerator
         source_linear = np.take(_SRGB_TO_LINEAR_LUT, image[:, :, channel])
-        np.copyto(blurred, source_linear, where=valid_full == 0)
+        # A broad low-alpha matte can leave the normalized convolution without
+        # a local background sample. Reusing the source there would silently
+        # preserve sensitive background detail. The global valid-background
+        # mean is a deterministic, memory-bounded privacy-safe fallback.
+        np.copyto(blurred, fallback_linear, where=valid_full == 0)
         np.subtract(source_linear, blurred, out=source_linear)
         np.multiply(source_linear, protect, out=source_linear)
         np.add(blurred, source_linear, out=blurred)
@@ -279,7 +201,7 @@ def _blur_witness_pixels(
         del blurred, source_linear, srgb, output_channel
     output = np.ascontiguousarray(output)
     return output, WitnessBlurSummary(
-        protected_area_ratio=float(np.count_nonzero(hard_core)) / float(height * width),
+        protected_area_ratio=float(np.mean(protect, dtype=np.float64)),
         sigma_pixels=float(sigma),
         kernel_size=kernel_size,
     )

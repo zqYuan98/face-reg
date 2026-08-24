@@ -171,16 +171,26 @@ witness:
   blur_working_max_dimension: 1600
   mask_threshold: 0.50
   subject_edge_alpha: 0.15
-  min_face_alpha_mean: 0.75
-  min_face_alpha_coverage: 0.75
   min_subject_area_ratio: 0.03
   max_subject_area_ratio: 0.92
+  face_component_min_coverage: 0.50
+  secondary_subject_area_ratio: 0.35
+  max_single_hole_area_ratio: 0.05
+  max_total_hole_area_ratio: 0.08
+  max_envelope_added_image_ratio: 0.08
+  max_envelope_added_subject_ratio: 0.25
+  max_person_protection_ratio: 0.85
+  max_final_protection_ratio: 0.92
   card_margin_ratio: 0.02
   min_card_area_ratio: 0.002
   max_card_area_ratio: 0.30
   min_card_aspect_ratio: 1.20
   max_card_aspect_ratio: 2.20
   max_card_count: 3
+  max_protection_card_count: 3
+  max_protection_card_area_ratio: 0.12
+  max_total_protection_card_area_ratio: 0.20
+  min_protection_card_contact_ratio: 0.20
   min_card_width_to_face_ratio: 0.45
   max_card_width_to_face_ratio: 2.00
   min_card_area_to_face_ratio: 0.08

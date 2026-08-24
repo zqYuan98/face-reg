@@ -34,8 +34,6 @@ def _options(**updates):
         "blur_working_max_dimension": 1600,
         "mask_threshold": 0.50,
         "subject_edge_alpha": 0.15,
-        "min_face_alpha_mean": 0.80,
-        "min_face_alpha_coverage": 0.80,
         "min_subject_area_ratio": 0.05,
         "max_subject_area_ratio": 0.92,
         "card_margin_ratio": 0.02,
@@ -164,6 +162,28 @@ def test_background_high_frequency_is_reduced() -> None:
     after = cv2.Laplacian(output, cv2.CV_32F)[background > 0].var()
 
     assert after < before * 0.35
+
+
+def test_broad_soft_matte_without_local_samples_uses_safe_blur_fallback() -> None:
+    y, x = np.indices((240, 240))
+    checker = (((x + y) % 2) * 220 + 20).astype(np.uint8)
+    image = np.ascontiguousarray(np.repeat(checker[:, :, None], 3, axis=2))
+    matte = np.zeros((240, 240), dtype=np.float32)
+    matte[:216, :] = 0.20
+    matte[80:160, 80:160] = 1.0
+
+    output, _summary = _blur_witness_pixels(image, matte, (), _options())
+
+    soft_region = np.s_[10:70, 10:230]
+    before = float(cv2.Laplacian(image[soft_region], cv2.CV_32F).var())
+    after = float(cv2.Laplacian(output[soft_region], cv2.CV_32F).var())
+    unchanged = np.mean(np.all(output[soft_region] == image[soft_region], axis=2))
+    assert after < before * 0.20
+    assert unchanged < 0.10
+    np.testing.assert_array_equal(
+        output[80:160, 80:160],
+        image[80:160, 80:160],
+    )
 
 
 def test_normalized_background_blur_prevents_foreground_color_bleed() -> None:

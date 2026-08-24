@@ -19,7 +19,10 @@ from face_algorithm.runtime.config import AlgorithmConfig
 from face_algorithm.runtime.model_registry import ModelRegistry
 from face_algorithm.verification import build_image_verification_runtime
 from face_algorithm.video import build_video_verification_runtime
-from face_algorithm.witness import build_witness_blur_runtime
+from face_algorithm.witness import (
+    WITNESS_FACE_MODEL_NAMES,
+    build_witness_blur_runtime,
+)
 
 
 class AlgorithmDeadlineExceeded(RuntimeError):
@@ -129,6 +132,10 @@ class DefaultAlgorithmServices:
             self._config.models.portrait_matting.enabled
             and model_states.get("portrait_matting") == "ready"
         )
+        witness_face_ready = all(
+            model_states.get(name) == "ready"
+            for name in WITNESS_FACE_MODEL_NAMES
+        )
         return {
             "status": status,
             "ready": status in {"healthy", "degraded"} and core_ready,
@@ -138,7 +145,9 @@ class DefaultAlgorithmServices:
                 "image_verification": "ready" if core_ready else "unavailable",
                 "video_verification": "ready" if core_ready else "unavailable",
                 "witness_blur": (
-                    "ready" if core_ready and portrait_ready else "unavailable"
+                    "ready"
+                    if witness_face_ready and portrait_ready
+                    else "unavailable"
                 ),
             },
         }

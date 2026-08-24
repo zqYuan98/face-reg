@@ -11,29 +11,45 @@ from face_algorithm.runtime.calibration import CalibrationLoadError
 
 
 class _Health:
-    def __init__(self, *, matting_state: str = "unavailable") -> None:
+    def __init__(
+        self,
+        *,
+        matting_state: str = "unavailable",
+        model_states: dict[str, str] | None = None,
+    ) -> None:
         self._matting_state = matting_state
+        self._model_states = dict(model_states or {})
 
     def model_dump(self, *, mode: str):
         assert mode == "json"
         return {
             "status": "healthy",
             "models": [
-                {"name": "face_detector", "state": "ready"},
-                {"name": "face_landmark_primary", "state": "ready"},
-                {"name": "face_landmark_secondary", "state": "ready"},
-                {"name": "face_recognizer", "state": "ready"},
-                {"name": "rotation_classifier", "state": "ready"},
-                {"name": "pose_var", "state": "ready"},
-                {"name": "pose_conv", "state": "ready"},
+                {"name": name, "state": self._model_states.get(name, "ready")}
+                for name in (
+                    "face_detector",
+                    "face_landmark_primary",
+                    "face_landmark_secondary",
+                    "face_recognizer",
+                    "rotation_classifier",
+                    "pose_var",
+                    "pose_conv",
+                )
+            ] + [
                 {"name": "portrait_matting", "state": self._matting_state},
             ],
         }
 
 
 class _Registry:
-    def __init__(self, *, matting_state: str = "unavailable") -> None:
+    def __init__(
+        self,
+        *,
+        matting_state: str = "unavailable",
+        model_states: dict[str, str] | None = None,
+    ) -> None:
         self._matting_state = matting_state
+        self._model_states = dict(model_states or {})
         self.manifest = SimpleNamespace(
             models=tuple(
                 SimpleNamespace(name=name)
@@ -52,7 +68,10 @@ class _Registry:
         self.reset_names: list[str] = []
 
     def health(self):
-        return _Health(matting_state=self._matting_state)
+        return _Health(
+            matting_state=self._matting_state,
+            model_states=self._model_states,
+        )
 
     def reset(self, name: str) -> None:
         self.reset_names.append(name)
@@ -307,3 +326,68 @@ def test_witness_readiness_tracks_enabled_verified_matting_model(
     services.start()
 
     assert services.readiness()["capabilities"]["witness_blur"] == "ready"
+
+
+def test_witness_readiness_does_not_require_pose_or_recognizer_models(
+    algorithm_config,
+) -> None:
+    models = algorithm_config.models.model_copy(
+        update={
+            "portrait_matting": algorithm_config.models.portrait_matting.model_copy(
+                update={"enabled": True}
+            )
+        }
+    )
+    registry = _Registry(
+        matting_state="ready",
+        model_states={
+            "face_recognizer": "unavailable",
+            "pose_var": "unavailable",
+            "pose_conv": "unavailable",
+        },
+    )
+    services = DefaultAlgorithmServices(
+        config=algorithm_config.model_copy(update={"models": models}),
+        registry=registry,
+    )
+
+    services.start()
+    readiness = services.readiness()
+
+    assert readiness["ready"] is False
+    assert readiness["capabilities"]["image_verification"] == "unavailable"
+    assert readiness["capabilities"]["video_verification"] == "unavailable"
+    assert readiness["capabilities"]["witness_blur"] == "ready"
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "rotation_classifier",
+        "face_detector",
+        "face_landmark_primary",
+        "face_landmark_secondary",
+    ],
+)
+def test_witness_readiness_requires_each_executed_face_model(
+    algorithm_config,
+    missing,
+) -> None:
+    models = algorithm_config.models.model_copy(
+        update={
+            "portrait_matting": algorithm_config.models.portrait_matting.model_copy(
+                update={"enabled": True}
+            )
+        }
+    )
+    services = DefaultAlgorithmServices(
+        config=algorithm_config.model_copy(update={"models": models}),
+        registry=_Registry(
+            matting_state="ready",
+            model_states={missing: "unavailable"},
+        ),
+    )
+
+    services.start()
+
+    assert services.readiness()["capabilities"]["witness_blur"] == "unavailable"

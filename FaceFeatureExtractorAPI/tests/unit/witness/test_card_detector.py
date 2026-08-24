@@ -75,6 +75,7 @@ def test_detects_one_trusted_card_below_the_face() -> None:
     assert result.reason_code is None
     assert result.candidate_count >= 1
     assert len(result.cards) == 1
+    assert result.protection_cards == result.cards
     assert result.cards[0].confidence >= 0.62
     assert len(result.cards[0].corners) == 4
 
@@ -86,6 +87,7 @@ def test_detects_and_preserves_two_distinct_trusted_cards() -> None:
 
     assert result.reason_code is None
     assert len(result.cards) == 2
+    assert all(card in result.protection_cards for card in result.cards)
     centers_y = sorted(
         sum(point.y for point in card.corners) / 4.0 for card in result.cards
     )
@@ -238,6 +240,7 @@ def test_card_touching_the_image_edge_requires_recapture(edge_card) -> None:
     result = _detect_card_regions(image, FACE, subject, _options())
 
     assert result.cards == ()
+    assert result.protection_cards
     assert result.reason_code is ReasonCode.CARD_CROPPED
 
 
@@ -248,6 +251,7 @@ def test_only_plausible_but_too_small_card_reports_too_small() -> None:
     result = _detect_card_regions(image, FACE, subject, _options())
 
     assert result.cards == ()
+    assert result.protection_cards
     assert result.reason_code is ReasonCode.CARD_TOO_SMALL
 
 
@@ -257,7 +261,8 @@ def test_trusted_card_plus_a_plausible_small_second_card_does_not_pass() -> None
 
     result = _detect_card_regions(image, FACE, subject, _options())
 
-    assert result.cards == ()
+    assert len(result.cards) == 1
+    assert len(result.protection_cards) >= len(result.cards)
     assert result.reason_code is ReasonCode.CARD_TOO_SMALL
 
 
@@ -269,6 +274,7 @@ def test_plausible_small_card_touching_the_edge_reports_cropped_first() -> None:
     result = _detect_card_regions(image, FACE, subject, _options())
 
     assert result.cards == ()
+    assert result.protection_cards
     assert result.reason_code is ReasonCode.CARD_CROPPED
 
 
@@ -342,6 +348,7 @@ def test_near_threshold_candidate_is_uncertain_instead_of_silently_missing() -> 
     )
 
     assert result.cards == ()
+    assert result.protection_cards
     assert result.reason_code is ReasonCode.CARD_DETECTION_UNCERTAIN
 
 
@@ -355,6 +362,7 @@ def test_more_than_configured_trusted_cards_is_uncertain_not_truncated() -> None
     result = _detect_card_regions(image, FACE, subject, _options(max_card_count=1))
 
     assert result.cards == ()
+    assert len(result.protection_cards) == 1
     assert result.reason_code is ReasonCode.CARD_DETECTION_UNCERTAIN
 
 

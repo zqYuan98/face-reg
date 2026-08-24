@@ -305,16 +305,26 @@ class WitnessOptions(_StrictModel):
     blur_working_max_dimension: int = Field(ge=128, le=4096)
     mask_threshold: float = Field(ge=0, le=1)
     subject_edge_alpha: float = Field(gt=0, le=1)
-    min_face_alpha_mean: float = Field(ge=0, le=1)
-    min_face_alpha_coverage: float = Field(ge=0, le=1)
     min_subject_area_ratio: float = Field(gt=0, lt=1)
     max_subject_area_ratio: float = Field(gt=0, lt=1)
+    face_component_min_coverage: float = Field(gt=0, le=1)
+    secondary_subject_area_ratio: float = Field(gt=0, le=1)
+    max_single_hole_area_ratio: float = Field(ge=0, le=1)
+    max_total_hole_area_ratio: float = Field(ge=0, le=1)
+    max_envelope_added_image_ratio: float = Field(ge=0, le=1)
+    max_envelope_added_subject_ratio: float = Field(ge=0, le=1)
+    max_person_protection_ratio: float = Field(gt=0, le=1)
+    max_final_protection_ratio: float = Field(gt=0, le=1)
     card_margin_ratio: float = Field(ge=0, le=0.25)
     min_card_area_ratio: float = Field(gt=0, lt=1)
     max_card_area_ratio: float = Field(gt=0, le=1)
     min_card_aspect_ratio: float = Field(gt=0)
     max_card_aspect_ratio: float = Field(gt=0)
     max_card_count: int = Field(ge=1, le=3)
+    max_protection_card_count: int = Field(ge=1, le=3)
+    max_protection_card_area_ratio: float = Field(gt=0, le=1)
+    max_total_protection_card_area_ratio: float = Field(gt=0, le=1)
+    min_protection_card_contact_ratio: float = Field(gt=0, le=1)
     min_card_width_to_face_ratio: float = Field(gt=0)
     max_card_width_to_face_ratio: float = Field(gt=0)
     min_card_area_to_face_ratio: float = Field(gt=0)
@@ -339,8 +349,21 @@ class WitnessOptions(_StrictModel):
             raise ValueError("subject_edge_alpha cannot exceed mask_threshold")
         if self.min_subject_area_ratio >= self.max_subject_area_ratio:
             raise ValueError("minimum subject area must be below maximum")
+        if self.max_single_hole_area_ratio > self.max_total_hole_area_ratio:
+            raise ValueError("single hole limit cannot exceed total hole limit")
+        if self.max_person_protection_ratio >= self.max_final_protection_ratio:
+            raise ValueError(
+                "person protection limit must be below final protection limit"
+            )
         if self.min_card_area_ratio > self.max_card_area_ratio:
             raise ValueError("minimum card area ratio cannot exceed maximum")
+        if (
+            self.max_protection_card_area_ratio
+            > self.max_total_protection_card_area_ratio
+        ):
+            raise ValueError(
+                "single protection-card limit cannot exceed total card limit"
+            )
         if self.min_card_aspect_ratio > self.max_card_aspect_ratio:
             raise ValueError("minimum card aspect ratio cannot exceed maximum")
         if self.min_card_width_to_face_ratio > self.max_card_width_to_face_ratio:
