@@ -77,7 +77,7 @@ export const CAPABILITIES = Object.freeze([
   freezeCapability({
     id: "witness",
     label: "见证照背景虚化",
-    description: "保留人物与证卡并虚化背景",
+    description: "优先保护人物，可信证卡作为额外保护，并虚化其余背景",
     endpoint: "/api/v2/witness/blur-background",
     method: "POST",
     timeoutMs: 30_000,
@@ -621,7 +621,17 @@ export function buildResultDetails(capabilityId, result) {
     add("source-size", "原图尺寸", dimensionsText(result.original_width, result.original_height));
   } else if (capability?.id === "witness") {
     add("source-size", "原图尺寸", dimensionsText(result.original_width, result.original_height));
-    add("card-count", "可信证卡数", Array.isArray(result.card_regions) ? result.card_regions.length : null);
+    const trustedCardCount = Array.isArray(result.card_regions) ? result.card_regions.length : null;
+    add(
+      "protection-mode",
+      "保护方式",
+      trustedCardCount === null
+        ? null
+        : trustedCardCount > 0
+          ? "可信证卡已识别，人物与证卡已保护"
+          : "人物保护已完成，证卡识别非必需",
+    );
+    add("card-count", "可信证卡数", trustedCardCount);
     add("card-candidates", "证卡候选数", Number.isInteger(result.card_candidate_count) ? result.card_candidate_count : null);
     add("protected-area", "前景保护面积", percentText(result.protected_area_ratio));
   } else if (capability?.responseKind === "image-verification") {

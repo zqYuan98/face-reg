@@ -20,7 +20,7 @@ const CONTENT = Object.freeze({
   witness: {
     eyebrow: "WITNESS BLUR",
     title: "见证照背景虚化",
-    description: "保留人物和证卡区域清晰，对其余背景进行虚化处理。",
+    description: "优先保持人物清晰，识别到可信证卡时额外保护，并虚化人物之外的背景。",
     action: "开始背景虚化",
   },
   "verify-images": {

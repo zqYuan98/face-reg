@@ -208,6 +208,34 @@ test("buildResultDetails allow-lists compact values and masks trace IDs", () => 
   assert.doesNotMatch(text, /决策阈值","value":"0\.0000/);
 });
 
+test("witness details treat card recognition as optional protection", () => {
+  const personOnly = buildResultDetails("witness", {
+    success: true,
+    suggestion: "PASS",
+    reason_codes: [],
+    card_regions: [],
+    card_candidate_count: 2,
+    protected_area_ratio: 0.42,
+  });
+  assert.equal(
+    personOnly.find(({ key }) => key === "protection-mode")?.value,
+    "人物保护已完成，证卡识别非必需",
+  );
+
+  const trustedCard = buildResultDetails("witness", {
+    success: true,
+    suggestion: "PASS",
+    reason_codes: [],
+    card_regions: [{ corners: [] }],
+    card_candidate_count: 1,
+    protected_area_ratio: 0.48,
+  });
+  assert.equal(
+    trustedCard.find(({ key }) => key === "protection-mode")?.value,
+    "可信证卡已识别，人物与证卡已保护",
+  );
+});
+
 test("video details never misrepresent liveness=false", () => {
   const details = buildResultDetails("verify-video-full", {
     success: true,
