@@ -34,7 +34,7 @@ HTTP 长连接。算法建议不等于合同审批结果。
 | 路由 | 字段 | 截止时间 | 说明 |
 |---|---|---:|---|
 | `POST /api/v2/portrait/generate` | `image` | 30 秒 | 生成白底头肩照，成功响应含派生图 `image_base64` |
-| `POST /api/v2/witness/blur-background` | `image` | 30 秒 | 保留人物和证卡、虚化背景，成功响应含 JPEG 派生图 `image_base64` |
+| `POST /api/v2/witness/blur-background` | `image` | 30 秒 | 人物优先保持清晰、可信证卡可选增强、虚化背景，成功响应含 JPEG 派生图 `image_base64` |
 | `POST /api/v2/verify/images` | `reference_image`, `probe_image` | 30 秒 | 工资卡见证照与入场照 1:1 |
 | `POST /api/v2/verify/video/quick` | `reference_image`, `video` | 60 秒 | 提交前快速检查 |
 | `POST /api/v2/verify/video/full` | `reference_image`, `video` | 600 秒 | 业务异步 worker 的整段检查 |
@@ -45,8 +45,13 @@ HTTP 长连接。算法建议不等于合同审批结果。
 不会注册并返回 404。响应只接受确切的 `WitnessBlurResult` 契约，未知或伪造结构统一
 失败为 500，不开放通用序列化。
 
-当前内置证卡检测器只是安全失败的预生产基线，尚未通过客户标注集的召回率与误拒率
-验收，不应据此宣布生产可用。上线门槛、16 MP 内存实测和替换检测器所需标注见
+人证接口的 `success=true` 只表示人物保护与背景虚化成功，不保证识别到证卡。
+`card_regions` 非空表示这些可信证卡也通过保护预算并保持清晰；为空是合法的
+“人物优先”结果，不应显示为失败，也不得把 `CARD_*` 原因混入成功响应。
+
+当前内置证卡检测器只是可选增强的预生产基线，尚未通过客户标注集的召回率与误拒率
+验收，因此不能对“所有证卡必定清晰”作业务承诺；人物优先的背景虚化不以它为成功
+门禁。16 MP 内存边界和替换检测器所需标注见
 [witness-blur-deployment.md](witness-blur-deployment.md)。
 
 示例：
@@ -113,7 +118,7 @@ readiness 返回 503；请求侧统一为安全的 `CALIBRATION_REQUIRED`，不�
 
 ## 7. 上传、隐私与日志
 
-- 单图默认最多 15 MiB、25 MP，见证照虚化另收紧为 16 MP；ASGI 入口从首个 body chunk
+- 单图默认最多 15 MiB、25 MP，见证照虚化本版经资源门禁后保留 16 MP；ASGI 入口从首个 body chunk
   起执行聚合大小和绝对
   deadline，handler 再限 UploadFile 字节、读取 JPEG/PNG header 校验尺寸，最后用忽略
   EXIF 自动旋转的 OpenCV 解码，统一交给现有 rotation classifier。
