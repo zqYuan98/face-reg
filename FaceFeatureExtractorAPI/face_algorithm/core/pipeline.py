@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
@@ -216,7 +216,12 @@ class FacePipeline:
             )
 
         try:
-            boxes = list(self.detector.detect(corrected))
+            detected_boxes = self.detector.detect(corrected)
+            boxes = (
+                detected_boxes
+                if isinstance(detected_boxes, Sequence)
+                else tuple(detected_boxes)
+            )
             steps.append("detection")
         except Exception:
             return finish(
@@ -228,7 +233,11 @@ class FacePipeline:
             )
         # Preserve strict-mode short-circuiting: size and border failures are
         # decided before the single candidate reaches landmark inference.
-        if getattr(profile.face_selection, "mode", None) == "exact_one" and len(boxes) == 1:
+        if (
+            getattr(profile.face_selection, "mode", None) == "exact_one"
+            and len(boxes) == 1
+            and not getattr(boxes, "saturated", False)
+        ):
             strict_raw_box = boxes[0]
             if not isinstance(strict_raw_box, FaceBox):
                 try:
@@ -322,6 +331,11 @@ class FacePipeline:
                 selected.box
                 if selected.reason_code
                 in (ReasonCode.LANDMARK_FAILED, ReasonCode.FACE_CROPPED)
+                or (
+                    selected.reason_code is ReasonCode.INFERENCE_ERROR
+                    and getattr(profile.face_selection, "mode", None)
+                    == "exact_one"
+                )
                 else None
             )
             return finish(

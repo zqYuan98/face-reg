@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+from face_algorithm.core.face_selection import FaceCandidateBatch
 from face_algorithm.core.pipeline import FacePipeline
 from face_algorithm.core.protocols import RotationResult
 from face_algorithm.runtime.config import AlgorithmConfig, load_config
@@ -56,6 +57,7 @@ _FACE_PIPELINE_MODEL_NAMES = (
 _FACE_QUALITY_MODEL_NAMES = tuple(
     name for name in _FACE_PIPELINE_MODEL_NAMES if name != "face_recognizer"
 )
+_RAW_FACE_CANDIDATE_SCAN_LIMIT = 64
 
 
 def _onnx_factory(intra_op_num_threads: int):
@@ -194,16 +196,29 @@ class FaceBoxesAdapter:
         self.score_threshold = score_threshold
         self.iou_threshold = iou_threshold
         self.max_faces_to_detect = max_faces_to_detect
+        self.raw_candidate_scan_limit = _RAW_FACE_CANDIDATE_SCAN_LIMIT
 
-    def detect(self, image: np.ndarray) -> list[FaceBox]:
+    def detect(self, image: np.ndarray) -> FaceCandidateBatch:
+        if not (
+            isinstance(image, np.ndarray)
+            and image.ndim >= 2
+            and image.shape[0] > 0
+            and image.shape[1] > 0
+        ):
+            raise ValueError("face detector image must have positive dimensions")
+        image_height, image_width = image.shape[:2]
         boxes = self.detector.detect(
             image,
             score_threshold=self.score_threshold,
             iou_threshold=self.iou_threshold,
-            topk=self.max_faces_to_detect,
+            topk=self.raw_candidate_scan_limit + 1,
         )
+        raw_boxes = [] if boxes is None else list(boxes)
+        raw_scan_saturated = len(raw_boxes) > self.raw_candidate_scan_limit
+        raw_boxes = raw_boxes[: self.raw_candidate_scan_limit]
         result: list[FaceBox] = []
-        for box in boxes or []:
+        valid_intersection_count = 0
+        for box in raw_boxes:
             try:
                 x1 = float(box.x1)
                 y1 = float(box.y1)
@@ -219,16 +234,29 @@ class FaceBoxesAdapter:
                 raise ValueError("face detector box must have positive extents")
             if not 0.0 <= score <= 1.0:
                 raise ValueError("face detector score must be in [0, 1]")
-            result.append(
-                FaceBox(
-                    x1=x1,
-                    y1=y1,
-                    x2=x2,
-                    y2=y2,
-                    confidence=score,
+            if (
+                min(x2, float(image_width)) <= max(x1, 0.0)
+                or min(y2, float(image_height)) <= max(y1, 0.0)
+            ):
+                continue
+            valid_intersection_count += 1
+            if len(result) < self.max_faces_to_detect:
+                result.append(
+                    FaceBox(
+                        x1=x1,
+                        y1=y1,
+                        x2=x2,
+                        y2=y2,
+                        confidence=score,
+                    )
                 )
-            )
-        return result
+        return FaceCandidateBatch(
+            candidates=tuple(result),
+            saturated=(
+                raw_scan_saturated
+                or valid_intersection_count > self.max_faces_to_detect
+            ),
+        )
 
 
 class Landmark5Adapter:

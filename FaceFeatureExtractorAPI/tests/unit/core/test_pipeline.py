@@ -626,6 +626,28 @@ class RaisingLandmarker:
         raise RuntimeError("synthetic landmark inference failure")
 
 
+@pytest.mark.parametrize(
+    "landmarker",
+    [
+        RaisingLandmarker(),
+        FakeLandmarker(np.zeros((4, 2), dtype=np.float32)),
+    ],
+)
+def test_exact_one_landmark_system_failure_preserves_detected_face_box(
+    landmarker,
+) -> None:
+    result = _pipeline(landmarker=landmarker).analyze_public(
+        _textured_image(),
+        _profile(),
+    )
+
+    assert result.success is False
+    assert result.suggestion is Suggestion.REVIEW
+    assert result.reason_codes == (ReasonCode.INFERENCE_ERROR,)
+    assert result.box == GOOD_BOX
+    assert result.landmarks is None
+
+
 class RaisingAligner:
     def align(self, image: np.ndarray, landmarks):
         raise RuntimeError("synthetic alignment implementation failure")

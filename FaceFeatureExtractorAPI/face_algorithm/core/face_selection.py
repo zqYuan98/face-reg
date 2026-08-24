@@ -13,6 +13,7 @@ from face_algorithm.core.protocols import LandmarkDetector
 from face_algorithm.schemas import FaceBox, ReasonCode
 
 __all__ = [
+    "FaceCandidateBatch",
     "FaceCandidateSelector",
     "FaceSelectionPreparation",
     "FaceSelectionResult",
@@ -20,6 +21,28 @@ __all__ = [
 ]
 
 _IGNORE_REGION_MIN_COVERAGE = 0.80
+
+
+@dataclass(frozen=True, slots=True)
+class FaceCandidateBatch(Sequence[FaceBox]):
+    """Bounded detector output plus a fail-closed truncation marker."""
+
+    candidates: tuple[FaceBox, ...]
+    saturated: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.candidates, tuple) or not all(
+            isinstance(candidate, FaceBox) for candidate in self.candidates
+        ):
+            raise TypeError("candidates must be a tuple of FaceBox values")
+        if not isinstance(self.saturated, bool):
+            raise TypeError("saturated must be boolean")
+
+    def __len__(self) -> int:
+        return len(self.candidates)
+
+    def __getitem__(self, index: int | slice) -> FaceBox | tuple[FaceBox, ...]:
+        return self.candidates[index]
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,11 +156,11 @@ class FaceCandidateSelector:
         geometry: Any,
     ) -> FaceSelectionPreparation:
         mode = getattr(selection, "mode", None)
-        candidate_count = _safe_candidate_count(candidates)
+        raw_candidate_count = _safe_candidate_count(candidates)
         if mode not in ("exact_one", "dominant_primary"):
             return _early_preparation(
                 mode="exact_one",
-                candidate_count=candidate_count,
+                candidate_count=raw_candidate_count,
                 reason_code=ReasonCode.INFERENCE_ERROR,
                 selection=selection,
                 geometry=geometry,
@@ -145,18 +168,41 @@ class FaceCandidateSelector:
         if not _valid_image_shape(image):
             return _early_preparation(
                 mode=mode,
-                candidate_count=candidate_count,
+                candidate_count=raw_candidate_count,
                 reason_code=ReasonCode.INFERENCE_ERROR,
                 selection=selection,
                 geometry=geometry,
             )
-        if candidate_count == 0:
+
+        provider_saturated = getattr(candidates, "saturated", False)
+        if not isinstance(provider_saturated, bool):
             return _early_preparation(
                 mode=mode,
-                candidate_count=0,
-                reason_code=ReasonCode.NO_FACE,
+                candidate_count=raw_candidate_count,
+                reason_code=ReasonCode.INFERENCE_ERROR,
                 selection=selection,
                 geometry=geometry,
+            )
+        try:
+            normalized = _normalize_candidates(image.shape, candidates)
+        except (AttributeError, TypeError, ValueError):
+            return _early_preparation(
+                mode=mode,
+                candidate_count=raw_candidate_count,
+                reason_code=ReasonCode.INFERENCE_ERROR,
+                selection=selection,
+                geometry=geometry,
+            )
+        candidate_count = len(normalized)
+
+        if provider_saturated:
+            return _early_preparation(
+                mode=mode,
+                candidate_count=candidate_count,
+                reason_code=ReasonCode.MULTIPLE_FACES,
+                selection=selection,
+                geometry=geometry,
+                saturated=True,
             )
 
         if mode == "exact_one" and candidate_count >= 2:
@@ -188,21 +234,10 @@ class FaceCandidateSelector:
                     geometry=geometry,
                     saturated=True,
                 )
-
-        try:
-            normalized = _normalize_candidates(image.shape, candidates)
-        except (AttributeError, TypeError, ValueError):
-            return _early_preparation(
-                mode=mode,
-                candidate_count=candidate_count,
-                reason_code=ReasonCode.INFERENCE_ERROR,
-                selection=selection,
-                geometry=geometry,
-            )
         if not normalized:
             reason = (
                 ReasonCode.FACE_CROPPED
-                if mode == "exact_one"
+                if mode == "exact_one" and raw_candidate_count > 0
                 else ReasonCode.NO_FACE
             )
             return _early_preparation(
@@ -237,7 +272,7 @@ class FaceCandidateSelector:
                     saturated=False,
                     candidates=normalized,
                     assessments=tuple(assessments),
-                    primary_index=None,
+                    primary_index=index if mode == "exact_one" else None,
                     reason_code=error,
                     selection=selection,
                     geometry=geometry,

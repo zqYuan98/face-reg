@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from face_algorithm.core.face_selection import FaceCandidateSelector
+from face_algorithm.core.face_selection import FaceCandidateBatch, FaceCandidateSelector
 from face_algorithm.schemas import FaceBox, ReasonCode
 
 
@@ -150,6 +150,53 @@ def test_sixth_saturation_candidate_fails_closed_before_landmarks() -> None:
 
     assert result.reason_code is ReasonCode.MULTIPLE_FACES
     assert result.candidate_count == 6
+    assert result.saturated is True
+    assert landmarker.calls == []
+
+
+def test_five_fully_outside_boxes_do_not_create_false_saturation() -> None:
+    selector = FaceCandidateSelector()
+    primary = _box(250, 100, 200)
+    outside = [
+        FaceBox(
+            x1=-300.0 - index * 50.0,
+            y1=50.0,
+            x2=-250.0 - index * 50.0,
+            y2=100.0,
+            confidence=0.99,
+        )
+        for index in range(5)
+    ]
+    landmarker = GeometryLandmarker()
+
+    result = selector.select(
+        IMAGE,
+        [primary, *outside],
+        landmarker,
+        DOMINANT,
+        GEOMETRY,
+    )
+
+    assert result.reason_code is None
+    assert result.candidate_count == 1
+    assert result.saturated is False
+    assert len(landmarker.calls) == 1
+
+
+def test_provider_saturation_marker_fails_closed_after_outside_filtering() -> None:
+    primary = _box(250, 100, 200)
+    candidates = FaceCandidateBatch((primary,), saturated=True)
+    landmarker = GeometryLandmarker()
+
+    result = FaceCandidateSelector().select(
+        IMAGE,
+        candidates,
+        landmarker,
+        DOMINANT,
+        GEOMETRY,
+    )
+
+    assert result.reason_code is ReasonCode.MULTIPLE_FACES
     assert result.saturated is True
     assert landmarker.calls == []
 
