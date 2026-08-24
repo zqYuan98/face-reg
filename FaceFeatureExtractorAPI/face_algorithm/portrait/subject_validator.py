@@ -88,10 +88,6 @@ def validate_portrait_subject(
     )
     robust_min_pixels = max(1, int(np.ceil(robust_width_ratio * face.width)))
     head_row_counts = np.count_nonzero(hard[:, head_x1:head_x2], axis=1)
-    robust_rows = np.flatnonzero(head_row_counts >= robust_min_pixels)
-    if robust_rows.size == 0:
-        raise PortraitSubjectValidationError(ReasonCode.MATTING_LOW_CONFIDENCE)
-    robust_core_top = int(robust_rows[0])
 
     top_edge_min_pixels = int(
         np.ceil(_setting(template, "top_edge_min_pixels", 2))
@@ -114,6 +110,14 @@ def validate_portrait_subject(
         "min_top_edge_core_coverage",
         0.15,
     )
+    placement_min_pixels = max(
+        robust_min_pixels,
+        int(np.ceil(min_top_coverage * float(head_x2 - head_x1))),
+    )
+    placement_rows = np.flatnonzero(head_row_counts >= placement_min_pixels)
+    if placement_rows.size == 0:
+        raise PortraitSubjectValidationError(ReasonCode.MATTING_LOW_CONFIDENCE)
+    robust_core_top = int(placement_rows[0])
     available_headroom = face.y1 - float(robust_core_top)
     if (
         robust_core_top < top_edge_band_height

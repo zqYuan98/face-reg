@@ -304,6 +304,19 @@ def test_sparse_hard_tail_touching_top_does_not_change_placement_geometry() -> N
     assert result.image is not None
 
 
+def test_connected_hard_tail_below_effective_top_coverage_does_not_fail_geometry() -> None:
+    alpha = _alpha()
+    # A 9px connected tail exceeds the 5% face-row threshold but is not a
+    # meaningful head top within the expanded ROI.
+    alpha[0:52, 236:245] = 1.0
+
+    result = _runtime(alpha=alpha).generate(_image())
+
+    assert result.success is True
+    assert result.reason_codes == ()
+    assert result.image is not None
+
+
 def test_true_head_top_crop_requests_recapture() -> None:
     face = FaceBox(
         x1=150.0,

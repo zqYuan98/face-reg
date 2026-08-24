@@ -77,8 +77,19 @@ def test_top_occupancy_below_threshold_does_not_claim_a_crop() -> None:
 
     validation = validate_portrait_subject(core, face, _settings())
 
-    assert validation.robust_core_top == 0
+    assert validation.robust_core_top == 20
     assert validation.top_edge_core_coverage < 0.15
+
+
+def test_connected_hard_tail_between_row_and_edge_thresholds_is_not_placement_top() -> None:
+    core = _complete_core()
+    # Nine pixels satisfy ceil(5% * 100px face width), but remain far below
+    # 15% of the expanded 150px head ROI and must not drive placement.
+    core[0:20, 96:105] = 1
+
+    validation = validate_portrait_subject(core, FACE, _settings())
+
+    assert validation.robust_core_top == 20
 
 
 def test_shoulder_overall_coverage_is_required() -> None:
