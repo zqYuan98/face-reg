@@ -48,6 +48,16 @@
 固定使用随机种子 `2026001`，同一批次至少抽取 30 张；只记录匿名序号、像素尺寸、
 建议和原因码，不复制原始文件名，不提交图片或派生图到 Git。
 
+```powershell
+python scripts/random_field_smoke.py `
+  --input-dir C:\path\to\download_images `
+  --base-url http://<server-37>:18002 `
+  --sample-size 30 `
+  --seed 2026001
+```
+
+脚本上传时使用固定匿名文件名，控制台和可选 JSON 报告均不包含原始文件名。
+
 随机目录本身可能混有多人、裁剪、无脸或不属于对应业务场景的图片，因此验收目标不是
 “全部 PASS”，而是确认：
 
