@@ -17,8 +17,10 @@ from models.facedetector import Box
 class FakeRawDetector:
     def __init__(self, boxes) -> None:
         self.boxes = boxes
+        self.kwargs = None
 
     def detect(self, *_args, **_kwargs):
+        self.kwargs = _kwargs
         return self.boxes
 
 
@@ -39,6 +41,37 @@ def test_face_boxes_adapter_preserves_finite_negative_coordinates(monkeypatch) -
     assert len(result) == 1
     assert result[0].x1 == -20.0
     assert result[0].y1 == -10.0
+
+
+def test_face_boxes_adapter_requests_five_candidates_plus_saturation_slot(
+    monkeypatch,
+) -> None:
+    detector = FakeRawDetector([])
+    monkeypatch.setattr(adapters, "FaceBoxesV2", lambda session: detector)
+    adapter = FaceBoxesAdapter(object())
+
+    adapter.detect(np.zeros((100, 100, 3), dtype=np.uint8))
+
+    assert adapter.max_faces_to_detect == 6
+    assert detector.kwargs["topk"] == 6
+
+
+def test_face_boxes_adapter_rejects_unbounded_candidate_limit(monkeypatch) -> None:
+    monkeypatch.setattr(adapters, "FaceBoxesV2", lambda session: FakeRawDetector([]))
+
+    with pytest.raises(ValueError, match="cannot exceed six"):
+        FaceBoxesAdapter(object(), max_faces_to_detect=7)
+
+
+@pytest.mark.parametrize("invalid_limit", [True, 6.0, "6"])
+def test_face_boxes_adapter_requires_integer_candidate_limit(
+    monkeypatch,
+    invalid_limit,
+) -> None:
+    monkeypatch.setattr(adapters, "FaceBoxesV2", lambda session: FakeRawDetector([]))
+
+    with pytest.raises(TypeError, match="integer"):
+        FaceBoxesAdapter(object(), max_faces_to_detect=invalid_limit)
 
 
 @pytest.mark.parametrize(

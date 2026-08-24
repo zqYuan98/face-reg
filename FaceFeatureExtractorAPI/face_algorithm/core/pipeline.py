@@ -18,6 +18,7 @@ from face_algorithm.core.contracts import (
     extract_normalized_embedding,
     validate_image_input,
 )
+from face_algorithm.core.face_selection import FaceCandidateSelector
 from face_algorithm.core.protocols import (
     FaceAligner,
     FaceDetector,
@@ -81,6 +82,7 @@ class FacePipeline:
         config_version: str,
         max_image_pixels: int,
         model_evidence: Mapping[str, VerifiedModelEvidence] | None = None,
+        face_selector: FaceCandidateSelector | None = None,
     ) -> None:
         object.__setattr__(self, "_sealed", False)
         if isinstance(max_image_pixels, bool) or not isinstance(max_image_pixels, int):
@@ -93,6 +95,7 @@ class FacePipeline:
         self.aligner = aligner
         self.pose_estimator = pose_estimator
         self.embedder = embedder
+        self.face_selector = face_selector or FaceCandidateSelector()
         self.model_versions = MappingProxyType(dict(model_versions))
         self.config_version = config_version
         self.max_image_pixels = max_image_pixels
@@ -223,20 +226,124 @@ class FacePipeline:
                 suggestion=Suggestion.REVIEW,
                 completed=False,
             )
-        if not boxes:
-            return finish(
-                (ReasonCode.NO_FACE,),
-                quarter_turns=quarter_turns,
-                corrected=corrected,
+        # Preserve strict-mode short-circuiting: size and border failures are
+        # decided before the single candidate reaches landmark inference.
+        if getattr(profile.face_selection, "mode", None) == "exact_one" and len(boxes) == 1:
+            strict_raw_box = boxes[0]
+            if not isinstance(strict_raw_box, FaceBox):
+                try:
+                    strict_raw_box = FaceBox(
+                        x1=float(strict_raw_box.x1),
+                        y1=float(strict_raw_box.y1),
+                        x2=float(strict_raw_box.x2),
+                        y2=float(strict_raw_box.y2),
+                        confidence=float(
+                            getattr(
+                                strict_raw_box,
+                                "confidence",
+                                getattr(strict_raw_box, "score", 1.0),
+                            )
+                        ),
+                    )
+                except Exception:
+                    return finish(
+                        (ReasonCode.INFERENCE_ERROR,),
+                        quarter_turns=quarter_turns,
+                        corrected=corrected,
+                        suggestion=Suggestion.REVIEW,
+                        completed=False,
+                    )
+            if (
+                strict_raw_box.width < profile.resolution.width
+                or strict_raw_box.height < profile.resolution.height
+            ):
+                return finish(
+                    (ReasonCode.FACE_TOO_SMALL,),
+                    box=_clip_box(strict_raw_box, corrected.shape),
+                    quarter_turns=quarter_turns,
+                    corrected=corrected,
+                )
+            strict_clipped_box = _clip_box(strict_raw_box, corrected.shape)
+            if strict_clipped_box is None or _box_touches_margin(
+                strict_raw_box,
+                corrected.shape,
+                profile.border_margin_ratio,
+            ):
+                return finish(
+                    (ReasonCode.FACE_CROPPED,),
+                    box=strict_clipped_box,
+                    quarter_turns=quarter_turns,
+                    corrected=corrected,
+                )
+
+        try:
+            selected = self.face_selector.select(
+                corrected,
+                boxes,
+                self.landmarker,
+                profile.face_selection,
+                profile.landmark_geometry,
             )
-        if profile.require_single_face and len(boxes) != 1:
+        except Exception:
             return finish(
-                (ReasonCode.MULTIPLE_FACES,),
+                (ReasonCode.INFERENCE_ERROR,),
                 quarter_turns=quarter_turns,
                 corrected=corrected,
+                suggestion=Suggestion.REVIEW,
+                completed=False,
+            )
+        if selected.landmarks is not None:
+            steps.append("landmarks")
+        if selected.reason_code is not None:
+            if (
+                selected.reason_code is ReasonCode.LANDMARK_FAILED
+                and selected.landmarks is not None
+                and _landmarks_touch_margin(
+                    selected.landmarks,
+                    corrected.shape,
+                    profile.border_margin_ratio,
+                )
+            ):
+                cropped_landmarks = FaceLandmarks(
+                    points=tuple(
+                        LandmarkPoint(x=float(point[0]), y=float(point[1]))
+                        for point in selected.landmarks
+                    )
+                )
+                return finish(
+                    (ReasonCode.FACE_CROPPED,),
+                    box=selected.box,
+                    landmarks=cropped_landmarks,
+                    quarter_turns=quarter_turns,
+                    corrected=corrected,
+                )
+            system_failure = selected.reason_code is ReasonCode.INFERENCE_ERROR
+            selection_box = (
+                selected.box
+                if selected.reason_code
+                in (ReasonCode.LANDMARK_FAILED, ReasonCode.FACE_CROPPED)
+                else None
+            )
+            return finish(
+                (selected.reason_code,),
+                box=selection_box,
+                quarter_turns=quarter_turns,
+                corrected=corrected,
+                suggestion=Suggestion.REVIEW if system_failure else None,
+                completed=not system_failure,
             )
 
-        raw_box = boxes[0]
+        raw_box = selected.raw_box
+        clipped_box = selected.box
+        landmark_array = selected.landmarks
+        if raw_box is None or clipped_box is None or landmark_array is None:
+            return finish(
+                (ReasonCode.INFERENCE_ERROR,),
+                quarter_turns=quarter_turns,
+                corrected=corrected,
+                suggestion=Suggestion.REVIEW,
+                completed=False,
+            )
         if not isinstance(raw_box, FaceBox):
             try:
                 raw_box = FaceBox(
@@ -265,8 +372,7 @@ class FacePipeline:
                 corrected=corrected,
             )
 
-        clipped_box = _clip_box(raw_box, corrected.shape)
-        if clipped_box is None or _box_touches_margin(
+        if _box_touches_margin(
             raw_box,
             corrected.shape,
             profile.border_margin_ratio,
@@ -278,30 +384,6 @@ class FacePipeline:
                 corrected=corrected,
             )
 
-        try:
-            landmark_array = np.asarray(
-                self.landmarker.detect(corrected, clipped_box),
-                dtype=np.float32,
-            )
-            steps.append("landmarks")
-        except Exception:
-            return finish(
-                (ReasonCode.INFERENCE_ERROR,),
-                box=clipped_box,
-                quarter_turns=quarter_turns,
-                corrected=corrected,
-                suggestion=Suggestion.REVIEW,
-                completed=False,
-            )
-        if landmark_array.shape != (5, 2) or not np.all(np.isfinite(landmark_array)):
-            return finish(
-                (ReasonCode.INFERENCE_ERROR,),
-                box=clipped_box,
-                quarter_turns=quarter_turns,
-                corrected=corrected,
-                suggestion=Suggestion.REVIEW,
-                completed=False,
-            )
         public_landmarks = FaceLandmarks(
             points=tuple(
                 LandmarkPoint(x=float(point[0]), y=float(point[1]))
@@ -320,14 +402,6 @@ class FacePipeline:
                 quarter_turns=quarter_turns,
                 corrected=corrected,
             )
-        if not _valid_landmarks(landmark_array, clipped_box, profile.landmark_geometry):
-            return finish(
-                (ReasonCode.LANDMARK_FAILED,),
-                box=clipped_box,
-                quarter_turns=quarter_turns,
-                corrected=corrected,
-            )
-
         try:
             aligned = self.aligner.align(corrected, landmark_array)
             steps.append("alignment")
@@ -517,29 +591,3 @@ def _landmarks_touch_margin(
         or np.any(landmarks[:, 0] >= width - margin)
         or np.any(landmarks[:, 1] >= height - margin)
     )
-
-
-def _valid_landmarks(landmarks: np.ndarray, box: FaceBox, geometry: Any) -> bool:
-    if landmarks.shape != (5, 2) or not np.all(np.isfinite(landmarks)):
-        return False
-    tolerance_x = box.width * geometry.bbox_tolerance_ratio
-    tolerance_y = box.height * geometry.bbox_tolerance_ratio
-    if geometry.require_points_inside_bbox and (
-        np.any(landmarks[:, 0] < box.x1 - tolerance_x)
-        or np.any(landmarks[:, 0] > box.x2 + tolerance_x)
-        or np.any(landmarks[:, 1] < box.y1 - tolerance_y)
-        or np.any(landmarks[:, 1] > box.y2 + tolerance_y)
-    ):
-        return False
-    left_eye, right_eye, nose, left_mouth, right_mouth = landmarks
-    if not (left_eye[0] < right_eye[0] and left_mouth[0] < right_mouth[0]):
-        return False
-    if not (max(left_eye[1], right_eye[1]) < nose[1] < min(left_mouth[1], right_mouth[1])):
-        return False
-    if (right_eye[0] - left_eye[0]) / box.width < geometry.min_eye_distance_ratio:
-        return False
-    if (right_mouth[0] - left_mouth[0]) / box.width < geometry.min_mouth_width_ratio:
-        return False
-    if abs(right_eye[1] - left_eye[1]) / box.height > geometry.max_eye_vertical_difference_ratio:
-        return False
-    return True

@@ -37,7 +37,7 @@ GOOD_LANDMARKS = np.asarray(
 
 def _profile(**overrides):
     values = {
-        "require_single_face": True,
+        "face_selection": SimpleNamespace(mode="exact_one"),
         "brightness": SimpleNamespace(v0=0.0, v1=1.0, v2=254.0, v3=255.0),
         "resolution": SimpleNamespace(width=100, height=100),
         "pose": SimpleNamespace(
@@ -94,6 +94,24 @@ class FakeLandmarker:
     def detect(self, image: np.ndarray, face: FaceBox):
         self.calls += 1
         return np.asarray(self.landmarks).copy()
+
+
+class FaceAwareLandmarker:
+    def __init__(self):
+        self.calls = 0
+
+    def detect(self, image: np.ndarray, face: FaceBox):
+        self.calls += 1
+        return np.asarray(
+            [
+                (face.x1 + 0.25 * face.width, face.y1 + 0.30 * face.height),
+                (face.x1 + 0.75 * face.width, face.y1 + 0.30 * face.height),
+                (face.x1 + 0.50 * face.width, face.y1 + 0.52 * face.height),
+                (face.x1 + 0.32 * face.width, face.y1 + 0.75 * face.height),
+                (face.x1 + 0.68 * face.width, face.y1 + 0.75 * face.height),
+            ],
+            dtype=np.float32,
+        )
 
 
 _DEFAULT_ALIGNED = object()
@@ -259,6 +277,56 @@ def test_zero_or_multiple_faces_never_reaches_landmarks(boxes, expected) -> None
     assert result.success is True
     assert result.suggestion is Suggestion.RECAPTURE
     assert landmarker.calls == 0
+
+
+def test_dominant_profile_ignores_tiny_secondary_and_reuses_primary_landmarks() -> None:
+    tiny = FaceBox(x1=25.0, y1=25.0, x2=75.0, y2=75.0, confidence=0.99)
+    landmarker = FaceAwareLandmarker()
+    profile = _profile(
+        face_selection=SimpleNamespace(
+            mode="dominant_primary",
+            max_face_candidates=5,
+            ignore_secondary_area_ratio=0.10,
+            ambiguous_secondary_area_ratio=0.20,
+            secondary_min_confidence=0.70,
+            selector_version="dominant-primary-v1",
+        )
+    )
+
+    result = _pipeline(
+        detector=FakeDetector([tiny, GOOD_BOX]),
+        landmarker=landmarker,
+    ).analyze_public(_textured_image(), profile)
+
+    assert result.reason_codes == ()
+    assert result.box == GOOD_BOX
+    assert landmarker.calls == 1
+
+
+def test_dominant_profile_stops_before_embedding_on_ambiguous_second_face() -> None:
+    second = FaceBox(x1=40.0, y1=100.0, x2=230.0, y2=290.0, confidence=0.95)
+    landmarker = FaceAwareLandmarker()
+    embedder = FakeEmbedder()
+    profile = _profile(
+        face_selection=SimpleNamespace(
+            mode="dominant_primary",
+            max_face_candidates=5,
+            ignore_secondary_area_ratio=0.10,
+            ambiguous_secondary_area_ratio=0.20,
+            secondary_min_confidence=0.70,
+            selector_version="dominant-primary-v1",
+        )
+    )
+
+    result = _pipeline(
+        detector=FakeDetector([second, GOOD_BOX]),
+        landmarker=landmarker,
+        embedder=embedder,
+    ).analyze_trusted(_textured_image(), profile)
+
+    assert result.public.reason_codes == (ReasonCode.MULTIPLE_FACES,)
+    assert result.embedding is None
+    assert embedder.calls == 0
 
 
 def test_raw_face_size_is_checked_before_alignment_can_upscale() -> None:

@@ -1,4 +1,4 @@
-config_version: 2026-08-04-v1
+config_version: 2026-08-24-v1
 feature_version: recognizer_v1_1024
 
 resources:
@@ -94,7 +94,7 @@ models:
 
 quality_profiles:
   portrait:
-    require_single_face: true
+    face_selection: {mode: dominant_primary, max_face_candidates: 5, ignore_secondary_area_ratio: 0.10, ambiguous_secondary_area_ratio: 0.20, secondary_min_confidence: 0.70, selector_version: dominant-primary-v1}
     brightness: {v0: 69.0, v1: 70.0, v2: 230.0, v3: 231.0}
     resolution: {width: 112, height: 112}
     pose: {yaw_threshold: 15.0, pitch_threshold: 15.0, roll_threshold: 10.0}
@@ -102,7 +102,7 @@ quality_profiles:
     border_margin_ratio: 0.02
     landmark_geometry: {require_points_inside_bbox: true, bbox_tolerance_ratio: 0.02, min_eye_distance_ratio: 0.15, min_mouth_width_ratio: 0.10, max_eye_vertical_difference_ratio: 0.20}
   witness:
-    require_single_face: true
+    face_selection: {mode: dominant_primary, max_face_candidates: 5, ignore_secondary_area_ratio: 0.10, ambiguous_secondary_area_ratio: 0.20, secondary_min_confidence: 0.70, selector_version: dominant-primary-v1}
     brightness: {v0: 69.0, v1: 70.0, v2: 230.0, v3: 231.0}
     resolution: {width: 112, height: 112}
     pose: {yaw_threshold: 30.0, pitch_threshold: 25.0, roll_threshold: 20.0}
@@ -110,7 +110,7 @@ quality_profiles:
     border_margin_ratio: 0.02
     landmark_geometry: {require_points_inside_bbox: true, bbox_tolerance_ratio: 0.02, min_eye_distance_ratio: 0.15, min_mouth_width_ratio: 0.10, max_eye_vertical_difference_ratio: 0.20}
   entry_verify:
-    require_single_face: true
+    face_selection: {mode: exact_one}
     brightness: {v0: 69.0, v1: 70.0, v2: 230.0, v3: 231.0}
     resolution: {width: 112, height: 112}
     pose: {yaw_threshold: 30.0, pitch_threshold: 25.0, roll_threshold: 20.0}
@@ -118,7 +118,7 @@ quality_profiles:
     border_margin_ratio: 0.02
     landmark_geometry: {require_points_inside_bbox: true, bbox_tolerance_ratio: 0.02, min_eye_distance_ratio: 0.15, min_mouth_width_ratio: 0.10, max_eye_vertical_difference_ratio: 0.20}
   contract_reference:
-    require_single_face: true
+    face_selection: {mode: exact_one}
     brightness: {v0: 69.0, v1: 70.0, v2: 230.0, v3: 231.0}
     resolution: {width: 112, height: 112}
     pose: {yaw_threshold: 25.0, pitch_threshold: 20.0, roll_threshold: 15.0}
@@ -126,7 +126,7 @@ quality_profiles:
     border_margin_ratio: 0.02
     landmark_geometry: {require_points_inside_bbox: true, bbox_tolerance_ratio: 0.02, min_eye_distance_ratio: 0.15, min_mouth_width_ratio: 0.10, max_eye_vertical_difference_ratio: 0.20}
   contract_video_frame:
-    require_single_face: true
+    face_selection: {mode: exact_one}
     brightness: {v0: 69.0, v1: 70.0, v2: 230.0, v3: 231.0}
     resolution: {width: 112, height: 112}
     pose: {yaw_threshold: 30.0, pitch_threshold: 25.0, roll_threshold: 20.0}

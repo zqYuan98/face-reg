@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Mapping
 from ipaddress import ip_network
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
@@ -151,14 +152,64 @@ class LandmarkGeometry(_StrictModel):
     max_eye_vertical_difference_ratio: float = Field(ge=0, le=1)
 
 
+class ExactOneFaceSelection(_StrictModel):
+    mode: Literal["exact_one"]
+
+
+class DominantPrimaryFaceSelection(_StrictModel):
+    mode: Literal["dominant_primary"]
+    max_face_candidates: int = Field(ge=1, le=5)
+    ignore_secondary_area_ratio: float = Field(gt=0, lt=1)
+    ambiguous_secondary_area_ratio: float = Field(gt=0, le=1)
+    secondary_min_confidence: float = Field(ge=0, le=1)
+    selector_version: Literal["dominant-primary-v1"]
+
+    @model_validator(mode="after")
+    def validate_area_threshold_order(self) -> Self:
+        if (
+            self.ignore_secondary_area_ratio
+            >= self.ambiguous_secondary_area_ratio
+        ):
+            raise ValueError(
+                "ignore secondary area ratio must be below ambiguous secondary area ratio"
+            )
+        return self
+
+
+FaceSelectionConfig = Annotated[
+    ExactOneFaceSelection | DominantPrimaryFaceSelection,
+    Field(discriminator="mode"),
+]
+
+
 class QualityProfile(_StrictModel):
-    require_single_face: bool
+    face_selection: FaceSelectionConfig
     brightness: BrightnessThresholds
     resolution: ResolutionLimits
     pose: PoseThresholds
     clarity: ClarityThresholds
     border_margin_ratio: float = Field(ge=0, lt=0.5)
     landmark_geometry: LandmarkGeometry
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_face_selection(cls, value: Any) -> Any:
+        if isinstance(value, Mapping) and "require_single_face" in value:
+            raise ValueError(
+                "require_single_face was removed; migrate to face_selection.mode"
+            )
+        return value
+
+    @property
+    def require_single_face(self) -> bool:
+        """Compatibility view for strict-only internal guards.
+
+        The value is derived from the discriminated strategy and is not a
+        configuration field, so ``face_selection`` remains the sole source of
+        truth and the legacy YAML key is still rejected.
+        """
+
+        return self.face_selection.mode == "exact_one"
 
 
 class QualityProfiles(_StrictModel):
@@ -167,6 +218,24 @@ class QualityProfiles(_StrictModel):
     entry_verify: QualityProfile
     contract_reference: QualityProfile
     contract_video_frame: QualityProfile
+
+    @model_validator(mode="after")
+    def validate_face_selection_modes(self) -> Self:
+        for profile_name in ("portrait", "witness"):
+            if getattr(self, profile_name).face_selection.mode != "dominant_primary":
+                raise ValueError(
+                    f"{profile_name} face_selection must use dominant_primary"
+                )
+        for profile_name in (
+            "entry_verify",
+            "contract_reference",
+            "contract_video_frame",
+        ):
+            if getattr(self, profile_name).face_selection.mode != "exact_one":
+                raise ValueError(
+                    f"{profile_name} face_selection must use exact_one"
+                )
+        return self
 
 
 class PortraitTemplate(_StrictModel):
@@ -421,8 +490,6 @@ class AlgorithmConfig(_StrictModel):
             > self.resources.max_full_video_frames
         ):
             raise ValueError("full video policy exceeds the resource frame limit")
-        if not self.quality_profiles.contract_video_frame.require_single_face:
-            raise ValueError("contract video frame must require exactly one face")
         if self.witness.max_witness_pixels > self.resources.max_image_pixels:
             raise ValueError("witness pixel limit exceeds the shared image limit")
         return self

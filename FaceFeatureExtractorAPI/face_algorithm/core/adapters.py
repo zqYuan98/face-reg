@@ -179,10 +179,17 @@ class FaceBoxesAdapter:
         *,
         score_threshold: float = 0.35,
         iou_threshold: float = 0.45,
-        max_faces_to_detect: int = 2,
+        max_faces_to_detect: int = 6,
     ) -> None:
+        if isinstance(max_faces_to_detect, bool) or not isinstance(
+            max_faces_to_detect,
+            int,
+        ):
+            raise TypeError("max_faces_to_detect must be an integer")
         if max_faces_to_detect < 2:
             raise ValueError("max_faces_to_detect must be at least two")
+        if max_faces_to_detect > 6:
+            raise ValueError("max_faces_to_detect cannot exceed six")
         self.detector = FaceBoxesV2(session=session)
         self.score_threshold = score_threshold
         self.iou_threshold = iou_threshold

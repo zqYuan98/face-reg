@@ -135,6 +135,25 @@ def _artifact_payload(config, evidence) -> dict:
     }
 
 
+def test_quality_profile_fingerprint_binds_face_selection_strategy(
+    tmp_path: Path,
+) -> None:
+    baseline = load_config(DEFAULT_CONFIG).quality_profiles.portrait
+    payload = deepcopy(_default_payload())
+    payload["quality_profiles"]["portrait"]["face_selection"][
+        "secondary_min_confidence"
+    ] = 0.71
+    changed = _write_config(tmp_path / "selector-threshold.yaml", payload)
+
+    assert fingerprint_quality_profile(
+        baseline,
+        role="probe",
+    ) != fingerprint_quality_profile(
+        changed.quality_profiles.portrait,
+        role="probe",
+    )
+
+
 def _signed_artifact(
     tmp_path: Path,
     *,

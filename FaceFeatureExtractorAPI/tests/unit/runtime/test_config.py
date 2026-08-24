@@ -102,7 +102,7 @@ def test_default_path_is_package_relative(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert resolve_config_path() == DEFAULT_CONFIG.resolve()
     config = load_config()
-    assert config.config_version == "2026-08-04-v1"
+    assert config.config_version == "2026-08-24-v1"
     assert config.resources.max_video_fps == 120.0
 
 
@@ -125,7 +125,7 @@ def test_default_path_falls_back_to_sys_prefix(
 
     assert resolve_config_path() == expected.resolve()
     config = load_config()
-    assert config.config_version == "2026-08-04-v1"
+    assert config.config_version == "2026-08-24-v1"
     assert config.models.face_detector.path == (
         prefix / "checkpoints" / "faceboxesv2-640x640.onnx"
     ).resolve()
@@ -290,12 +290,103 @@ def test_artifact_video_calibration_paths_resolve_from_config_directory(
 
 def test_contract_video_frame_must_require_exactly_one_face(tmp_path: Path) -> None:
     payload = deepcopy(_default_payload())
-    payload["quality_profiles"]["contract_video_frame"][
-        "require_single_face"
-    ] = False
+    payload["quality_profiles"]["contract_video_frame"]["face_selection"] = {
+        "mode": "dominant_primary",
+        "max_face_candidates": 5,
+        "ignore_secondary_area_ratio": 0.10,
+        "ambiguous_secondary_area_ratio": 0.20,
+        "secondary_min_confidence": 0.70,
+        "selector_version": "dominant-primary-v1",
+    }
 
-    with pytest.raises(ValidationError, match="contract video frame must require"):
+    with pytest.raises(ValidationError, match="contract_video_frame.*exact_one"):
         load_config(_write_config(tmp_path / "unsafe-video-profile.yaml", payload))
+
+
+def test_legacy_require_single_face_is_rejected_with_migration_error(
+    tmp_path: Path,
+) -> None:
+    payload = deepcopy(_default_payload())
+    profile = payload["quality_profiles"]["entry_verify"]
+    profile["require_single_face"] = True
+
+    with pytest.raises(ValidationError, match="require_single_face.*face_selection"):
+        load_config(_write_config(tmp_path / "legacy-face-selection.yaml", payload))
+
+
+@pytest.mark.parametrize("profile_name", ["portrait", "witness"])
+def test_field_profiles_require_dominant_primary(
+    tmp_path: Path,
+    profile_name: str,
+) -> None:
+    payload = deepcopy(_default_payload())
+    payload["quality_profiles"][profile_name]["face_selection"] = {
+        "mode": "exact_one"
+    }
+
+    with pytest.raises(ValidationError, match=rf"{profile_name}.*dominant_primary"):
+        load_config(_write_config(tmp_path / f"strict-{profile_name}.yaml", payload))
+
+
+@pytest.mark.parametrize(
+    "profile_name",
+    ["entry_verify", "contract_reference", "contract_video_frame"],
+)
+def test_identity_profiles_require_exact_one(
+    tmp_path: Path,
+    profile_name: str,
+) -> None:
+    payload = deepcopy(_default_payload())
+    payload["quality_profiles"][profile_name]["face_selection"] = deepcopy(
+        payload["quality_profiles"]["portrait"]["face_selection"]
+    )
+
+    with pytest.raises(ValidationError, match=rf"{profile_name}.*exact_one"):
+        load_config(_write_config(tmp_path / f"dominant-{profile_name}.yaml", payload))
+
+
+def test_exact_one_rejects_dominant_only_fields(tmp_path: Path) -> None:
+    payload = deepcopy(_default_payload())
+    payload["quality_profiles"]["entry_verify"]["face_selection"] = {
+        "mode": "exact_one",
+        "max_face_candidates": 5,
+    }
+
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        load_config(_write_config(tmp_path / "mixed-selection.yaml", payload))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("max_face_candidates", 6, "less than or equal to 5"),
+        ("ignore_secondary_area_ratio", 0.0, "greater than 0"),
+        ("ambiguous_secondary_area_ratio", 1.01, "less than or equal to 1"),
+        ("secondary_min_confidence", 1.01, "less than or equal to 1"),
+        ("selector_version", "unknown", "dominant-primary-v1"),
+    ],
+)
+def test_dominant_primary_thresholds_are_strictly_validated(
+    tmp_path: Path,
+    field: str,
+    value: Any,
+    message: str,
+) -> None:
+    payload = deepcopy(_default_payload())
+    payload["quality_profiles"]["portrait"]["face_selection"][field] = value
+
+    with pytest.raises(ValidationError, match=message):
+        load_config(_write_config(tmp_path / f"invalid-{field}.yaml", payload))
+
+
+def test_dominant_primary_area_thresholds_must_be_ordered(tmp_path: Path) -> None:
+    payload = deepcopy(_default_payload())
+    selection = payload["quality_profiles"]["portrait"]["face_selection"]
+    selection["ignore_secondary_area_ratio"] = 0.20
+    selection["ambiguous_secondary_area_ratio"] = 0.20
+
+    with pytest.raises(ValidationError, match="ignore.*below.*ambiguous"):
+        load_config(_write_config(tmp_path / "unordered-selection.yaml", payload))
 
 
 def test_full_video_allows_min_valid_frames_equal_to_maximum(tmp_path: Path) -> None:
