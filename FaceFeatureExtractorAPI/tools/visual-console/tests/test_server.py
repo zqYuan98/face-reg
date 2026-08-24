@@ -5,6 +5,7 @@ import http.client
 import http.server
 import json
 import os
+import re
 import socket
 import sys
 import tempfile
@@ -25,6 +26,17 @@ PUBLIC_ORIGIN = "http://console.test:18003"
 PUBLIC_HOST = "console.test:18003"
 BOUNDARY = "----VisualConsoleBoundary7MA4YWxkTrZu0gW"
 CONTENT_TYPE = f"multipart/form-data; boundary={BOUNDARY}"
+
+
+def multipart_file_body(
+    *, field: str, filename: str, content_type: str, payload: bytes
+) -> bytes:
+    return (
+        f"--{BOUNDARY}\r\n"
+        f'Content-Disposition: form-data; name="{field}"; filename="{filename}"\r\n'
+        f"Content-Type: {content_type}\r\n"
+        "\r\n"
+    ).encode("ascii") + payload + f"\r\n--{BOUNDARY}--\r\n".encode("ascii")
 
 
 class MutableClock:
@@ -483,6 +495,31 @@ class VisualConsoleHTTPTests(unittest.TestCase):
         post_requests = [item for item in recorded if item["method"] == "POST"]
         self.assertEqual([item["path"] for item in post_requests], list(console_server.POST_ROUTES))
         self.assertTrue(all(item["body"] == body for item in post_requests))
+
+    def test_proxy_forwards_only_the_frontend_safe_multipart_filename(self) -> None:
+        token = self.running.session_token()
+        safe_filename = "visual-console-image.jpg"
+        body = multipart_file_body(
+            field="image",
+            filename=safe_filename,
+            content_type="image/jpeg",
+            payload=b"synthetic-image-bytes",
+        )
+
+        status, _headers, _payload = self.running.request(
+            "POST",
+            "/api/v2/portrait/generate",
+            body=body,
+            headers=self.running.post_headers(token, body),
+        )
+
+        self.assertEqual(status, 200)
+        upstream_body = self.running.upstream_state.requests[-1]["body"]
+        self.assertEqual(
+            re.findall(br'filename="([^"]+)"', upstream_body),
+            [safe_filename.encode()],
+        )
+        self.assertEqual(upstream_body, body)
 
     def test_post_requires_exact_origin_and_valid_csrf(self) -> None:
         token = self.running.session_token()

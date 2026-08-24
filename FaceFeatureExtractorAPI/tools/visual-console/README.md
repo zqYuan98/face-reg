@@ -46,8 +46,8 @@ python3 server.py
 
 只允许以下资源，且全部拒绝查询参数：
 
-- 静态 GET：`/`、`/index.html`、`/styles.css`、`/core.js`、`/app.js`，以及返回
-  `204` 的 `/favicon.ico`；
+- 静态 GET：`/`、`/index.html`、`/styles.css`、`/core.js`、`/app.js`；
+- 浏览器图标 GET：`/favicon.ico`（固定返回 `204`，无图标内容）；
 - 控制台 GET：`/health/live`、`/api/console/session`、`/api/console/ready`；
 - 代理 POST：`/api/v2/portrait/generate`、`/api/v2/witness/blur-background`、
   `/api/v2/verify/images`、`/api/v2/verify/video/quick`、

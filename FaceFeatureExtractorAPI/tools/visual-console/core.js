@@ -20,6 +20,14 @@ const SAFE_KIND_EXTENSIONS = Object.freeze({
   image: new Set([".jpg", ".jpeg", ".png"]),
   video: new Set([".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"]),
 });
+const SAFE_UPLOAD_BASENAMES = Object.freeze({
+  image: "visual-console-image",
+  video: "visual-console-video",
+});
+const DEFAULT_UPLOAD_EXTENSIONS = Object.freeze({
+  image: ".jpg",
+  video: ".mp4",
+});
 
 function freezeFields(fields) {
   return Object.freeze(fields.map((field) => Object.freeze({ ...field })));
@@ -159,11 +167,17 @@ export const CAPABILITIES = Object.freeze([
 export function safeUploadFilename(field, file) {
   const kind = field?.kind === "video" ? "video" : "image";
   const mimeExtension = SAFE_UPLOAD_EXTENSIONS[String(file?.type ?? "").toLowerCase()];
-  const originalName = String(file?.name ?? "").toLowerCase();
-  const originalExtension = originalName.includes(".") ? originalName.slice(originalName.lastIndexOf(".")) : "";
+  const extensionMatch = String(file?.name ?? "")
+    .toLowerCase()
+    .match(/\.[a-z0-9]{1,5}$/);
+  const originalExtension = extensionMatch?.[0] ?? "";
   const extension = mimeExtension
-    ?? (SAFE_KIND_EXTENSIONS[kind].has(originalExtension) ? originalExtension : kind === "video" ? ".mp4" : ".jpg");
-  return `visual-console-${kind}${extension === ".jpeg" ? ".jpg" : extension}`;
+    ?? (
+      SAFE_KIND_EXTENSIONS[kind].has(originalExtension)
+        ? originalExtension
+        : DEFAULT_UPLOAD_EXTENSIONS[kind]
+    );
+  return `${SAFE_UPLOAD_BASENAMES[kind]}${extension === ".jpeg" ? ".jpg" : extension}`;
 }
 
 const CAPABILITIES_BY_ID = new Map(CAPABILITIES.map((item) => [item.id, item]));
@@ -731,6 +745,48 @@ const BLOCKED_KEYS = new Set([
 ]);
 
 const SAFE_FEATURE_METADATA_KEYS = new Set(["feature_dimension", "feature_version"]);
+const FEATURE_METADATA_SUFFIXES = new Set([
+  "count",
+  "dimension",
+  "dimensions",
+  "length",
+  "size",
+  "version",
+]);
+const SENSITIVE_FEATURE_VALUE_SEGMENTS = new Set([
+  "array",
+  "arrays",
+  "data",
+  "map",
+  "maps",
+  "payload",
+  "tensor",
+  "tensors",
+  "value",
+  "values",
+  "vector",
+  "vectors",
+]);
+const SENSITIVE_SUBJECT_SEGMENTS = new Set([
+  "biometric",
+  "debug",
+  "face",
+  "facial",
+  "identity",
+  "latent",
+  "person",
+  "representation",
+  "subject",
+]);
+const SENSITIVE_VECTOR_CONTEXT_SEGMENTS = new Set([
+  ...SENSITIVE_SUBJECT_SEGMENTS,
+  "descriptor",
+  "descriptors",
+  "embedding",
+  "embeddings",
+  "feature",
+  "features",
+]);
 
 function normalizedKey(key) {
   return String(key)
@@ -743,12 +799,43 @@ function normalizedKey(key) {
 function isBlockedKey(key) {
   const normalized = normalizedKey(key);
   const segments = normalized.split("_");
+  const hasFeatureSegment = segments.some(
+    (segment) => segment === "feature" || segment === "features",
+  );
+  const hasEmbeddingSegment = segments.some(
+    (segment) => segment === "embedding" || segment === "embeddings",
+  );
+  const hasVectorSegment = segments.some(
+    (segment) => segment === "vector" || segment === "vectors",
+  );
+  const hasSensitiveVectorContext = segments.some(
+    (segment) => SENSITIVE_VECTOR_CONTEXT_SEGMENTS.has(segment),
+  );
+  const hasSensitiveFeatureContext = segments.some(
+    (segment) => SENSITIVE_SUBJECT_SEGMENTS.has(segment),
+  );
+  const hasSensitiveFeatureValue = segments.some(
+    (segment) => SENSITIVE_FEATURE_VALUE_SEGMENTS.has(segment),
+  );
+  const isFeatureMetadata = SAFE_FEATURE_METADATA_KEYS.has(normalized) || (
+    hasFeatureSegment &&
+    FEATURE_METADATA_SUFFIXES.has(segments.at(-1)) &&
+    !hasEmbeddingSegment &&
+    !hasVectorSegment
+  );
   return (
     BLOCKED_KEYS.has(normalized) ||
-    (!SAFE_FEATURE_METADATA_KEYS.has(normalized) && segments.some((segment) => segment === "feature" || segment === "features")) ||
-    segments.some((segment) => segment === "embedding" || segment === "embeddings") ||
-    normalized.endsWith("_vector") ||
-    normalized.endsWith("_vectors") ||
+    hasEmbeddingSegment ||
+    (
+      !isFeatureMetadata &&
+      hasFeatureSegment &&
+      (hasSensitiveFeatureValue || hasSensitiveFeatureContext)
+    ) ||
+    (
+      normalized === "vector" ||
+      normalized === "vectors" ||
+      (hasVectorSegment && hasSensitiveVectorContext)
+    ) ||
     normalized.endsWith("_token") ||
     normalized.endsWith("_cookie") ||
     normalized.endsWith("_authorization") ||

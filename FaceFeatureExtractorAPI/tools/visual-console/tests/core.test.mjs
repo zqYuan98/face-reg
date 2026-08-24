@@ -266,13 +266,17 @@ test("dataUrlToBlob decodes base64 and percent-encoded payloads without DOM APIs
 test("safeJsonText summarizes base64 and recursively blocks private keys", () => {
   const payload = {
     feature_dimension: 1024,
+    feature_version: "v2",
     image_base64: "A".repeat(4_096),
     nested: {
       embeddings: [0.1, 0.2],
       features: [0.3],
-      face_embedding: [0.4],
-      feature_vector: [0.5],
-      debug_vector: [0.6],
+      face_embedding: ["private-face-embedding"],
+      feature_vector: ["private-feature-vector"],
+      debug_vector: ["private-debug-vector"],
+      biometricVectors: ["private-biometric-vector"],
+      face_feature_data: ["private-face-feature-data"],
+      latent_features: ["private-latent-features"],
       alpha: [1, 0],
       matte: "secret-matte",
       raw_image: "secret-image",
@@ -284,6 +288,16 @@ test("safeJsonText summarizes base64 and recursively blocks private keys", () =>
       accessToken: "secret-camel-token",
       filePath: "/private/camel-path",
     },
+    ordinary_metadata: {
+      feature_flag: "ordinary-feature-flag",
+      supported_features: "ordinary-supported-features",
+      feature_count: 5,
+      motion_vector: "ordinary-motion-vector",
+      version_vector: "ordinary-version-vector",
+      vector_clock: "ordinary-vector-clock",
+      debug_message: "ordinary-debug-message",
+      face_count: 1,
+    },
     imageBase64: "B".repeat(2_048),
     markup: "</script><img src=x>",
   };
@@ -292,7 +306,15 @@ test("safeJsonText summarizes base64 and recursively blocks private keys", () =>
   assert.match(text, /4,096 字符/);
   assert.match(text, /feature_dimension/);
   assert.match(text, /1024/);
+  assert.match(text, /feature_version/);
+  assert.doesNotMatch(text, /private-face-embedding|private-feature-vector|private-debug-vector|private-biometric-vector|private-face-feature-data|private-latent-features/);
   assert.doesNotMatch(text, /secret-token|secret-cookie|secret-matte|private\/video|secret-camel|camel-path|AAAAAA|BBBBBB/);
+  assert.match(text, /ordinary-feature-flag/);
+  assert.match(text, /ordinary-supported-features/);
+  assert.match(text, /ordinary-motion-vector/);
+  assert.match(text, /ordinary-version-vector/);
+  assert.match(text, /ordinary-vector-clock/);
+  assert.match(text, /ordinary-debug-message/);
   assert.doesNotMatch(text, /<\/script>|<img/);
   assert.match(text, /已屏蔽敏感字段/);
 });
@@ -309,6 +331,18 @@ test("safeUploadFilename never forwards a customer basename", () => {
   assert.equal(
     safeUploadFilename({ kind: "video" }, media("private-name", 100, "video/webm").file),
     "visual-console-video.webm",
+  );
+  assert.equal(
+    safeUploadFilename({ kind: "image" }, media("张三证件.PNG", 100, "image/jpeg").file),
+    "visual-console-image.jpg",
+  );
+  assert.equal(
+    safeUploadFilename({ kind: "image" }, media("C:\\Users\\张三\\现场照片.PNG", 100, "").file),
+    "visual-console-image.png",
+  );
+  assert.equal(
+    safeUploadFilename({ kind: "video" }, media("../../客户私密录像.exe", 100, "").file),
+    "visual-console-video.mp4",
   );
 });
 
