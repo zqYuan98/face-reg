@@ -20,7 +20,9 @@ python -m venv .venv
   --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers --no-access-log
 ```
 
-接口、错误码、接入责任、阈值标定、隐私和容量约束见
+开发联调请先看
+[docs/TASK-2026-001-API-DEBUGGING.md](docs/TASK-2026-001-API-DEBUGGING.md)；接口安全边界、
+接入责任、阈值标定、隐私和容量约束见
 [docs/ALGORITHM_API_INTEGRATION.md](docs/ALGORITHM_API_INTEGRATION.md)。见证照背景虚化的
 内存边界、证卡检测生产验收门槛见
 [docs/witness-blur-deployment.md](docs/witness-blur-deployment.md)。

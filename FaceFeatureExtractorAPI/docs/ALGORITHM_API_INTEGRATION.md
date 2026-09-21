@@ -1,5 +1,9 @@
 # 算法 API 接入说明
 
+业务开发调试请优先使用
+[TASK-2026-001 新算法 API 联调文档](TASK-2026-001-API-DEBUGGING.md)。本文侧重安全边界、
+部署约束和生产接入责任。
+
 ## 1. 边界与责任
 
 本服务只做算法适配：校验媒体、调用模块化算法、返回结构化建议。它不访问业务库，
@@ -95,7 +99,7 @@ curl -f -F "reference_image=@trusted.jpg;type=image/jpeg" \
 | 413 | `IMAGE_TOO_LARGE`, `VIDEO_TOO_LARGE` | 按采集规格重传 |
 | 503 | `MODEL_UNAVAILABLE`, `CALIBRATION_REQUIRED` | 停止流量并检查 readiness、模型卷或签名校准 |
 | 504 | `ALGORITHM_TIMEOUT` | 业务侧按幂等键重试或转人工 |
-| 500 | `INFERENCE_ERROR` | 记录 trace_id 并排查服务 |
+| 500 | `INFERENCE_ERROR` | 记录调用方请求号、发生时间和接口；错误体不含 trace_id |
 
 算法输出的 `success=false` 表示流水线未完成；`suggestion=REVIEW` 表示需要人工判断，
 二者不能互相替代。
