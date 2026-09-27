@@ -1,0 +1,10 @@
+SET @has_index = (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='sys_user' AND index_name='idx_user_group_status_id');
+SET @ddl = IF(@has_index=0,'ALTER TABLE sys_user ADD INDEX idx_user_group_status_id(group_id,status,id), ALGORITHM=INPLACE, LOCK=NONE','SELECT 1');
+PREPARE statement FROM @ddl;
+EXECUTE statement;
+DEALLOCATE PREPARE statement;
+SET @has_index = (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='sys_user' AND index_name='idx_user_photo_url');
+SET @ddl = IF(@has_index=0,'ALTER TABLE sys_user ADD INDEX idx_user_photo_url(photo_url), ALGORITHM=INPLACE, LOCK=NONE','SELECT 1');
+PREPARE statement FROM @ddl;
+EXECUTE statement;
+DEALLOCATE PREPARE statement;

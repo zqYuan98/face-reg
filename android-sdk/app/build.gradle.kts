@@ -44,8 +44,7 @@ dependencies {
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     
-    // implementation(project(":face-core"))
-    implementation(files("libs/face-sdk-release.aar"))
+    implementation(project(":face-core"))
     
     // 手动补充 AAR 的依赖库 (因为本地 AAR 不会自动传递依赖)
     implementation("com.google.code.gson:gson:2.10.1")

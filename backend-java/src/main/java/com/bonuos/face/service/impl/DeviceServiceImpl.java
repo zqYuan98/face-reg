@@ -19,25 +19,9 @@ public class DeviceServiceImpl implements DeviceService {
     public Device registerOrHeartbeat(String deviceSn, String ipAddress) {
         LambdaQueryWrapper<Device> queryWrapper = new LambdaQueryWrapper<>();
         queryWrapper.eq(Device::getDeviceSn, deviceSn);
-        Device device = deviceMapper.selectOne(queryWrapper);
-
-        if (device == null) {
-            // 注册新设备
-            device = new Device();
-            device.setDeviceSn(deviceSn);
-            device.setDeviceName("Unknown Device");
-            device.setIpAddress(ipAddress);
-            device.setStatus(1);
-            device.setCreateTime(LocalDateTime.now());
-            device.setLastHeartbeat(LocalDateTime.now());
-            deviceMapper.insert(device);
-        } else {
-            // 更新心跳
-            device.setIpAddress(ipAddress);
-            device.setLastHeartbeat(LocalDateTime.now());
-            device.setStatus(1);
-            deviceMapper.updateById(device);
-        }
-        return device;
+        if (deviceSn == null || deviceSn.isBlank() || deviceSn.length() > 64 || (ipAddress != null && ipAddress.length() > 50))
+            throw new com.bonuos.face.exception.ApiException(org.springframework.http.HttpStatus.BAD_REQUEST,"INVALID_DEVICE","设备参数无效");
+        deviceMapper.heartbeat(deviceSn,ipAddress);
+        return deviceMapper.selectOne(queryWrapper);
     }
 }

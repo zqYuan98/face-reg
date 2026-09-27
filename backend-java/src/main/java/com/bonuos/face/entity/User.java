@@ -20,4 +20,5 @@ public class User {
     private Integer status; // 1:Normal, 0:Disabled
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
+    private Long syncVersion;
 }

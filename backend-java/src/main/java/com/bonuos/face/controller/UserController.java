@@ -2,6 +2,9 @@ package com.bonuos.face.controller;
 
 import com.bonuos.face.entity.User;
 import com.bonuos.face.service.UserService;
+import com.bonuos.face.service.AdminQueryService;
+import com.bonuos.face.dto.BatchDeleteResult;
+import org.springframework.http.ResponseEntity;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
@@ -16,6 +19,9 @@ public class UserController {
 
     @Autowired
     private UserService userService;
+
+    @Autowired
+    private AdminQueryService adminQueryService;
 
     @PostMapping("/add")
     public Map<String, Object> addUser(
@@ -36,7 +42,7 @@ public class UserController {
     public Map<String, Object> listUsers(
             @RequestParam(value = "name", required = false) String name,
             @RequestParam(value = "groupId", required = false) Long groupId) {
-        List<User> users = userService.getUsers(name, groupId);
+        List<User> users = adminQueryService.legacyUsers(name, groupId);
 
         Map<String, Object> result = new HashMap<>();
         result.put("code", 200);
@@ -55,8 +61,7 @@ public class UserController {
             result.put("msg", "success");
             result.put("data", user);
         } else {
-            result.put("code", 404);
-            result.put("msg", "用户不存在");
+            throw new com.bonuos.face.exception.ApiException(org.springframework.http.HttpStatus.NOT_FOUND,"NOT_FOUND","用户不存在");
         }
         return result;
     }
@@ -88,13 +93,11 @@ public class UserController {
     }
 
     @PostMapping("/deleteBatch")
-    public Map<String, Object> deleteBatch(@RequestBody List<Long> ids) {
-        userService.deleteUsers(ids);
-
-        Map<String, Object> result = new HashMap<>();
-        result.put("code", 200);
-        result.put("msg", "批量删除成功");
-        return result;
+    public ResponseEntity<Map<String, Object>> deleteBatch(@RequestBody List<Long> ids) {
+        BatchDeleteResult data = userService.deleteUsers(ids);
+        int status = data.getFailureCount() == 0 ? 200 : data.getSuccessCount() > 0 ? 207 : 422;
+        String msg = status == 200 ? "批量处理完成" : status == 207 ? "部分人员处理失败" : "批量处理失败";
+        return ResponseEntity.status(status).body(Map.of("code", status, "msg", msg, "data", data));
     }
 
     @GetMapping("/count")
@@ -120,8 +123,7 @@ public class UserController {
             result.put("msg", "success");
             result.put("data", user);
         } else {
-            result.put("code", 404);
-            result.put("msg", "未找到匹配用户");
+            throw new com.bonuos.face.exception.ApiException(org.springframework.http.HttpStatus.NOT_FOUND,"NO_MATCH","未找到匹配用户");
         }
         return result;
     }

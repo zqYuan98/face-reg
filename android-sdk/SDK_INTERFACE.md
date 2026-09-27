@@ -1,3 +1,5 @@
+> 2026-09-24 源码更新：同步 v2、配置 API、SQLite v3 和验证边界见 [SYNC_V2.md](SYNC_V2.md)。本文件下述历史 AAR/固定地址描述仅适用于旧版本；仓库旧 AAR 尚未重新发布。
+
 # Face SDK 接口文档 (Java)
 
 本文档详细说明了 `face-sdk-v1.0.0.aar` 提供的 Java 接口，供 Android 开发人员集成使用。

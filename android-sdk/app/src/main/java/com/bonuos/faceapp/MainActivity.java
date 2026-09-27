@@ -64,4 +64,9 @@ public class MainActivity extends AppCompatActivity {
             syncManager.stopAutoSync();
         }
     }
+
+    @Override protected void onDestroy() {
+        if (syncManager != null) syncManager.close();
+        super.onDestroy();
+    }
 }

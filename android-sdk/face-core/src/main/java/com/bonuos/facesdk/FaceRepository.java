@@ -51,9 +51,9 @@ public class FaceRepository {
 
         long rowId = db.replace(FaceDatabaseHelper.TABLE_USERS, null, values);
         if (rowId == -1) {
-            Log.e(TAG, "Failed to save user: " + name);
+            throw new IllegalStateException("Failed to save user");
         } else {
-            Log.i(TAG, "User saved: " + name);
+            // Do not log person names or feature values.
         }
     }
 
@@ -94,34 +94,19 @@ public class FaceRepository {
     }
 
     private byte[] convertFeatureJsonToBlob(String json) {
+        if (json == null) return null;
         try {
-            Log.d(TAG, "Converting feature JSON to blob, length: " + json.length());
-            JSONArray jsonArray = new JSONArray(json);
-            Log.d(TAG, "JSON array size: " + jsonArray.length());
-
-            float[] floatArray = new float[jsonArray.length()];
-            for (int i = 0; i < jsonArray.length(); i++) {
-                floatArray[i] = (float) jsonArray.getDouble(i);
+            JSONArray array = new JSONArray(json);
+            if (array.length() != 512 && array.length() != 1024) throw new IllegalArgumentException("Invalid feature dimension");
+            ByteBuffer buffer = ByteBuffer.allocate(array.length() * 4).order(ByteOrder.LITTLE_ENDIAN);
+            for (int i = 0; i < array.length(); i++) {
+                float value = (float) array.getDouble(i);
+                if (Float.isNaN(value) || Float.isInfinite(value)) throw new IllegalArgumentException("Invalid feature value");
+                buffer.putFloat(value);
             }
-
-            // 打印前5个值
-            if (floatArray.length >= 5) {
-                Log.d(TAG, String.format("First 5 values: %.4f, %.4f, %.4f, %.4f, %.4f",
-                        floatArray[0], floatArray[1], floatArray[2], floatArray[3], floatArray[4]));
-            }
-
-            ByteBuffer buffer = ByteBuffer.allocate(floatArray.length * 4);
-            buffer.order(ByteOrder.LITTLE_ENDIAN);
-            for (float f : floatArray) {
-                buffer.putFloat(f);
-            }
-
-            byte[] result = buffer.array();
-            Log.d(TAG, "Blob size: " + result.length + " bytes");
-            return result;
-        } catch (JSONException e) {
-            Log.e(TAG, "Feature JSON parse error for json length: " + (json != null ? json.length() : "null"), e);
-            return null;
+            return buffer.array();
+        } catch (JSONException error) {
+            throw new IllegalArgumentException("Invalid feature data", error);
         }
     }
 

@@ -1,73 +1,46 @@
-# Docker 容器化部署指南
+# 人脸识别平台
 
-本指南将帮助您使用 Docker 和 Docker Compose 一键部署整个系统（后端、算法服务、数据库）。
+目录包含 Java 管理后台、Python 算法服务和 Android SDK。当前后台提供服务端分页、独立管理/设备鉴权，以及 v1 完整快照和 v2 分页增量同步。
 
-## 1. 目录结构
+修复结果和实际测试见 [验证记录](docs/reports/2026-09-24-backend-remediation-results.md)。本地测试通过不代表生产已部署或真机容量已验收。
 
-确保您的项目目录结构如下（已自动为您创建了相关 Docker 文件）：
+## 启动前
 
-```
-Face-app-web/
-├── docker-compose.yml          # [新增] 编排文件
-├── backend-java/
-│   ├── Dockerfile              # [新增] Java 后端镜像构建文件
-│   ├── src/
-│   └── pom.xml
-└── FaceFeatureExtractorAPI/
-    ├── Dockerfile              # [新增] Python 算法镜像构建文件
-    ├── feature_server.py
-    └── requirements.txt
-```
+先阅读 [迁移与回滚手册](docs/reports/2026-09-24-backend-remediation-runbook.md)。已有数据库必须备份并按手册显式执行迁移；应用启动不会自动补表。新库才使用 schema.sql。已有 MySQL volume 不会自动应用初始化脚本或重新创建应用账号。
 
-## 2. 部署步骤
+Compose 必须从受保护的运行环境获得以下值，仓库没有默认密码：
 
-### 第一步：安装 Docker
-请确保服务器已安装 Docker 和 Docker Compose。
-- **Docker**: `curl -fsSL https://get.docker.com | bash`
-- **Compose**: (Docker Desktop 默认包含，Linux 可能需单独安装)
+- `MYSQL_ROOT_PASSWORD`：数据库管理员密码。
+- `FACE_DB_PASSWORD`：`face_app` 应用账号密码。
+- `FACE_ADMIN_PASSWORD_HASH`：管理密码的 BCrypt 哈希。
+- `FACE_DEVICE_CREDENTIALS_JSON`：按需配置设备凭据，默认 `[]` 拒绝设备访问。
 
-### 第二步：构建并启动
-在项目根目录（`Face-app-web`）下执行：
+生产 Compose 固定开启 Secure 会话 Cookie，需要同源 HTTPS 反向代理。直接 HTTP 打开页面不能作为生产登录方式；只在隔离本机验证时按安全说明单独关闭 Secure。
 
-```bash
-docker-compose up -d --build
+## 容器部署
+
+在本目录、完成配置与迁移后执行：
+
+```sh
+docker compose up -d --build
+docker compose ps
 ```
 
-- `-d`: 后台运行
-- `--build`: 强制重新构建镜像（首次运行或代码修改后需要）
+主机发布地址仅绑定 loopback：后台 `127.0.0.1:18080`，内部算法 `127.0.0.1:18000`，MySQL `127.0.0.1:13307`。通过已配置的 HTTPS 入口访问管理页面；不要把数据库或算法端口直接暴露给设备网络。
 
-### 第三步：验证服务
-执行 `docker-compose ps` 查看容器状态，应看到三个服务 (`face-mysql`, `face-algorithm`, `face-backend`) 均为 [Up](file:///e:/Face-app-web/android-sdk/face-core/src/main/java/com/bonuos/facesdk/FaceDatabaseHelper.java#45-52) 状态。
-
-- **Java 后端**: 访问 `http://localhost:8080/index.html`->18080
-- **算法接口**: 访问 `http://localhost:8000/health`->18000
-- **数据库**: 端口 3306->13306
-
-## 3. 常见维护操作
-
-**查看日志:**
-```bash
-docker-compose logs -f face-backend   # 查看 Java 后端日志
-docker-compose logs -f face-algorithm # 查看 Python 算法日志
+```sh
+docker compose logs -f face-backend
+docker compose logs -f face-algorithm
+docker compose stop
 ```
 
-**停止服务:**
-```bash
-docker-compose down
-```
+`restart: always` 只处理进程退出，不会自动重启仍存活但原生推理挂起的进程；就绪降级后的监督重启须按 [算法说明](FaceFeatureExtractorAPI/BOUNDED_EXECUTION.md) 接入现场监控。不要为修复配置而删除数据库 volume。
 
-**更新代码后重发布:**
-```bash
-# 1. 拉取/更新代码
-# 2. 重启并构建
-docker-compose up -d --build
-```
+## 接口、SDK 和验证
 
-## 4. 配置说明
+- [API 契约](API_DOCUMENTATION.md)：管理分页、批量结果、真实 HTTP 状态和认证流程。
+- [安全迁移](backend-java/SECURITY_MIGRATION.md)：管理身份、设备范围、默认关闭的旧设备迁移窗口。
+- [SDK v2 接入](android-sdk/SYNC_V2.md)：新版源代码与示例 app，旧 AAR 未自动替换。
+- [本地测试及只读巡检](backend-java/tools/README.md)：Java/MySQL、前端、容量和照片清单工具。
 
-在 [docker-compose.yml](file:///e:/Face-app-web/docker-compose.yml) 中，我们通过环境变量覆盖了默认配置，使其适应 Docker 网络：
-
-- `SPRING_DATASOURCE_URL`: 指向 `mysql` 容器名而非 localhost。
-- `FACE_EXTRACTOR_API_URL`: 指向 `face-algorithm` 容器名。
-
-如果您修改了数据库密码或其他配置，请同步修改 [docker-compose.yml](file:///e:/Face-app-web/docker-compose.yml) 中的 `environment` 部分。
+当前没有导出接口。新增导出时应另行设计异步任务、流式生成、配额和下载有效期，不能复用不受限制的列表查询。

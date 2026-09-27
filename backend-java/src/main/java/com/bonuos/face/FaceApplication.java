@@ -5,6 +5,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.mybatis.spring.annotation.MapperScan;
 
 @SpringBootApplication
+@org.springframework.scheduling.annotation.EnableScheduling
 @MapperScan("com.bonuos.face.mapper")
 public class FaceApplication {
 

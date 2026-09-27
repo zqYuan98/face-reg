@@ -1,0 +1,24 @@
+# Local environments and build outputs
+.analysis/
+.playwright-cli/
+.idea/
+.worktrees/
+output/playwright/
+**/target/
+**/build/
+**/.gradle/
+**/.cxx/
+**/local.properties
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/*.class
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage
+**/htmlcov/
+**/uploads/
+**/tmp/
+**/temp/
+**/data/snapshots/

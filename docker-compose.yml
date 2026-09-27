@@ -7,11 +7,13 @@ services:
     container_name: face-mysql
     restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set a unique database administrator password}
       MYSQL_DATABASE: face_db
+      MYSQL_USER: face_app
+      MYSQL_PASSWORD: ${FACE_DB_PASSWORD:?Set the application database password}
       MYSQL_TZ: Asia/Shanghai
     ports:
-      - "13307:3306"
+      - "127.0.0.1:13307:3306"
     volumes:
       - mysql-data:/var/lib/mysql
       - ./backend-java/src/main/resources/db/schema.sql:/docker-entrypoint-initdb.d/init.sql
@@ -26,7 +28,7 @@ services:
     container_name: face-algorithm
     restart: always
     ports:
-      - "18000:8000"
+      - "127.0.0.1:18000:8000"
     volumes:
       - ./FaceFeatureExtractorAPI/models:/app/models
       - ./FaceFeatureExtractorAPI/checkpoints:/app/checkpoints
@@ -44,23 +46,29 @@ services:
       - mysql
       - face-algorithm
     ports:
-      - "18080:8080"
+      - "127.0.0.1:18080:8080"
     environment:
       # 覆盖 application.yml 配置
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/face_db?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=GMT%2B8&allowPublicKeyRetrieval=true
-      SPRING_DATASOURCE_USERNAME: root
-      SPRING_DATASOURCE_PASSWORD: root
+      SPRING_DATASOURCE_USERNAME: face_app
+      SPRING_DATASOURCE_PASSWORD: ${FACE_DB_PASSWORD:?Set the application database password}
+      SPRING_PROFILES_ACTIVE: prod
+      FACE_ADMIN_PASSWORD_HASH: ${FACE_ADMIN_PASSWORD_HASH:?Set a BCrypt admin password hash}
+      FACE_SESSION_COOKIE_SECURE: "true"
+      FACE_DEVICE_CREDENTIALS_JSON: ${FACE_DEVICE_CREDENTIALS_JSON:-[]}
       # 配置文件上传路径 (覆盖代码中的 Windows 路径)
       SPRING_SERVLET_MULTIPART_LOCATION: /app/uploads
       # 算法服务地址 (使用服务名)
       FACE_EXTRACTOR_API_URL: http://face-algorithm:8000
     volumes:
       - ./backend-java/uploads:/app/uploads
+      - sync-snapshots:/app/data/snapshots
     networks:
       - face-net
 
 volumes:
   mysql-data:
+  sync-snapshots:
 
 networks:
   face-net:

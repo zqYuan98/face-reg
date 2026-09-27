@@ -3,6 +3,7 @@
 
 <head>
     <meta charset="UTF-8">
+    <link rel="icon" href="/company_icon.png">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>人脸识别智能管理系统</title>
     <!-- 引入样式 -->
@@ -127,6 +128,16 @@
             border: 1px solid #eee;
         }
 
+        .table-pagination {
+            margin-top: 20px;
+            display: flex;
+            justify-content: flex-end;
+        }
+
+        .batch-result {
+            margin-bottom: 16px;
+        }
+
         [v-cloak] {
             display: none;
         }
@@ -135,9 +146,10 @@
 
 <body>
 
-    <body>
         <div id="app" v-cloak>
-            <el-container style="height: 100vh;">
+            <el-alert v-if="authError" :title="authError" type="error" :closable="false" show-icon></el-alert>
+            <p v-else-if="!authenticated" style="padding: 20px">正在验证登录状态…</p>
+            <el-container v-if="authenticated" style="height: 100vh;">
                 <el-aside width="220px">
                     <div
                         style="height: 60px; display: flex; align-items: center; padding: 0 15px; background-color: #304156; border-bottom: 1px solid #1f2d3d;">
@@ -193,13 +205,13 @@
                                 <el-col :span="8">
                                     <el-card shadow="hover">
                                         <template #header><span>👤 总用户数</span></template>
-                                        <h2 style="margin: 0; color: #409EFF;">{{ totalUserCount }}</h2>
+                                        <h2 style="margin: 0; color: #409EFF;" v-loading="userCountLoading">{{ totalUserCount ?? '—' }}</h2>
                                     </el-card>
                                 </el-col>
                                 <el-col :span="8">
                                     <el-card shadow="hover">
                                         <template #header><span>🏢 总分组数</span></template>
-                                        <h2 style="margin: 0; color: #67C23A;">{{ groups.length }}</h2>
+                                        <h2 style="margin: 0; color: #67C23A;" v-loading="groupCountLoading">{{ totalGroupCount ?? '—' }}</h2>
                                     </el-card>
                                 </el-col>
                             </el-row>
@@ -211,31 +223,55 @@
                                 <span class="page-title">用户列表</span>
                                 <div style="display: flex; gap: 10px; align-items: center;">
                                     <el-select v-model="searchForm.groupId" placeholder="分组查询" clearable
-                                        style="width: 150px" @change="loadUsers">
-                                        <el-option v-for="g in groups" :key="g.id" :label="g.groupName"
+                                        filterable remote :remote-method="searchFilterGroups" :debounce="0"
+                                        :loading="filterGroupOptions.loading" @visible-change="showFilterGroups"
+                                        style="width: 170px" @change="changeUserGroupFilter">
+                                        <el-option v-for="g in filterGroupItems" :key="g.id" :label="g.groupName"
                                             :value="g.id"></el-option>
+                                        <template #footer>
+                                            <el-button v-if="filterGroupOptions.hasMore" text
+                                                :loading="filterGroupOptions.loading" @click.stop="loadMoreFilterGroups">加载更多分组</el-button>
+                                        </template>
                                     </el-select>
                                     <el-input v-model="searchForm.name" placeholder="姓名查询" style="width: 150px"
-                                        clearable @clear="loadUsers" @keyup.enter="loadUsers">
+                                        clearable @input="clearUserSelection" @clear="applyUsersFilter" @keyup.enter="applyUsersFilter">
                                         <template #append>
-                                            <el-button :icon="Search" @click="loadUsers" />
+                                            <el-button :icon="Search" @click="applyUsersFilter" />
                                         </template>
                                     </el-input>
                                     <el-button @click="loadUsers" :icon="Refresh" circle></el-button>
-                                    <el-button type="danger" :disabled="selectedUsers.length === 0"
+                                    <el-button type="danger" :disabled="selectedUsers.length === 0 || userDeleting || usersLoading"
+                                        :loading="userDeleting"
                                         @click="handleBatchDelete">批量删除</el-button>
                                     <el-button type="primary" @click="openUserDialog()">+ 新增用户</el-button>
                                 </div>
                             </div>
                             <div class="card-container">
-                                <el-table :data="users" style="width: 100%" v-loading="loading"
+                                <el-alert v-if="usersError" :title="usersError" type="error" :closable="false" show-icon
+                                    style="margin-bottom: 16px"></el-alert>
+                                <div v-if="batchResult" class="batch-result">
+                                    <el-alert :title="batchSummary" :type="batchResult.failureCount ? 'warning' : 'success'"
+                                        :closable="false" show-icon></el-alert>
+                                    <template v-if="batchResult.failures.length">
+                                        <el-table :data="batchResult.failures" size="small" max-height="200">
+                                            <el-table-column prop="id" label="失败用户 ID" width="130"></el-table-column>
+                                            <el-table-column prop="errorCode" label="错误代码" width="180"></el-table-column>
+                                            <el-table-column prop="message" label="失败原因"></el-table-column>
+                                        </el-table>
+                                        <el-button style="margin-top: 10px" :loading="userDeleting" :disabled="userDeleting"
+                                            @click="retryFailedDeletes">仅重试失败的 {{ batchResult.failureCount }} 项</el-button>
+                                    </template>
+                                </div>
+                                <el-table ref="userTable" :data="users" row-key="id" style="width: 100%" v-loading="usersLoading"
                                     @selection-change="handleSelectionChange">
-                                    <el-table-column type="selection" width="55"></el-table-column>
+                                    <el-table-column type="selection" width="55" :reserve-selection="false"
+                                        :selectable="canSelectUser"></el-table-column>
                                     <el-table-column prop="id" label="ID" width="80"></el-table-column>
                                     <el-table-column label="头像" width="100">
                                         <template #default="scope">
-                                            <img v-if="scope.row.photoUrl" :src="'/uploads/' + scope.row.photoUrl"
-                                                class="small-avatar" onerror="this.style.display='none'">
+                                            <img v-if="scope.row.photoUrl" :src="'/uploads/' + encodeURIComponent(scope.row.photoUrl)"
+                                                class="small-avatar" loading="lazy" width="40" height="40" alt="用户头像"
+                                                onerror="this.style.display='none'">
                                             <el-tag v-else type="info" size="small">无</el-tag>
                                         </template>
                                     </el-table-column>
@@ -243,24 +279,32 @@
                                     <el-table-column label="所属分组">
                                         <template #default="scope">
                                             <el-tag v-if="scope.row.groupId" effect="plain">{{
-                                                getGroupName(scope.row.groupId) }}</el-tag>
+                                                scope.row.groupName || scope.row.groupId }}</el-tag>
                                             <span v-else style="color: #999;">--</span>
                                         </template>
                                     </el-table-column>
                                     <el-table-column label="特征状态">
                                         <template #default="scope">
-                                            <el-tag v-if="hasFeature(scope.row)" type="success">已提取</el-tag>
+                                            <el-tag v-if="scope.row.hasFeature" type="success">已提取</el-tag>
                                             <el-tag v-else type="danger">未提取</el-tag>
                                         </template>
                                     </el-table-column>
                                     <el-table-column label="操作" width="200">
                                         <template #default="scope">
-                                            <el-button size="small" @click="openUserDialog(scope.row)">编辑</el-button>
+                                            <el-button size="small" :disabled="usersLoading || Boolean(usersError)"
+                                                @click="openUserDialog(scope.row)">编辑</el-button>
                                             <el-button size="small" type="danger"
+                                                :disabled="userDeleting || usersLoading || Boolean(usersError)"
                                                 @click="handleDeleteUser(scope.row)">删除</el-button>
                                         </template>
                                     </el-table-column>
                                 </el-table>
+                                <div class="table-pagination">
+                                    <el-pagination :current-page="userPager.page" :page-size="userPager.size"
+                                        :total="userPager.total" :page-sizes="[20, 50, 100]"
+                                        layout="total, sizes, prev, pager, next, jumper"
+                                        @current-change="changeUserPage" @size-change="changeUserSize"></el-pagination>
+                                </div>
                             </div>
                         </div>
 
@@ -268,13 +312,19 @@
                         <div v-show="activeMenu === 'groups'">
                             <div class="page-header">
                                 <span class="page-title">分组列表</span>
-                                <div>
+                                <div style="display: flex; gap: 10px; align-items: center;">
+                                    <el-input v-model="groupSearch.keyword" placeholder="分组名称查询" style="width: 200px"
+                                        clearable @clear="applyGroupsFilter" @keyup.enter="applyGroupsFilter">
+                                        <template #append><el-button :icon="Search" @click="applyGroupsFilter" /></template>
+                                    </el-input>
                                     <el-button @click="loadGroups" :icon="Refresh" circle></el-button>
                                     <el-button type="primary" @click="openGroupDialog()">+ 新建分组</el-button>
                                 </div>
                             </div>
                             <div class="card-container">
-                                <el-table :data="groups" style="width: 100%" v-loading="loading">
+                                <el-alert v-if="groupsError" :title="groupsError" type="error" :closable="false" show-icon
+                                    style="margin-bottom: 16px"></el-alert>
+                                <el-table :data="groups" style="width: 100%" v-loading="groupsLoading">
                                     <el-table-column prop="id" label="ID" width="80"></el-table-column>
                                     <el-table-column prop="groupName" label="分组名称"></el-table-column>
                                     <el-table-column prop="groupNo" label="分组编码"></el-table-column>
@@ -282,10 +332,17 @@
                                     <el-table-column label="操作" width="150">
                                         <template #default="scope">
                                             <el-button size="small" type="danger"
+                                                :disabled="groupDeleting || groupsLoading || Boolean(groupsError)"
                                                 @click="handleDeleteGroup(scope.row)">删除</el-button>
                                         </template>
                                     </el-table-column>
                                 </el-table>
+                                <div class="table-pagination">
+                                    <el-pagination :current-page="groupPager.page" :page-size="groupPager.size"
+                                        :total="groupPager.total" :page-sizes="[20, 50, 100]"
+                                        layout="total, sizes, prev, pager, next, jumper"
+                                        @current-change="changeGroupPage" @size-change="changeGroupSize"></el-pagination>
+                                </div>
                             </div>
                         </div>
 
@@ -294,20 +351,28 @@
             </el-container>
 
             <!-- 用户编辑/新增弹窗 -->
-            <el-dialog v-model="userDialog.visible" :title="userDialog.isEdit ? '编辑用户' : '新增用户'" width="500px">
+            <el-dialog v-model="userDialog.visible" :title="userDialog.isEdit ? '编辑用户' : '新增用户'" width="500px"
+                :close-on-click-modal="!userSubmitting" :close-on-press-escape="!userSubmitting"
+                :show-close="!userSubmitting" @closed="closeUserDialog">
                 <el-form label-width="80px">
                     <el-form-item label="姓名">
                         <el-input v-model="userForm.name" placeholder="请输入姓名"></el-input>
                     </el-form-item>
                     <el-form-item label="分组">
-                        <el-select v-model="userForm.groupId" placeholder="请选择分组" style="width: 100%">
-                            <el-option v-for="g in groups" :key="g.id" :label="g.groupName" :value="g.id"></el-option>
+                        <el-select v-model="userForm.groupId" placeholder="请选择分组" style="width: 100%"
+                            filterable remote :remote-method="searchEditGroups" :debounce="0"
+                            :loading="editGroupOptions.loading" @visible-change="showEditGroups" @change="changeEditGroup">
+                            <el-option v-for="g in editGroupItems" :key="g.id" :label="g.groupName" :value="g.id"></el-option>
+                            <template #footer>
+                                <el-button v-if="editGroupOptions.hasMore" text :loading="editGroupOptions.loading"
+                                    @click.stop="loadMoreEditGroups">加载更多分组</el-button>
+                            </template>
                         </el-select>
                     </el-form-item>
                     <el-form-item label="照片">
                         <el-upload class="avatar-uploader" action="#" :show-file-list="false" :auto-upload="false"
                             :on-change="handleFileChange">
-                            <img v-if="userForm.previewUrl" :src="userForm.previewUrl" class="avatar" />
+                            <img v-if="userForm.previewUrl" :src="userForm.previewUrl" class="avatar" width="178" height="178" alt="照片预览" />
                             <el-icon v-else class="avatar-uploader-icon">
                                 <Plus />
                             </el-icon>
@@ -316,8 +381,8 @@
                 </el-form>
                 <template #footer>
                     <span class="dialog-footer">
-                        <el-button @click="userDialog.visible = false">取消</el-button>
-                        <el-button type="primary" @click="submitUser" :loading="submitting">确定</el-button>
+                        <el-button @click="userDialog.visible = false" :disabled="userSubmitting">取消</el-button>
+                        <el-button type="primary" @click="submitUser" :loading="userSubmitting">确定</el-button>
                     </span>
                 </template>
             </el-dialog>
@@ -332,7 +397,7 @@
                 <template #footer>
                     <span class="dialog-footer">
                         <el-button @click="groupDialog.visible = false">取消</el-button>
-                        <el-button type="primary" @click="submitGroup" :loading="submitting">确定</el-button>
+                        <el-button type="primary" @click="submitGroup" :loading="groupSubmitting">确定</el-button>
                     </span>
                 </template>
             </el-dialog>
@@ -346,275 +411,541 @@
         <script src="https://unpkg.com/@element-plus/icons-vue"></script>
 
         <script>
-            const { createApp, ref, reactive, onMounted, computed } = Vue;
+            const { createApp, ref, reactive, onMounted, onBeforeUnmount, computed } = Vue;
 
             const app = createApp({
                 setup() {
-                    // Auth Check
-                    const token = sessionStorage.getItem('admin_token');
-                    if (!token) {
-                        window.location.href = 'login.html';
-                    }
+                    const authenticated = ref(false);
+                    const authError = ref('');
+                    let csrfPromise = null;
+                    let loggingOut = false;
 
-                    const activeMenu = ref('users');
-                    const loading = ref(false);
-                    const submitting = ref(false);
-
-                    const users = ref([]);
-                    const groups = ref([]);
-                    const groupMap = reactive({});
-
-                    const handleCommand = (cmd) => {
-                        if (cmd === 'logout') {
-                            sessionStorage.removeItem('admin_token');
-                            window.location.href = 'login.html';
-                        }
-                    };
-
-                    const selectedFile = ref(null);
-                    const selectedUsers = ref([]);
-
-                    // Stats
-                    const totalUserCount = ref(0);
-
-                    // Dialog States
-                    const userDialog = reactive({ visible: false, isEdit: false });
-                    const groupDialog = reactive({ visible: false });
-
-                    // Forms
-                    const userForm = reactive({ id: null, name: '', groupId: null, previewUrl: '' });
-                    const groupForm = reactive({ groupName: '' });
-
-                    // API Base
                     const API_USER = '/api/users';
                     const API_GROUP = '/api/groups';
-
-                    const handleSelect = (key) => activeMenu.value = key;
-
-                    // Load Data
-                    const loadGroups = async () => {
-                        try {
-                            const res = await fetch(`${API_GROUP}/list`).then(r => r.json());
-                            if (res.code === 200) {
-                                groups.value = res.data;
-                                res.data.forEach(g => groupMap[g.id] = g.groupName);
-                            }
-                        } catch (e) { console.error(e); }
-                    };
-
+                    const activeMenu = ref('users');
+                    const users = ref([]);
+                    const groups = ref([]);
+                    const usersLoading = ref(false);
+                    const groupsLoading = ref(false);
+                    const usersError = ref('');
+                    const groupsError = ref('');
+                    const userSubmitting = ref(false);
+                    const groupSubmitting = ref(false);
+                    const userDeleting = ref(false);
+                    const groupDeleting = ref(false);
+                    const userTable = ref(null);
+                    const selectedUsers = ref([]);
+                    const selectedFile = ref(null);
+                    const userPager = reactive({ page: 1, size: 20, total: 0 });
+                    const groupPager = reactive({ page: 1, size: 20, total: 0 });
                     const searchForm = reactive({ name: '', groupId: null });
+                    const appliedUserSearch = reactive({ name: '', groupId: null });
+                    const groupSearch = reactive({ keyword: '' });
+                    let appliedGroupKeyword = '';
+                    let groupsLoaded = false;
+                    const totalUserCount = ref(null);
+                    const totalGroupCount = ref(null);
+                    const userCountLoading = ref(false);
+                    const groupCountLoading = ref(false);
+                    const userDialog = reactive({ visible: false, isEdit: false });
+                    const groupDialog = reactive({ visible: false });
+                    const userForm = reactive({ id: null, name: '', groupId: null, previewUrl: '' });
+                    const groupForm = reactive({ groupName: '' });
+                    const batchResult = ref(null);
+                    let previewObjectURL = null;
 
-                    const loadUserCount = async () => {
+                    const expireSession = () => {
+                        authenticated.value = false;
+                        csrfPromise = null;
+                        window.location.href = 'login.html';
+                    };
+                    const readResponse = async (response, acceptedCodes = [200]) => {
+                        if (response.status === 401) expireSession();
+                        let result;
                         try {
-                            const res = await fetch(`${API_USER}/count`).then(r => r.json());
-                            if (res.code === 200) {
-                                totalUserCount.value = res.data;
+                            result = await response.json();
+                        } catch (error) {
+                            throw new Error('服务器响应异常，请稍后重试');
+                        }
+                        if (result.code === 401) expireSession();
+                        if (!acceptedCodes.includes(result.code) ||
+                            (!response.ok && !acceptedCodes.includes(response.status))) {
+                            const messages = {
+                                400: '请求参数无效，请检查输入',
+                                401: '登录已过期，请重新登录',
+                                403: '安全校验失败，请刷新页面后重新操作',
+                                409: '数据状态已变化，请刷新后重试',
+                                429: '请求过于频繁，请稍后重试',
+                                503: '服务暂不可用，请稍后重试'
+                            };
+                            const error = new Error(result.msg || messages[response.status] || '请求失败，请稍后重试');
+                            error.status = response.status;
+                            error.code = result.code;
+                            throw error;
+                        }
+                        return result;
+                    };
+                    // Share the token request across concurrent writes. Never replay a failed write automatically.
+                    const loadCsrf = () => {
+                        if (!csrfPromise) csrfPromise = (async () => {
+                            const result = await readResponse(await fetch('/api/csrf', { credentials: 'same-origin' }));
+                            if (!result.data?.token || result.data.headerName !== 'X-CSRF-TOKEN') {
+                                throw new Error('安全校验信息缺失，请刷新页面后重试');
                             }
-                        } catch (e) {
-                            console.error("Failed to load user count", e);
+                            return result.data;
+                        })().catch(error => { csrfPromise = null; throw error; });
+                        return csrfPromise;
+                    };
+                    const requestJSON = async (url, options = {}, acceptedCodes = [200]) => {
+                        const headers = new Headers(options.headers || {});
+                        if (!['GET', 'HEAD', 'OPTIONS'].includes((options.method || 'GET').toUpperCase())) {
+                            const csrf = await loadCsrf();
+                            headers.set(csrf.headerName, csrf.token);
+                        }
+                        const response = await fetch(url, { ...options, headers, credentials: 'same-origin' });
+                        if (response.status === 403) csrfPromise = null;
+                        return readResponse(response, acceptedCodes);
+                    };
+                    const reportError = (error, fallback) => {
+                        if (error.name !== 'AbortError') ElementPlus.ElMessage.error(error.message || fallback);
+                    };
+
+                    // Separate request channels prevent late responses (including their finally blocks) from winning.
+                    const makeQuery = (loading) => ({ sequence: 0, controller: null, loading });
+                    const usersQuery = makeQuery(usersLoading);
+                    const groupsQuery = makeQuery(groupsLoading);
+                    const userCountQuery = makeQuery(userCountLoading);
+                    const groupCountQuery = makeQuery(groupCountLoading);
+                    const cancelQuery = (query) => {
+                        query.sequence++;
+                        if (query.controller) query.controller.abort();
+                        query.controller = null;
+                        if (query.loading) query.loading.value = false;
+                    };
+                    const runQuery = async (query, task, fallback, onError) => {
+                        cancelQuery(query);
+                        const sequence = query.sequence;
+                        const controller = new AbortController();
+                        query.controller = controller;
+                        if (query.loading) query.loading.value = true;
+                        const current = () => sequence === query.sequence && !controller.signal.aborted;
+                        try {
+                            return await task(controller.signal, current);
+                        } catch (error) {
+                            if (current()) {
+                                if (onError) onError(error);
+                                reportError(error, fallback);
+                            }
+                        } finally {
+                            if (current()) {
+                                query.controller = null;
+                                if (query.loading) query.loading.value = false;
+                            }
                         }
                     };
 
-                    const loadUsers = async () => {
-                        loading.value = true;
-                        try {
-                            const params = new URLSearchParams();
-                            if (searchForm.name) params.append('name', searchForm.name);
-                            if (searchForm.groupId) params.append('groupId', searchForm.groupId);
-
-                            const res = await fetch(`${API_USER}/list?${params.toString()}`).then(r => r.json());
-                            if (res.code === 200) {
-                                users.value = res.data;
+                    const clearUserSelection = () => {
+                        selectedUsers.value = [];
+                        if (userTable.value) userTable.value.clearSelection();
+                    };
+                    const canSelectUser = () => !usersLoading.value && !userDeleting.value && !usersError.value;
+                    const handleSelectionChange = (rows) => {
+                        selectedUsers.value = usersLoading.value || usersError.value ? [] : rows.filter(row => users.value.some(user => user.id === row.id));
+                    };
+                    const loadUsers = async ({ fallback = false } = {}) => {
+                        clearUserSelection();
+                        usersError.value = '';
+                        const requestedPage = userPager.page;
+                        const requestedSize = userPager.size;
+                        const params = new URLSearchParams({ page: requestedPage, size: requestedSize });
+                        if (appliedUserSearch.name) params.set('name', appliedUserSearch.name);
+                        if (appliedUserSearch.groupId != null) params.set('groupId', appliedUserSearch.groupId);
+                        return runQuery(usersQuery, async (signal, current) => {
+                            let result = await requestJSON(`${API_USER}/page?${params}`, { signal });
+                            if (!current()) return;
+                            // A deletion can empty the last page. Read the nearest valid page at most once.
+                            if (fallback && !result.data.records.length && requestedPage > 1) {
+                                const lastPage = Math.max(1, Math.ceil(result.data.total / requestedSize));
+                                const nextPage = Math.min(requestedPage - 1, lastPage);
+                                params.set('page', nextPage);
+                                result = await requestJSON(`${API_USER}/page?${params}`, { signal });
+                                if (!current()) return;
                             }
-                        } catch (e) { ElementPlus.ElMessage.error('加载用户失败'); }
-                        loading.value = false;
+                            users.value = result.data.records;
+                            userPager.total = result.data.total;
+                            userPager.page = result.data.page;
+                            userPager.size = result.data.size;
+                        }, '加载用户失败', error => {
+                            users.value = [];
+                            clearUserSelection();
+                            usersError.value = `人员列表未加载成功：${error.message || '请稍后重试'}。请点击刷新后再操作。`;
+                        });
                     };
-
-                    const getGroupName = (id) => groupMap[id] || id;
-                    const hasFeature = (user) => user.featureData && user.featureData.length > 20;
-
-                    // User Operations
-                    const openUserDialog = (user) => {
-                        userDialog.visible = true;
-                        selectedFile.value = null;
-
-                        if (user) {
-                            userDialog.isEdit = true;
-                            userForm.id = user.id;
-                            userForm.name = user.name;
-                            userForm.groupId = user.groupId;
-                            userForm.previewUrl = user.photoUrl ? `/uploads/${user.photoUrl}` : '';
-                        } else {
-                            userDialog.isEdit = false;
-                            userForm.id = null;
-                            userForm.name = '';
-                            userForm.groupId = null;
-                            userForm.previewUrl = '';
-                        }
+                    const applyUsersFilter = () => {
+                        appliedUserSearch.name = searchForm.name.trim();
+                        appliedUserSearch.groupId = searchForm.groupId === '' ? null : searchForm.groupId;
+                        userPager.page = 1;
+                        return loadUsers();
                     };
-
-                    const handleFileChange = (uploadFile) => {
-                        const file = uploadFile.raw;
-                        if (file) {
-                            selectedFile.value = file;
-                            userForm.previewUrl = URL.createObjectURL(file);
-                        }
+                    const changeUserPage = (page) => {
+                        if (userPager.page === page) return;
+                        userPager.page = page;
+                        return loadUsers();
                     };
-
-                    const submitUser = async () => {
-                        if (!userForm.name) return ElementPlus.ElMessage.warning('请输入姓名');
-                        if (!userDialog.isEdit && !selectedFile.value) return ElementPlus.ElMessage.warning('请选择照片');
-
-                        submitting.value = true;
-                        const formData = new FormData();
-                        formData.append('name', userForm.name);
-                        if (userForm.groupId) formData.append('groupId', userForm.groupId);
-                        if (selectedFile.value) formData.append('photo', selectedFile.value);
-
-                        try {
-                            const url = userDialog.isEdit ? `${API_USER}/update/${userForm.id}` : `${API_USER}/add`;
-                            const res = await fetch(url, { method: 'POST', body: formData }).then(r => r.json());
-
-                            if (res.code === 200) {
-                                ElementPlus.ElMessage.success(userDialog.isEdit ? '更新成功' : '注册成功');
-                                userDialog.visible = false;
-                                loadUsers();
-                                loadUserCount();
-                                loadData(); // Refresh all
-                            } else {
-                                ElementPlus.ElMessage.error(res.msg || '操作失败');
+                    const changeUserSize = (size) => {
+                        if (userPager.size === size) return;
+                        userPager.size = size;
+                        userPager.page = 1;
+                        return loadUsers();
+                    };
+                    const loadGroups = async ({ fallback = false } = {}) => {
+                        groupsError.value = '';
+                        const requestedPage = groupPager.page;
+                        const requestedSize = groupPager.size;
+                        const params = new URLSearchParams({ page: requestedPage, size: requestedSize });
+                        if (appliedGroupKeyword) params.set('keyword', appliedGroupKeyword);
+                        return runQuery(groupsQuery, async (signal, current) => {
+                            let result = await requestJSON(`${API_GROUP}/page?${params}`, { signal });
+                            if (!current()) return;
+                            if (fallback && !result.data.records.length && requestedPage > 1) {
+                                const lastPage = Math.max(1, Math.ceil(result.data.total / requestedSize));
+                                params.set('page', Math.min(requestedPage - 1, lastPage));
+                                result = await requestJSON(`${API_GROUP}/page?${params}`, { signal });
+                                if (!current()) return;
                             }
-                        } catch (e) {
-                            ElementPlus.ElMessage.error('网络错误');
-                        }
-                        submitting.value = false;
+                            groups.value = result.data.records;
+                            groupPager.total = result.data.total;
+                            groupPager.page = result.data.page;
+                            groupPager.size = result.data.size;
+                            groupsLoaded = true;
+                        }, '加载分组失败', error => {
+                            groups.value = [];
+                            groupsLoaded = false;
+                            groupsError.value = `分组列表未加载成功：${error.message || '请稍后重试'}。请点击刷新后再操作。`;
+                        });
+                    };
+                    const applyGroupsFilter = () => {
+                        appliedGroupKeyword = groupSearch.keyword.trim();
+                        groupPager.page = 1;
+                        return loadGroups();
+                    };
+                    const changeGroupPage = (page) => {
+                        if (groupPager.page === page) return;
+                        groupPager.page = page;
+                        return loadGroups();
+                    };
+                    const changeGroupSize = (size) => {
+                        if (groupPager.size === size) return;
+                        groupPager.size = size;
+                        groupPager.page = 1;
+                        return loadGroups();
                     };
 
-                    const handleDeleteUser = (user) => {
-                        ElementPlus.ElMessageBox.confirm(`确定删除用户 ${user.name} 吗?`, '提示', { type: 'warning' })
-                            .then(async () => {
-                                const res = await fetch(`${API_USER}/${user.id}`, { method: 'DELETE' }).then(r => r.json());
-                                if (res.code === 200) {
-                                    ElementPlus.ElMessage.success('删除成功');
-                                    loadUsers();
-                                    loadUserCount();
-                                } else {
-                                    ElementPlus.ElMessage.error(res.msg);
-                                }
-                            }).catch(() => { });
+                    const loadUserCount = () => runQuery(userCountQuery, async (signal, current) => {
+                        const result = await requestJSON(`${API_USER}/count`, { signal });
+                        if (current()) totalUserCount.value = result.data;
+                    }, '加载用户总数失败');
+                    const loadGroupCount = () => runQuery(groupCountQuery, async (signal, current) => {
+                        const result = await requestJSON(`${API_GROUP}/count`, { signal });
+                        if (current()) totalGroupCount.value = result.data;
+                    }, '加载分组总数失败');
+                    const invalidateUserCount = () => {
+                        cancelQuery(userCountQuery);
+                        totalUserCount.value = null;
+                        if (activeMenu.value === 'overview') return loadUserCount();
+                    };
+                    const invalidateGroupCount = () => {
+                        cancelQuery(groupCountQuery);
+                        totalGroupCount.value = null;
+                        if (activeMenu.value === 'overview') return loadGroupCount();
+                    };
+                    const handleSelect = async (key) => {
+                        activeMenu.value = key;
+                        if (key === 'overview') await Promise.all([loadUserCount(), loadGroupCount()]);
+                        if (key === 'groups' && !groupsLoaded) await loadGroups();
                     };
 
-                    const handleSelectionChange = (val) => {
-                        selectedUsers.value = val;
-                    };
-
-                    const handleBatchDelete = () => {
-                        if (selectedUsers.value.length === 0) return;
-
-                        ElementPlus.ElMessageBox.confirm(`确定删除选中的 ${selectedUsers.value.length} 名用户吗?`, '提示', { type: 'warning' })
-                            .then(async () => {
-                                const ids = selectedUsers.value.map(u => u.id);
-                                try {
-                                    const response = await fetch(`${API_USER}/deleteBatch`, {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify(ids)
-                                    });
-
-                                    if (!response.ok) {
-                                        throw new Error(`HTTP ${response.status} - 后端可能未更新`);
-                                    }
-
-                                    const res = await response.json();
-
-                                    if (res.code === 200) {
-                                        ElementPlus.ElMessage.success('批量删除成功');
-                                        loadUsers();
-                                        loadUserCount();
-                                    } else {
-                                        ElementPlus.ElMessage.error(res.msg);
-                                    }
-                                } catch (e) {
-                                    console.error(e);
-                                    ElementPlus.ElMessage.error('删除失败: ' + e.message);
-                                }
-                            }).catch(() => { });
-                    };
-
-                    // Group Operations
-                    const openGroupDialog = () => {
-                        groupDialog.visible = true;
-                        groupForm.groupName = '';
-                    };
-
-                    const submitGroup = async () => {
-                        if (!groupForm.groupName) return ElementPlus.ElMessage.warning('请输入分组名称');
-                        submitting.value = true;
-                        try {
-                            const res = await fetch(`${API_GROUP}/add`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ groupName: groupForm.groupName })
-                            }).then(r => r.json());
-
-                            if (res.code === 200) {
-                                ElementPlus.ElMessage.success('分组创建成功');
-                                groupDialog.visible = false;
-                                loadGroups();
-                            } else {
-                                ElementPlus.ElMessage.error(res.msg);
-                            }
-                        } catch (e) { ElementPlus.ElMessage.error('网络错误'); }
-                        submitting.value = false;
-                    };
-
-                    const handleDeleteGroup = (group) => {
-                        ElementPlus.ElMessageBox.confirm(`确定删除分组 ${group.groupName} 吗? 如果分组下有用户将无法删除。`, '提示', { type: 'warning' })
-                            .then(async () => {
-                                const res = await fetch(`${API_GROUP}/${group.id}`, { method: 'DELETE' }).then(r => r.json());
-                                if (res.code === 200) {
-                                    ElementPlus.ElMessage.success('删除成功');
-                                    loadGroups();
-                                } else {
-                                    ElementPlus.ElMessage.error('删除失败: ' + res.msg);
-                                }
-                            }).catch(() => { });
-                    };
-
-                    const loadData = async () => {
-                        await loadGroups();
-                        await loadUsers();
-                        await loadUserCount();
-                    };
-
-                    onMounted(() => {
-                        loadData();
+                    // Dropdown option cursors are independent from each other and from the group table page.
+                    const makeOptions = () => reactive({ items: [], keyword: '', nextCursor: 0, hasMore: false,
+                        loading: false, loaded: false, selected: null });
+                    const filterGroupOptions = makeOptions();
+                    const editGroupOptions = makeOptions();
+                    const makeOptionQuery = (state) => makeQuery({
+                        get value() { return state.loading; }, set value(value) { state.loading = value; }
                     });
+                    const filterOptionsQuery = makeOptionQuery(filterGroupOptions);
+                    const editOptionsQuery = makeOptionQuery(editGroupOptions);
+                    const filterLabelQuery = makeQuery();
+                    const editLabelQuery = makeQuery();
+                    let filterOptionsTimer = null;
+                    let editOptionsTimer = null;
+                    const withSelected = (state) => state.selected && !state.items.some(item => item.id === state.selected.id)
+                        ? [state.selected, ...state.items] : state.items;
+                    const filterGroupItems = computed(() => withSelected(filterGroupOptions));
+                    const editGroupItems = computed(() => withSelected(editGroupOptions));
+                    const loadOptions = (state, query, more = false) => {
+                        if (more && (state.loading || !state.hasMore)) return;
+                        const params = new URLSearchParams({ afterId: more ? state.nextCursor : 0, limit: 20 });
+                        if (state.keyword) params.set('keyword', state.keyword);
+                        return runQuery(query, async (signal, current) => {
+                            const result = await requestJSON(`${API_GROUP}/options?${params}`, { signal });
+                            if (!current()) return;
+                            const items = more ? [...state.items, ...result.data.items] : result.data.items;
+                            state.items = [...new Map(items.map(item => [item.id, item])).values()];
+                            const selected = state.items.find(item => item.id === state.selected?.id);
+                            if (selected) state.selected = selected;
+                            state.nextCursor = result.data.nextCursor;
+                            state.hasMore = result.data.hasMore;
+                            state.loaded = true;
+                        }, '加载分组选项失败');
+                    };
+                    const resetOptions = (state, query, keyword = '') => {
+                        cancelQuery(query);
+                        state.keyword = keyword;
+                        state.items = [];
+                        state.nextCursor = 0;
+                        state.hasMore = false;
+                        state.loaded = false;
+                    };
+                    const searchFilterGroups = (keyword) => {
+                        clearTimeout(filterOptionsTimer);
+                        resetOptions(filterGroupOptions, filterOptionsQuery, keyword.trim());
+                        filterOptionsTimer = setTimeout(() => loadOptions(filterGroupOptions, filterOptionsQuery), 300);
+                    };
+                    const searchEditGroups = (keyword) => {
+                        clearTimeout(editOptionsTimer);
+                        resetOptions(editGroupOptions, editOptionsQuery, keyword.trim());
+                        editOptionsTimer = setTimeout(() => loadOptions(editGroupOptions, editOptionsQuery), 300);
+                    };
+                    const showFilterGroups = (visible) => {
+                        if (visible && !filterGroupOptions.loaded && !filterGroupOptions.loading) {
+                            clearTimeout(filterOptionsTimer);
+                            return loadOptions(filterGroupOptions, filterOptionsQuery);
+                        }
+                    };
+                    const showEditGroups = (visible) => {
+                        if (visible && !editGroupOptions.loaded && !editGroupOptions.loading) {
+                            clearTimeout(editOptionsTimer);
+                            return loadOptions(editGroupOptions, editOptionsQuery);
+                        }
+                    };
+                    const loadMoreFilterGroups = () => loadOptions(filterGroupOptions, filterOptionsQuery, true);
+                    const loadMoreEditGroups = () => loadOptions(editGroupOptions, editOptionsQuery, true);
+                    const preserveSelectedGroup = (state, labelQuery, id, knownName) => {
+                        cancelQuery(labelQuery);
+                        if (id == null || id === '') { state.selected = null; return; }
+                        const known = state.items.find(item => item.id === id);
+                        if (known) { state.selected = known; return; }
+                        if (knownName) { state.selected = { id, groupName: knownName }; return; }
+                        if (state.selected?.id === id) return;
+                        state.selected = { id, groupName: String(id) };
+                        return runQuery(labelQuery, async (signal, current) => {
+                            const result = await requestJSON(`${API_GROUP}/${encodeURIComponent(id)}`, { signal });
+                            if (current() && state.selected?.id === id) state.selected = result.data;
+                        }, '加载所选分组失败');
+                    };
+                    const changeUserGroupFilter = () => {
+                        preserveSelectedGroup(filterGroupOptions, filterLabelQuery, searchForm.groupId);
+                        return applyUsersFilter();
+                    };
+                    const changeEditGroup = () => preserveSelectedGroup(editGroupOptions, editLabelQuery, userForm.groupId);
+                    const invalidateOptions = () => {
+                        clearTimeout(filterOptionsTimer);
+                        clearTimeout(editOptionsTimer);
+                        resetOptions(filterGroupOptions, filterOptionsQuery);
+                        resetOptions(editGroupOptions, editOptionsQuery);
+                    };
 
+                    const revokePreview = () => {
+                        if (previewObjectURL) URL.revokeObjectURL(previewObjectURL);
+                        previewObjectURL = null;
+                    };
+                    const closeUserDialog = () => {
+                        revokePreview();
+                        selectedFile.value = null;
+                        userForm.previewUrl = '';
+                        clearTimeout(editOptionsTimer);
+                        cancelQuery(editOptionsQuery);
+                        cancelQuery(editLabelQuery);
+                    };
+                    const openUserDialog = (user) => {
+                        if (userSubmitting.value || (user && (usersLoading.value || usersError.value))) return;
+                        revokePreview();
+                        selectedFile.value = null;
+                        userDialog.isEdit = Boolean(user);
+                        userForm.id = user?.id ?? null;
+                        userForm.name = user?.name ?? '';
+                        userForm.groupId = user?.groupId ?? null;
+                        userForm.previewUrl = user?.photoUrl ? `/uploads/${encodeURIComponent(user.photoUrl)}` : '';
+                        clearTimeout(editOptionsTimer);
+                        resetOptions(editGroupOptions, editOptionsQuery);
+                        editGroupOptions.selected = null;
+                        preserveSelectedGroup(editGroupOptions, editLabelQuery, userForm.groupId, user?.groupName);
+                        userDialog.visible = true;
+                    };
+                    const handleFileChange = (uploadFile) => {
+                        if (userSubmitting.value || !uploadFile.raw) return;
+                        revokePreview();
+                        selectedFile.value = uploadFile.raw;
+                        previewObjectURL = URL.createObjectURL(uploadFile.raw);
+                        userForm.previewUrl = previewObjectURL;
+                    };
+                    const submitUser = async () => {
+                        if (userSubmitting.value) return;
+                        if (!userForm.name.trim()) return ElementPlus.ElMessage.warning('请输入姓名');
+                        if (!userDialog.isEdit && !selectedFile.value) return ElementPlus.ElMessage.warning('请选择照片');
+                        const isEdit = userDialog.isEdit;
+                        userSubmitting.value = true;
+                        const formData = new FormData();
+                        formData.append('name', userForm.name.trim());
+                        if (userForm.groupId != null) formData.append('groupId', userForm.groupId);
+                        if (selectedFile.value) formData.append('photo', selectedFile.value);
+                        try {
+                            const url = isEdit ? `${API_USER}/update/${userForm.id}` : `${API_USER}/add`;
+                            await requestJSON(url, { method: 'POST', body: formData });
+                            ElementPlus.ElMessage.success(isEdit ? '更新成功' : '注册成功');
+                            userDialog.visible = false;
+                            closeUserDialog();
+                            if (!isEdit) invalidateUserCount();
+                            await loadUsers();
+                        } catch (error) { reportError(error, '保存用户失败'); }
+                        finally { userSubmitting.value = false; }
+                    };
+
+                    const handleDeleteUser = async (user) => {
+                        if (userDeleting.value || usersLoading.value || usersError.value) return;
+                        userDeleting.value = true;
+                        try {
+                            try {
+                                await ElementPlus.ElMessageBox.confirm(`确定删除用户 ${user.name} 吗?`, '提示', { type: 'warning' });
+                            } catch (_) { return; }
+                            await requestJSON(`${API_USER}/${user.id}`, { method: 'DELETE' });
+                            ElementPlus.ElMessage.success('删除成功');
+                            invalidateUserCount();
+                            await loadUsers({ fallback: true });
+                        } catch (error) { reportError(error, '删除用户失败'); }
+                        finally { userDeleting.value = false; }
+                    };
+                    const batchSummary = computed(() => {
+                        const result = batchResult.value;
+                        if (!result) return '';
+                        return `共请求 ${result.requestedCount} 项（去重后 ${result.uniqueCount} 项），成功 ${result.successCount} 项` +
+                            `（本次删除 ${result.deletedCount} 项、已不存在 ${result.alreadyAbsentIds.length} 项），失败 ${result.failureCount} 项`;
+                    });
+                    const deleteUserIds = async (inputIds) => {
+                        if (userDeleting.value) return;
+                        const ids = [...new Set(inputIds)];
+                        if (!ids.length) return;
+                        if (ids.length > 100) return ElementPlus.ElMessage.warning('一次最多删除 100 项，请减少选择');
+                        userDeleting.value = true;
+                        try {
+                            try {
+                                await ElementPlus.ElMessageBox.confirm(`确定删除选中的 ${ids.length} 名用户吗?`, '提示', { type: 'warning' });
+                            } catch (_) { return; }
+                            const result = await requestJSON(`${API_USER}/deleteBatch`, {
+                                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ids)
+                            }, [200, 207, 422]);
+                            batchResult.value = result.data;
+                            if (result.data.failureCount) ElementPlus.ElMessage.warning(batchSummary.value);
+                            else ElementPlus.ElMessage.success(batchSummary.value);
+                            clearUserSelection();
+                            if (result.data.successCount) {
+                                invalidateUserCount();
+                                await loadUsers({ fallback: true });
+                            }
+                        } catch (error) { reportError(error, '批量删除失败'); }
+                        finally { userDeleting.value = false; }
+                    };
+                    const handleBatchDelete = () => deleteUserIds(selectedUsers.value.map(user => user.id));
+                    const retryFailedDeletes = () => deleteUserIds((batchResult.value?.failures || []).map(failure => failure.id));
+
+                    const openGroupDialog = () => {
+                        if (groupSubmitting.value) return;
+                        groupForm.groupName = '';
+                        groupDialog.visible = true;
+                    };
+                    const submitGroup = async () => {
+                        if (groupSubmitting.value) return;
+                        if (!groupForm.groupName.trim()) return ElementPlus.ElMessage.warning('请输入分组名称');
+                        groupSubmitting.value = true;
+                        try {
+                            await requestJSON(`${API_GROUP}/add`, {
+                                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ groupName: groupForm.groupName.trim() })
+                            });
+                            ElementPlus.ElMessage.success('分组创建成功');
+                            groupDialog.visible = false;
+                            invalidateGroupCount();
+                            invalidateOptions();
+                            await loadGroups();
+                        } catch (error) { reportError(error, '创建分组失败'); }
+                        finally { groupSubmitting.value = false; }
+                    };
+                    const handleDeleteGroup = async (group) => {
+                        if (groupDeleting.value || groupsLoading.value || groupsError.value) return;
+                        groupDeleting.value = true;
+                        try {
+                            try {
+                                await ElementPlus.ElMessageBox.confirm(`确定删除分组 ${group.groupName} 吗? 如果分组下有用户将无法删除。`, '提示', { type: 'warning' });
+                            } catch (_) { return; }
+                            await requestJSON(`${API_GROUP}/${group.id}`, { method: 'DELETE' });
+                            ElementPlus.ElMessage.success('删除成功');
+                            invalidateGroupCount();
+                            invalidateOptions();
+                            if (searchForm.groupId === group.id) {
+                                searchForm.groupId = null;
+                                filterGroupOptions.selected = null;
+                                await applyUsersFilter();
+                            }
+                            await loadGroups({ fallback: true });
+                        } catch (error) { reportError(error, '删除分组失败'); }
+                        finally { groupDeleting.value = false; }
+                    };
+                    const handleCommand = async (command) => {
+                        if (command !== 'logout' || loggingOut) return;
+                        loggingOut = true;
+                        try {
+                            await requestJSON('/api/logout', { method: 'POST' });
+                            expireSession();
+                        } catch (error) { reportError(error, '退出登录失败，请重试'); }
+                        finally { loggingOut = false; }
+                    };
+                    onMounted(async () => {
+                        try {
+                            await requestJSON('/api/me');
+                            authenticated.value = true;
+                            await loadUsers();
+                        } catch (error) {
+                            authError.value = error.message || '登录状态验证失败，请刷新页面重试';
+                            reportError(error, authError.value);
+                        }
+                    });
+                    onBeforeUnmount(() => {
+                        revokePreview();
+                        clearTimeout(filterOptionsTimer);
+                        clearTimeout(editOptionsTimer);
+                        [usersQuery, groupsQuery, userCountQuery, groupCountQuery, filterOptionsQuery,
+                            editOptionsQuery, filterLabelQuery, editLabelQuery].forEach(cancelQuery);
+                    });
                     return {
-                        activeMenu, handleSelect,
-                        users, groups, loading, submitting,
-                        getGroupName, hasFeature,
-                        userDialog, userForm, openUserDialog, submitUser, handleDeleteUser,
-                        handleSelectionChange, handleBatchDelete, selectedUsers,
+                        authenticated, authError, activeMenu, handleSelect, handleCommand, users, groups,
+                        usersLoading, groupsLoading, usersError, groupsError,
+                        userSubmitting, groupSubmitting, userDeleting, groupDeleting,
+                        userTable, selectedUsers, clearUserSelection, handleSelectionChange, canSelectUser,
+                        userPager, groupPager, searchForm, groupSearch, applyUsersFilter, applyGroupsFilter,
+                        changeUserPage, changeUserSize, changeGroupPage, changeGroupSize, loadUsers, loadGroups,
+                        totalUserCount, totalGroupCount, userCountLoading, groupCountLoading,
+                        userDialog, userForm, openUserDialog, closeUserDialog, submitUser, handleFileChange,
+                        handleDeleteUser, handleBatchDelete, retryFailedDeletes, batchResult, batchSummary,
                         groupDialog, groupForm, openGroupDialog, submitGroup, handleDeleteGroup,
-                        loadUsers, loadGroups,
-                        handleFileChange,
-                        handleCommand,
-                        searchForm,
-                        totalUserCount,
-                        Plus: ElementPlusIconsVue.Plus,
-                        Refresh: ElementPlusIconsVue.Refresh,
-                        Search: ElementPlusIconsVue.Search
-                    }
+                        filterGroupOptions, editGroupOptions, filterGroupItems, editGroupItems,
+                        searchFilterGroups, searchEditGroups, showFilterGroups, showEditGroups,
+                        loadMoreFilterGroups, loadMoreEditGroups, changeUserGroupFilter, changeEditGroup,
+                        Plus: ElementPlusIconsVue.Plus, Refresh: ElementPlusIconsVue.Refresh, Search: ElementPlusIconsVue.Search
+                    };
                 }
             });
-
-            // Register Icons
-            for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
-                app.component(key, component)
-            }
-
+            for (const [key, component] of Object.entries(ElementPlusIconsVue)) app.component(key, component);
             app.use(ElementPlus);
             app.mount('#app');
         </script>

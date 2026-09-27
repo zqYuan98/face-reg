@@ -1,0 +1,15 @@
+spring:
+  datasource:
+    # Deliberately invalid fallback: a test can never reach the business database.
+    url: ${FACE_TEST_DB_URL:jdbc:mysql://127.0.0.1:1/face_test}
+    username: ${FACE_TEST_DB_USER:face_test}
+    password: ${FACE_TEST_DB_PASSWORD:}
+    hikari:
+      maximum-pool-size: 3
+      connection-timeout: 1000
+  servlet:
+    multipart:
+      location: ${java.io.tmpdir}/face-backend-tests
+  sql:
+    init:
+      mode: never

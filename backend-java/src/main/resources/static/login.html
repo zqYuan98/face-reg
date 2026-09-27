@@ -3,6 +3,7 @@
 
 <head>
     <meta charset="UTF-8">
+    <link rel="icon" href="/company_icon.png">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>登录 - 人脸识别智能管理系统</title>
     <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css" />
@@ -99,35 +100,56 @@
         const app = createApp({
             setup() {
                 const loading = ref(false);
+                let csrfPromise = null;
                 const form = reactive({
                     username: '',
                     password: ''
                 });
 
+                const readResponse = async response => {
+                    let result;
+                    try { result = await response.json(); }
+                    catch (_) { throw new Error('服务器响应异常，请稍后重试'); }
+                    if (!response.ok || result.code !== 200) {
+                        throw new Error(result.msg || (response.status === 403
+                            ? '安全校验失败，请重新点击登录' : '登录失败，请检查账号和密码'));
+                    }
+                    return result;
+                };
+                const loadCsrf = () => {
+                    if (!csrfPromise) csrfPromise = (async () => {
+                        const result = await readResponse(await fetch('/api/csrf', { credentials: 'same-origin' }));
+                        if (!result.data?.token || result.data.headerName !== 'X-CSRF-TOKEN') {
+                            throw new Error('安全校验信息缺失，请刷新页面后重试');
+                        }
+                        return result.data;
+                    })().catch(error => { csrfPromise = null; throw error; });
+                    return csrfPromise;
+                };
                 const handleLogin = async () => {
+                    if (loading.value) return;
                     if (!form.username || !form.password) {
                         return ElementPlus.ElMessage.warning('请输入账号和密码');
                     }
                     loading.value = true;
                     try {
+                        const csrf = await loadCsrf();
                         const response = await fetch('/api/login', {
                             method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'same-origin',
+                            headers: { 'Content-Type': 'application/json', [csrf.headerName]: csrf.token },
                             body: JSON.stringify(form)
                         });
-                        const result = await response.json();
-
-                        if (result.code === 200) {
-                            ElementPlus.ElMessage.success('登录成功');
-                            sessionStorage.setItem('admin_token', result.token);
-                            setTimeout(() => {
-                                window.location.href = 'index.html';
-                            }, 500);
-                        } else {
-                            ElementPlus.ElMessage.error(result.msg || '登录失败');
-                        }
+                        await readResponse(response);
+                        // Authentication rotates the session and invalidates the pre-login CSRF token.
+                        csrfPromise = null;
+                        await loadCsrf();
+                        form.password = '';
+                        ElementPlus.ElMessage.success('登录成功');
+                        window.location.href = 'index.html';
                     } catch (error) {
-                        ElementPlus.ElMessage.error('网络错误，请稍后重试');
+                        csrfPromise = null;
+                        ElementPlus.ElMessage.error(error.message || '网络错误，请稍后重试');
                     } finally {
                         loading.value = false;
                     }

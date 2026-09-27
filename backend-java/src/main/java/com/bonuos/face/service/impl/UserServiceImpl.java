@@ -1,317 +1,161 @@
 package com.bonuos.face.service.impl;
 
 import cn.hutool.core.util.IdUtil;
+import com.bonuos.face.dto.BatchDeleteResult;
 import com.bonuos.face.entity.User;
+import com.bonuos.face.exception.ApiException;
 import com.bonuos.face.mapper.UserMapper;
-import com.bonuos.face.service.UserService;
+import com.bonuos.face.service.*;
+import com.bonuos.face.util.FaceFeatureExtractorClient;
+import com.bonuos.face.handler.SyncWebSocketHandler;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
-
-import java.io.File;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.TransientDataAccessResourceException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
-import java.util.List;
+import java.util.*;
 
 @Service
 public class UserServiceImpl implements UserService {
-
-    @Autowired
-    private com.bonuos.face.util.FaceFeatureExtractorClient faceFeatureExtractorClient;
-
-    @Autowired
-    private UserMapper userMapper;
-
-    @Autowired
-    private com.bonuos.face.handler.SyncWebSocketHandler syncWebSocketHandler;
-
-    @Autowired
-    private com.bonuos.face.mapper.UserGroupMapper userGroupMapper;
-
-    @Value("${spring.servlet.multipart.location:e:/Face-app-web/backend-java/uploads}")
-    private String uploadPath;
+    private static final Logger log = LoggerFactory.getLogger(UserServiceImpl.class);
+    @Autowired private FaceFeatureExtractorClient faceFeatureExtractorClient;
+    @Autowired private UserMapper userMapper;
+    @Autowired private SyncWebSocketHandler syncWebSocketHandler;
+    @Autowired private UserMutationService mutations;
+    @Autowired private PhotoStorage photos;
+    @Autowired private FaceSearchService search;
+    @Autowired private AdminQueryService adminQueries;
 
     @Override
     public User addUser(String name, Long groupId, MultipartFile photo) {
-        // 1. 保存照片
-        String fileName = IdUtil.fastSimpleUUID() + "_" + photo.getOriginalFilename();
-
-        if (groupId != null) {
-            if (userGroupMapper.selectById(groupId) == null) {
-                throw new RuntimeException("指定的用户分组不存在");
-            }
-            // 检查重名
-            checkDuplicateName(name, groupId, null);
-        }
-
-        // 确保上传目录存在
-        File uploadDir = new File(uploadPath);
-        if (!uploadDir.exists()) {
-            uploadDir.mkdirs();
-        }
-
-        File dest = new File(uploadDir, fileName);
+        name = validateName(name);
+        Path staged = photos.stage(photo); String published = null;
         try {
-            photo.transferTo(dest);
-        } catch (IOException e) {
-            throw new RuntimeException("照片保存失败: " + e.getMessage(), e);
-        }
-
-        // 2. 提取特征 (调用 Python API)
-        String featureJson;
-        try {
-            // 使用已保存的文件进行提取，避免 MultipartFile 在 transferTo 后失效的问题
-            List<Float> features = faceFeatureExtractorClient.extractFeature(dest);
-            featureJson = convertFeaturesToJson(features);
-        } catch (IOException e) {
-            // 处理特征提取失败的异常
-            if (e.getMessage().contains("No face detected") ||
-                    e.getMessage().contains("未检测到人脸") ||
-                    e.getMessage().contains("Face quality check failed") ||
-                    e.getMessage().toLowerCase().contains("feature extraction failed")) {
-                throw new RuntimeException("请上传正确且清晰的人脸照片", e);
-            }
-            throw new RuntimeException("特征提取失败: " + e.getMessage(), e);
-        }
-
-        // 3. 保存用户到数据库
-        User user = new User();
-        user.setUserNo(IdUtil.getSnowflakeNextIdStr());
-        user.setName(name);
-        user.setGroupId(groupId);
-        user.setPhotoUrl(fileName); // 存储相对路径或文件名
-        user.setFeatureData(featureJson);
-        user.setStatus(1);
-        user.setCreateTime(LocalDateTime.now());
-        user.setUpdateTime(LocalDateTime.now());
-
-        userMapper.insert(user);
-        syncWebSocketHandler.broadcastUpdate(); // 通知前端更新
-        return user;
-    }
-
-    private String convertFeaturesToJson(List<Float> features) {
-        StringBuilder sb = new StringBuilder("[");
-        for (int i = 0; i < features.size(); i++) {
-            sb.append(features.get(i));
-            if (i < features.size() - 1)
-                sb.append(",");
-        }
-        sb.append("]");
-        return sb.toString();
-    }
-
-    @Override
-    public List<User> getUsers(String name, Long groupId) {
-        com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<User> queryWrapper = new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<>();
-        // 只返回活跃用户（status=1）
-        queryWrapper.eq("status", 1);
-
-        if (name != null && !name.isEmpty()) {
-            queryWrapper.like("name", name);
-        }
-
-        if (groupId != null) {
-            queryWrapper.eq("group_id", groupId);
-        }
-
-        queryWrapper.orderByDesc("create_time");
-
-        return userMapper.selectList(queryWrapper);
-    }
-
-    @Override
-    public long countUsers() {
-        return userMapper
-                .selectCount(new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<User>().eq("status", 1));
-    }
-
-    @Override
-    public User getUserById(Long id) {
-        return userMapper.selectById(id);
+            String feature = featureJson(extract(staged));
+            published = photos.publish(staged);
+            User user = new User(); user.setUserNo(IdUtil.getSnowflakeNextIdStr());
+            user.setName(name); user.setGroupId(groupId); user.setPhotoUrl(published);
+            user.setFeatureData(feature); user.setStatus(1);
+            user.setCreateTime(LocalDateTime.now()); user.setUpdateTime(LocalDateTime.now());
+            User saved = mutations.insert(user);
+            notifyUpdate(); return saved;
+        } catch (RuntimeException e) {
+            if (published != null) photos.retire(published);
+            throw e;
+        } finally { photos.discard(staged); }
     }
 
     @Override
     public User updateUser(Long id, String name, Long groupId, MultipartFile photo) {
-        User user = userMapper.selectById(id);
-        if (user == null) {
-            throw new RuntimeException("用户不存在");
-        }
-
-        if (groupId != null) {
-            if (userGroupMapper.selectById(groupId) == null) {
-                throw new RuntimeException("指定的用户分组不存在");
+        if (id == null || id <= 0) throw new ApiException(HttpStatus.BAD_REQUEST,"INVALID_ID","人员 ID 无效");
+        name = validateName(name);
+        Path staged = null; String published = null; String feature = null;
+        try {
+            if (photo != null && !photo.isEmpty()) {
+                staged = photos.stage(photo); feature = featureJson(extract(staged));
+                published = photos.publish(staged);
             }
-        }
-
-        // 如果修改了名字或分组，检查重名
-        if (!user.getName().equals(name) || (groupId != null && !groupId.equals(user.getGroupId()))) {
-            checkDuplicateName(name, groupId != null ? groupId : user.getGroupId(), id);
-        }
-
-        user.setName(name);
-        user.setGroupId(groupId);
-        user.setUpdateTime(LocalDateTime.now());
-
-        // 如果提供了新照片，则更新照片和特征
-        if (photo != null && !photo.isEmpty()) {
-            String fileName = IdUtil.fastSimpleUUID() + "_" + photo.getOriginalFilename();
-
-            // 确保上传目录存在
-            File uploadDir = new File(uploadPath);
-            if (!uploadDir.exists()) {
-                uploadDir.mkdirs();
-            }
-
-            File dest = new File(uploadDir, fileName);
-            try {
-                photo.transferTo(dest);
-                user.setPhotoUrl(fileName);
-
-                // 重新提取特征
-                List<Float> features = faceFeatureExtractorClient.extractFeature(dest);
-                user.setFeatureData(convertFeaturesToJson(features));
-            } catch (IOException e) {
-                // 处理特征提取失败的异常
-                if (e.getMessage().contains("No face detected") ||
-                        e.getMessage().contains("未检测到人脸") ||
-                        e.getMessage().contains("Face quality check failed") ||
-                        e.getMessage().toLowerCase().contains("feature extraction failed")) {
-                    throw new RuntimeException("请上传正确且清晰的人脸照片", e);
-                }
-                throw new RuntimeException("照片保存或特征提取失败: " + e.getMessage(), e);
-            }
-        }
-
-        userMapper.updateById(user);
-        syncWebSocketHandler.broadcastUpdate(); // 通知前端更新
-        return user;
+            var result = mutations.update(id,name,groupId,published,feature);
+            if (published != null) photos.retire(result.previousPhoto());
+            notifyUpdate(); return result.user();
+        } catch (RuntimeException e) {
+            if (published != null) photos.retire(published);
+            throw e;
+        } finally { photos.discard(staged); }
     }
+    private static String validateName(String name) {
+        if (name == null || name.isBlank() || name.trim().length() > 100)
+            throw new ApiException(HttpStatus.BAD_REQUEST,"INVALID_NAME","姓名必须为 1 至 100 个字符");
+        return name.trim();
+    }
+    private List<Float> extract(Path staged) {
+        try { return faceFeatureExtractorClient.extractFeature(staged.toFile()); }
+        catch (IOException e) { throw new ApiException(HttpStatus.BAD_GATEWAY,"EXTRACTION_FAILED","照片特征提取失败，请检查照片或稍后重试"); }
+    }
+    private static String featureJson(List<Float> feature) {
+        if (feature == null || feature.size() != 1024 || feature.stream().anyMatch(v -> v == null || !Float.isFinite(v)))
+            throw new ApiException(HttpStatus.BAD_GATEWAY,"INVALID_FEATURE","算法返回的特征格式无效");
+        double norm = 0; for (float v : feature) norm += (double)v * v;
+        if (norm == 0) throw new ApiException(HttpStatus.BAD_GATEWAY,"INVALID_FEATURE","算法返回的特征无效");
+        return feature.toString();
+    }
+    @Override public List<User> getUsers(String name, Long groupId) { return adminQueries.legacyUsers(name,groupId); }
+    @Override public long countUsers() {
+        return userMapper.selectCount(new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<User>().eq("status",1));
+    }
+    @Override public User getUserById(Long id) { return userMapper.selectById(id); }
 
     @Override
-    public void deleteUsers(List<Long> ids) {
-        if (ids == null || ids.isEmpty()) {
-            return;
+    public BatchDeleteResult deleteUsers(List<Long> ids) {
+        if (ids == null || ids.isEmpty() || ids.size() > 100 ||
+                ids.stream().anyMatch(id -> id == null || id <= 0)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_BATCH", "请选择 1 至 100 个有效人员 ID");
         }
-        for (Long id : ids) {
+        List<Long> uniqueIds = new ArrayList<>(new LinkedHashSet<>(ids));
+        List<Long> successful = new ArrayList<>();
+        List<Long> absent = new ArrayList<>();
+        List<BatchDeleteResult.Failure> failures = new ArrayList<>();
+        boolean unavailable = false;
+        int deleted = 0;
+        for (Long id : uniqueIds) {
+            if (unavailable) {
+                failures.add(new BatchDeleteResult.Failure(id, "NOT_ATTEMPTED", "数据库暂不可用，本项尚未执行"));
+                continue;
+            }
             try {
-                deleteUser(id);
+                if (deleteWithoutNotification(id)) {
+                    deleted++;
+                } else {
+                    absent.add(id);
+                }
+                successful.add(id);
+            } catch (DataAccessResourceFailureException | TransientDataAccessResourceException e) {
+                unavailable = true;
+                failures.add(new BatchDeleteResult.Failure(id, "DATABASE_UNAVAILABLE", "删除结果未确认，请刷新后重试"));
+                log.warn("Batch deletion stopped: database unavailable");
             } catch (Exception e) {
-                // log error but continue
-                System.err.println("Batch delete error for id " + id + ": " + e.getMessage());
+                failures.add(new BatchDeleteResult.Failure(id, "DELETE_FAILED", "删除失败，请刷新后重试"));
+                log.warn("User deletion failed for id={}, type={}", id, e.getClass().getSimpleName());
             }
         }
+        if (deleted > 0) notifyUpdate();
+        return new BatchDeleteResult(ids.size(), uniqueIds.size(), successful, absent, deleted, failures);
     }
 
     @Override
     public void deleteUser(Long id) {
-        User user = userMapper.selectById(id);
-        if (user == null) {
-            throw new RuntimeException("用户不存在");
-        }
+        if (id == null || id <= 0) throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_ID", "人员 ID 无效");
+        if (deleteWithoutNotification(id)) notifyUpdate();
+    }
 
-        // 硬删除：直接从数据库删除记录
-        userMapper.deleteById(id);
-        syncWebSocketHandler.broadcastUpdate(); // 通知前端更新
+    private boolean deleteWithoutNotification(Long id) {
+        var result = mutations.delete(id);
+        if (result.deleted()) photos.retire(result.photo());
+        return result.deleted();
+    }
 
-        // 可选：同时删除用户的照片文件
-        if (user.getPhotoUrl() != null && !user.getPhotoUrl().isEmpty()) {
-            try {
-                File photoFile = new File(uploadPath, user.getPhotoUrl());
-                if (photoFile.exists()) {
-                    photoFile.delete();
-                }
-            } catch (Exception e) {
-                // 文件删除失败不影响数据库删除
-                System.err.println("删除照片文件失败: " + e.getMessage());
-            }
+    private void notifyUpdate() {
+        try {
+            syncWebSocketHandler.broadcastUpdate();
+        } catch (RuntimeException e) {
+            log.warn("Update notification failed after committed mutation: {}", e.getClass().getSimpleName());
         }
     }
 
     @Override
     public User searchUser(MultipartFile photo, Long groupId) {
-        if (groupId == null) {
-            throw new RuntimeException("必须指定分组ID");
-        }
-
-        // 1. 保存上传的照片 (临时)
-        String fileName = IdUtil.fastSimpleUUID() + "_" + photo.getOriginalFilename();
-        File uploadDir = new File(uploadPath);
-        if (!uploadDir.exists()) {
-            uploadDir.mkdirs();
-        }
-        File dest = new File(uploadDir, fileName);
-
+        if (groupId == null || groupId <= 0) throw new ApiException(HttpStatus.BAD_REQUEST,"INVALID_GROUP","必须指定有效分组");
+        Path staged = photos.stage(photo);
         try {
-            photo.transferTo(dest);
-        } catch (IOException e) {
-            throw new RuntimeException("照片处理失败", e);
-        }
-
-        try {
-            // 2. 提取特征
-            List<Float> targetFeature = faceFeatureExtractorClient.extractFeature(dest);
-            if (targetFeature == null || targetFeature.isEmpty()) {
-                throw new RuntimeException("未能从上传图片中提取到人脸特征");
-            }
-
-            // 3. 获取分组下所有用户
-            List<User> users = getUsers(null, groupId);
-            if (users == null || users.isEmpty()) {
-                return null;
-            }
-
-            // 4. 比对特征
-            User bestMatch = null;
-            float maxSimilarity = 0f;
-            float threshold = 0.6f; // 相似度阈值
-
-            for (User user : users) {
-                if (user.getFeatureData() == null)
-                    continue;
-
-                List<Float> dbFeature = com.bonuos.face.util.FaceUtils.parseFeatureData(user.getFeatureData());
-                if (dbFeature != null) {
-                    float similarity = com.bonuos.face.util.FaceUtils.cosineSimilarity(targetFeature, dbFeature);
-                    if (similarity > maxSimilarity) {
-                        maxSimilarity = similarity;
-                        bestMatch = user;
-                    }
-                }
-            }
-
-            // 5. 返回结果
-            if (maxSimilarity >= threshold) {
-                return bestMatch;
-            }
-            return null; // 未找到匹配
-
-        } catch (Exception e) {
-            throw new RuntimeException("人脸搜索失败: " + e.getMessage(), e);
-        } finally {
-            // 清理临时文件
-            if (dest.exists()) {
-                dest.delete();
-            }
-        }
-    }
-
-    /**
-     * 检查分组下是否存在同名用户
-     */
-    private void checkDuplicateName(String name, Long groupId, Long excludeId) {
-        com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<User> wrapper = new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<>();
-        wrapper.eq("group_id", groupId)
-                .eq("name", name)
-                .eq("status", 1); // 只检查有效用户
-
-        if (excludeId != null) {
-            wrapper.ne("id", excludeId);
-        }
-
-        if (userMapper.selectCount(wrapper) > 0) {
-            throw new RuntimeException("该分组下已存在名为 [" + name + "] 的用户");
-        }
+            List<Float> feature = extract(staged);
+            featureJson(feature);
+            return search.search(feature,groupId);
+        } finally { photos.discard(staged); }
     }
 }

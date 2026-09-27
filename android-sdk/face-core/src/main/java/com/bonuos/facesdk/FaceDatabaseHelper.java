@@ -6,7 +6,7 @@ import android.database.sqlite.SQLiteOpenHelper;
 
 public class FaceDatabaseHelper extends SQLiteOpenHelper {
     private static final String DATABASE_NAME = "face_sdk.db";
-    private static final int DATABASE_VERSION = 2; // Incremented version
+    private static final int DATABASE_VERSION = 3;
 
     public static final String TABLE_USERS = "users";
     public static final String COLUMN_ID = "id";
@@ -40,6 +40,7 @@ public class FaceDatabaseHelper extends SQLiteOpenHelper {
     @Override
     public void onCreate(SQLiteDatabase db) {
         db.execSQL(TABLE_CREATE);
+        createSyncTables(db);
     }
 
     @Override
@@ -48,5 +49,16 @@ public class FaceDatabaseHelper extends SQLiteOpenHelper {
             // Add group_id column for version 2
             db.execSQL("ALTER TABLE " + TABLE_USERS + " ADD COLUMN " + COLUMN_GROUP_ID + " INTEGER");
         }
+        if (oldVersion < 3) createSyncTables(db);
+    }
+
+    private static void createSyncTables(SQLiteDatabase db) {
+        db.execSQL("ALTER TABLE users ADD COLUMN sync_version INTEGER NOT NULL DEFAULT 0");
+        db.execSQL("ALTER TABLE users ADD COLUMN photo_url TEXT");
+        db.execSQL("CREATE TABLE sync_stage (id INTEGER PRIMARY KEY, user_no TEXT, name TEXT, group_id INTEGER, " +
+                "feature BLOB, photo_path TEXT, update_time INTEGER, sync_version INTEGER NOT NULL, photo_url TEXT, deleted INTEGER NOT NULL DEFAULT 0)");
+        db.execSQL("CREATE TABLE sync_tombstones (id INTEGER PRIMARY KEY, sync_version INTEGER NOT NULL)");
+        db.execSQL("CREATE TABLE sync_meta (id INTEGER PRIMARY KEY CHECK(id=1), epoch TEXT NOT NULL, " +
+                "scope_version TEXT NOT NULL, revision INTEGER NOT NULL, identity TEXT NOT NULL)");
     }
 }

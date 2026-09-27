@@ -1,0 +1,10 @@
+SET @has_column = (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='user_change_log' AND column_name='old_photo_url');
+SET @ddl = IF(@has_column=0,'ALTER TABLE user_change_log ADD COLUMN old_photo_url VARCHAR(255) NULL, ADD INDEX idx_change_old_photo(old_photo_url)','SELECT 1');
+PREPARE statement FROM @ddl;
+EXECUTE statement;
+DEALLOCATE PREPARE statement;
+SET @has_index = (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='sync_device_cursor' AND index_name='idx_cursor_updated');
+SET @ddl = IF(@has_index=0,'ALTER TABLE sync_device_cursor ADD INDEX idx_cursor_updated(epoch,updated_at,ack_revision)','SELECT 1');
+PREPARE statement FROM @ddl;
+EXECUTE statement;
+DEALLOCATE PREPARE statement;

@@ -2,252 +2,186 @@ package com.bonuos.facesdk;
 
 import android.content.Context;
 import android.util.Log;
-import org.json.JSONArray;
-import org.json.JSONObject;
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.handshake.ServerHandshake;
-
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.net.HttpURLConnection;
+import java.io.File;
 import java.net.URI;
-import java.net.URL;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.*;
 
-public class SyncManager {
+/** Configurable dual-protocol sync. WebSocket messages only request a durable cursor catch-up. */
+public class SyncManager implements AutoCloseable {
     private static final String TAG = "SyncManager";
-    // 请确保此 IP 与您的电脑 IP 一致，且 Android 设备能访问
-    private static final String SYNC_URL = "http://<server-37>:18080/api/sync/users";
-    private static final String WS_URL = "ws://<server-37>:18080/ws/sync";
-
-    private Context context;
-    private boolean isSyncing = false;
-    private WebSocketClient webSocketClient;
+    private static final Semaphore DATABASE_SYNC = new Semaphore(1);
+    private static volatile SyncConfig defaults;
+    private final Context context;
+    private final SyncConfig config;
+    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    private final SyncHttpClient http;
+    private final Semaphore databaseSync;
+    private boolean running, pending, auto, closed;
+    private long lifecycleGeneration;
+    private SyncCallback callback;
+    private Future<?> task;
+    private ScheduledFuture<?> periodic, reconnect, retry;
+    private WebSocketClient socket;
 
     public interface SyncCallback {
+        /** Complete online dataset size, including zero. Called only after dataset/cache publication. */
         void onSuccess(int count);
-
         void onError(String msg);
     }
 
-    public SyncManager(Context context) {
-        this.context = context;
+    public static void configure(SyncConfig config) {
+        if (config == null) throw new IllegalArgumentException("Sync configuration is required");
+        defaults = config;
     }
 
-    public void syncData(SyncCallback callback) {
-        if (isSyncing) {
-            Log.i(TAG, "Sync already in progress, skipping.");
+    /** Preserves the public API; provision configure() before constructing managers. */
+    public SyncManager(Context context) { this(context, defaults); }
+    public SyncManager(Context context, SyncConfig config) {
+        this(context, config, DATABASE_SYNC);
+    }
+    SyncManager(Context context, SyncConfig config, Semaphore databaseSync) {
+        this.context = context.getApplicationContext();
+        this.config = config;
+        this.databaseSync = databaseSync;
+        http = config == null ? null : new SyncHttpClient(config, new File(this.context.getFilesDir(), "faces"));
+    }
+
+    public synchronized void syncData(SyncCallback callback) {
+        if (closed) return;
+        if (config == null) {
+            if (callback != null) callback.onError("请先配置同步服务器和设备凭据");
             return;
         }
-        isSyncing = true;
-        new Thread(() -> {
-            try {
-                Log.i(TAG, "Starting sync...");
-                // 强制全量同步，以确保 deleteUsersNotInSet 逻辑正确
-                // 如果使用增量同步，后端返回空列表会导致本地数据被清空
-                URL url = new URL(SYNC_URL); // 不带 lastSyncTime 参数
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("GET");
-                conn.setConnectTimeout(5000);
-
-                int responseCode = conn.getResponseCode();
-                if (responseCode == 200) {
-                    BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-                    StringBuilder response = new StringBuilder();
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        response.append(line);
-                    }
-                    reader.close();
-
-                    int count = parseAndSaveData(response.toString());
-                    if (callback != null) {
-                        callback.onSuccess(count);
-                    }
-                } else {
-                    Log.e(TAG, "Sync failed with code: " + responseCode);
-                    if (callback != null) {
-                        callback.onError("Sync failed: " + responseCode);
-                    }
-                }
-            } catch (Exception e) {
-                Log.e(TAG, "Sync error", e);
-                if (callback != null) {
-                    callback.onError("Sync error: " + e.getMessage());
-                }
-            } finally {
-                isSyncing = false;
-            }
-        }).start();
+        this.callback = callback;
+        pending = true;
+        if (running) return;
+        running = true;
+        task = worker.submit(this::drain);
     }
 
-    public void startAutoSync(long intervalSeconds, SyncCallback callback) {
-        // 首次启动先同步一次
-        syncData(callback);
-        connectWebSocket(callback);
-    }
-
-    public void stopAutoSync() {
-        if (webSocketClient != null) {
-            Log.i(TAG, "Closing WebSocket...");
-            webSocketClient.close();
-            webSocketClient = null;
-        }
-    }
-
-    private void connectWebSocket(SyncCallback callback) {
+    private void drain() {
         try {
-            URI uri = new URI(WS_URL);
-            webSocketClient = new WebSocketClient(uri) {
-                @Override
-                public void onOpen(ServerHandshake handshakedata) {
-                    Log.i(TAG, "WebSocket Connected");
+            while (!Thread.currentThread().isInterrupted()) {
+                long generation;
+                synchronized (this) {
+                    if (closed || !pending) return;
+                    pending = false;
+                    generation = lifecycleGeneration;
                 }
-
-                @Override
-                public void onMessage(String message) {
-                    Log.i(TAG, "WebSocket Message: " + message);
-                    if ("UPDATE".equals(message)) {
-                        Log.i(TAG, "Received UPDATE signal, triggering sync...");
-                        syncData(callback);
+                if (!databaseSync.tryAcquire()) {
+                    synchronized (this) {
+                        if (!closed && generation == lifecycleGeneration) pending = true;
                     }
+                    return;
                 }
-
-                @Override
-                public void onClose(int code, String reason, boolean remote) {
-                    Log.w(TAG, "WebSocket Closed: " + reason);
-                    // 简单的重连机制：5秒后重试
-                    new Thread(() -> {
-                        try {
-                            Thread.sleep(5000);
-                            if (webSocketClient != null && webSocketClient.isClosed()) {
-                                Log.i(TAG, "Reconnecting WebSocket...");
-                                reconnect();
-                            }
-                        } catch (InterruptedException e) {
-                            e.printStackTrace();
+                try (SyncStore store = new SyncStore(context)) {
+                    synchronized (this) {
+                        if (closed || generation != lifecycleGeneration) return;
+                    }
+                    String identity = config.baseUri + "|" + config.deviceSn + "|" + config.protocol;
+                    SyncEngine engine = new SyncEngine(store, http, identity);
+                    int count = config.protocol == SyncConfig.Protocol.V2 ? engine.synchronize() : engine.legacy();
+                    SyncCallback listener = currentCallback();
+                    if (listener != null && !Thread.currentThread().isInterrupted()) listener.onSuccess(count);
+                } catch (Exception error) {
+                    Log.w(TAG, "Synchronization failed: " + error.getClass().getSimpleName());
+                    SyncCallback listener = currentCallback();
+                    if (listener != null && !Thread.currentThread().isInterrupted()) listener.onError("同步未完成，请检查连接或设备授权");
+                    return;
+                } finally { databaseSync.release(); }
+            }
+        } finally {
+            synchronized (this) {
+                running = false;
+                // A notification racing with the final loop check is retained and coalesced.
+                if (pending && !closed) {
+                    long generation = lifecycleGeneration;
+                    retry = scheduler.schedule(() -> {
+                        synchronized (SyncManager.this) {
+                            if (closed || generation != lifecycleGeneration || !pending) return;
+                            retry = null;
+                            syncData(callback);
                         }
-                    }).start();
+                    }, 1, TimeUnit.SECONDS);
                 }
-
-                @Override
-                public void onError(Exception ex) {
-                    Log.e(TAG, "WebSocket Error", ex);
-                }
-            };
-            webSocketClient.connect();
-        } catch (Exception e) {
-            Log.e(TAG, "WebSocket Connect Failed", e);
+            }
         }
     }
 
-    private int parseAndSaveData(String jsonResponse) {
-        int count = 0;
-        try {
-            JSONObject json = new JSONObject(jsonResponse);
-            if (json.getInt("code") == 200) {
-                JSONArray users = json.getJSONArray("data");
-                Log.i(TAG, "Received " + users.length() + " users to sync");
+    private synchronized SyncCallback currentCallback() { return callback; }
 
-                FaceRepository repository = new FaceRepository(context);
-
-                // 确保图片目录存在
-                java.io.File faceDir = new java.io.File(context.getFilesDir(), "faces");
-                if (!faceDir.exists()) {
-                    faceDir.mkdirs();
-                }
-
-                // 收集后端所有用户的ID
-                java.util.Set<Long> backendUserIds = new java.util.HashSet<>();
-
-                for (int i = 0; i < users.length(); i++) {
-                    JSONObject user = users.getJSONObject(i);
-                    long id = user.getLong("id");
-                    String userNo = user.optString("userNo", String.valueOf(id));
-                    String name = user.getString("name");
-                    String featureData = user.getString("featureData");
-                    Log.d(TAG, "User: " + name + ", FeatureData length: " + (featureData != null ? featureData.length() : "null"));
-                    if (featureData != null && featureData.length() > 20) {
-                        Log.d(TAG, "FeatureData preview: " + featureData.substring(0, 20) + "...");
-                    }
-                    String photoUrl = user.optString("photoUrl", "");
-                    Long groupId = user.has("groupId") && !user.isNull("groupId") ? user.getLong("groupId") : null;
-                    long updateTime = System.currentTimeMillis();
-
-                    // 添加到后端用户ID集合
-                    backendUserIds.add(id);
-
-                    // 下载图片到本地
-                    String localPhotoPath = "";
-                    if (!photoUrl.isEmpty()) {
-                        localPhotoPath = downloadImage(photoUrl, faceDir, id);
-                    }
-
-                    // 添加详细日志
-                    Log.d(TAG, "Syncing user: " + name + " (ID: " + id + ", GroupId: " + groupId + ")");
-                    // Log.d(TAG, "Feature data length: " + featureData.length());
-
-                    // 保存本地路径而不是网络 URL
-                    repository.saveUser(id, userNo, name, groupId, featureData, localPhotoPath, updateTime);
-                    count++;
-                }
-
-                // 删除本地存在但后端已删除的用户
-                int deletedCount = repository.deleteUsersNotInSet(backendUserIds);
-                if (deletedCount > 0) {
-                    Log.i(TAG, "Deleted " + deletedCount + " users that no longer exist on backend");
-                }
-
-                repository.close(); // 记得关闭
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Parse error", e);
-        }
-        return count;
+    public synchronized void startAutoSync(long intervalSeconds, SyncCallback callback) {
+        if (closed) return;
+        auto = true;
+        long generation = lifecycleGeneration;
+        if (periodic != null) periodic.cancel(false);
+        periodic = scheduler.scheduleWithFixedDelay(() -> triggerAuto(generation), Math.max(5, intervalSeconds),
+                Math.max(5, intervalSeconds), TimeUnit.SECONDS);
+        syncData(callback);
+        if (config != null && socket == null) connectWebSocket();
     }
 
-    private String downloadImage(String urlString, java.io.File dir, long userId) {
-        try {
-            // 处理相对路径，假设后端在同一服务器
-            if (!urlString.startsWith("http")) {
-                // 提取 SYNC_URL 的 base URL
-                String baseUrl = SYNC_URL.substring(0, SYNC_URL.indexOf("/api"));
-                if (urlString.startsWith("/")) {
-                    urlString = baseUrl + urlString;
-                } else {
-                    urlString = baseUrl + "/" + urlString;
+    public synchronized void stopAutoSync() {
+        auto = false;
+        lifecycleGeneration++;
+        pending = false;
+        if (periodic != null) { periodic.cancel(false); periodic = null; }
+        if (reconnect != null) { reconnect.cancel(false); reconnect = null; }
+        if (retry != null) { retry.cancel(false); retry = null; }
+        WebSocketClient previous = socket;
+        socket = null;
+        if (previous != null) previous.close();
+    }
+
+    private synchronized void triggerAuto(long generation) {
+        if (auto && !closed && generation == lifecycleGeneration) syncData(callback);
+    }
+
+    private synchronized void connectWebSocket() {
+        if (!auto || closed || config == null || socket != null) return;
+        long generation = lifecycleGeneration;
+        URI base = config.baseUri;
+        URI uri = URI.create(("https".equals(base.getScheme()) ? "wss" : "ws") + "://" + base.getRawAuthority() + "/ws/sync");
+        Map<String, String> headers = new HashMap<>();
+        headers.put("X-Device-SN", config.deviceSn);
+        if (config.credential != null) headers.put("Authorization", "Bearer " + config.credential);
+        socket = new WebSocketClient(uri, headers) {
+            @Override public void onOpen(ServerHandshake handshake) {
+                synchronized (SyncManager.this) { if (socket == this) triggerAuto(generation); }
+            }
+            @Override public void onMessage(String message) {
+                synchronized (SyncManager.this) { if (socket == this && "UPDATE".equals(message)) triggerAuto(generation); }
+            }
+            @Override public void onClose(int code, String reason, boolean remote) {
+                synchronized (SyncManager.this) {
+                    if (socket == this) socket = null;
+                    if (auto && !closed && generation == lifecycleGeneration && socket == null) {
+                        reconnect = scheduler.schedule(() -> {
+                            synchronized (SyncManager.this) {
+                                if (auto && !closed && generation == lifecycleGeneration) connectWebSocket();
+                            }
+                        }, 5, TimeUnit.SECONDS);
+                    }
                 }
             }
+            @Override public void onError(Exception error) { Log.w(TAG, "Sync notification connection unavailable"); }
+        };
+        socket.setConnectionLostTimeout(30);
+        socket.connect();
+    }
 
-            Log.d(TAG, "Attempting to download image from: " + urlString);
-            URL url = new URL(urlString);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setConnectTimeout(5000);
-            conn.setReadTimeout(5000);
-
-            int responseCode = conn.getResponseCode();
-            Log.d(TAG, "Download response code: " + responseCode);
-
-            if (responseCode == 200) {
-                java.io.File file = new java.io.File(dir, userId + ".jpg");
-                java.io.InputStream is = conn.getInputStream();
-                java.io.FileOutputStream fos = new java.io.FileOutputStream(file);
-
-                byte[] buffer = new byte[1024];
-                int len;
-                while ((len = is.read(buffer)) != -1) {
-                    fos.write(buffer, 0, len);
-                }
-
-                fos.close();
-                is.close();
-                Log.i(TAG, "Image downloaded successfully to: " + file.getAbsolutePath());
-                return file.getAbsolutePath();
-            } else {
-                Log.e(TAG, "Failed to download image, response code: " + responseCode);
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to download image: " + urlString, e);
-        }
-        return "";
+    @Override public synchronized void close() {
+        if (closed) return;
+        stopAutoSync();
+        closed = true;
+        if (task != null) task.cancel(true);
+        if (http != null) http.close();
+        worker.shutdownNow();
+        scheduler.shutdownNow();
     }
 }

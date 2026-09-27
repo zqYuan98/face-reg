@@ -3,6 +3,7 @@ package com.bonuos.face.controller;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.bonuos.face.entity.UserGroup;
 import com.bonuos.face.service.UserGroupService;
+import com.bonuos.face.service.AdminQueryService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
@@ -18,9 +19,12 @@ public class UserGroupController {
     @Autowired
     private UserGroupService userGroupService;
 
+    @Autowired
+    private AdminQueryService adminQueryService;
+
     @GetMapping("/list")
     public Map<String, Object> list() {
-        List<UserGroup> groups = userGroupService.listGroups();
+        List<UserGroup> groups = adminQueryService.legacyGroups();
         Map<String, Object> result = new HashMap<>();
         result.put("code", 200);
         result.put("msg", "success");
@@ -37,8 +41,7 @@ public class UserGroupController {
             result.put("msg", "success");
             result.put("data", group);
         } else {
-            result.put("code", 404);
-            result.put("msg", "分组不存在");
+            throw new com.bonuos.face.exception.ApiException(org.springframework.http.HttpStatus.NOT_FOUND,"NOT_FOUND","分组不存在");
         }
         return result;
     }

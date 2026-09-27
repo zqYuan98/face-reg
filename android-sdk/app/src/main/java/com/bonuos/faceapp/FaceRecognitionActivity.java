@@ -166,16 +166,9 @@ public class FaceRecognitionActivity extends AppCompatActivity {
             syncManager.startAutoSync(30, new com.bonuos.facesdk.SyncManager.SyncCallback() {
                 @Override
                 public void onSuccess(int count) {
-                    if (count > 0) {
-                        Log.i(TAG, "Sync success in recognition screen: " + count + " updates");
-                        // 刷新人脸库缓存
-                        if (faceRecognizer != null) {
-                            faceRecognizer.reloadUsers();
-                        }
-                        runOnUiThread(() -> 
-                            Toast.makeText(FaceRecognitionActivity.this, "已更新 " + count + " 条人脸数据", Toast.LENGTH_SHORT).show()
-                        );
-                    }
+                    // SyncManager publishes the recognition cache even when the final dataset is empty.
+                    runOnUiThread(() -> Toast.makeText(FaceRecognitionActivity.this,
+                            "同步完成，本地人员 " + count + " 人", Toast.LENGTH_SHORT).show());
                 }
 
                 @Override
@@ -374,6 +367,7 @@ public class FaceRecognitionActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        if (syncManager != null) syncManager.close();
         super.onDestroy();
         if (cameraExecutor != null) {
             cameraExecutor.shutdown();

@@ -4,6 +4,7 @@ import com.bonuos.face.entity.User;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
+import com.bonuos.face.dto.BatchDeleteResult;
 
 public interface UserService {
     /**
@@ -51,7 +52,7 @@ public interface UserService {
      *
      * @param ids 用户ID列表
      */
-    void deleteUsers(List<Long> ids);
+    BatchDeleteResult deleteUsers(List<Long> ids);
 
     /**
      * 删除用户（软删除/硬删除）
