@@ -51,7 +51,7 @@
             </div>
             <div class="service-fact">
               <dt>能力就绪</dt>
-              <dd id="ready-capability-count">— / 5</dd>
+              <dd id="ready-capability-count">— / 6</dd>
             </div>
             <div class="service-fact service-fact--time">
               <dt>最近检查</dt>
@@ -161,7 +161,7 @@
             <span class="capability-button__index" aria-hidden="true">04</span>
             <span class="capability-button__copy">
               <strong>视频快速核验</strong>
-              <small>参考照 + 视频 · 12 帧抽样</small>
+              <small>持续一致性 · 12 帧抽样 · 非目标出现</small>
             </span>
             <span class="capability-state" data-capability-status data-state="checking">
               <span class="capability-state__dot" aria-hidden="true"></span>
@@ -183,7 +183,21 @@
             <span class="capability-button__index" aria-hidden="true">05</span>
             <span class="capability-button__copy">
               <strong>视频完整核验</strong>
-              <small>参考照 + 视频 · 高耗时手工测试</small>
+              <small>持续一致性 · 高耗时 · 非目标出现</small>
+            </span>
+            <span class="capability-state" data-capability-status data-state="checking">
+              <span class="capability-state__dot" aria-hidden="true"></span>
+              <span data-capability-status-label>检测中</span>
+            </span>
+          </button>
+          <button id="capability-video-presence" class="capability-button" type="button"
+            data-capability="video_presence" data-readiness-key="video_presence"
+            data-endpoint="/api/v2/verify/video/presence" data-input-mode="image-video"
+            aria-current="false" aria-controls="input-panel">
+            <span class="capability-button__index" aria-hidden="true">06</span>
+            <span class="capability-button__copy">
+              <strong>视频目标出现</strong>
+              <small>出现候选证据 · 未标定 · 仅人工复核</small>
             </span>
             <span class="capability-state" data-capability-status data-state="checking">
               <span class="capability-state__dot" aria-hidden="true"></span>
@@ -314,6 +328,15 @@
           </section>
 
           <dl id="result-metrics" class="metric-grid" aria-label="关键指标"></dl>
+
+          <section id="evidence-frames-panel" class="raw-json-panel" aria-labelledby="evidence-frames-title" hidden>
+            <h3 id="evidence-frames-title">候选证据帧（最多 5 项）</h3>
+            <p>仅为候选定位，无截图、无活体或身份通过保证；空表不代表目标不存在。</p>
+            <table aria-label="候选证据帧">
+              <thead><tr><th scope="col">帧序号</th><th scope="col">时间 / 秒</th><th scope="col">分数</th></tr></thead>
+              <tbody id="evidence-frames-body"></tbody>
+            </table>
+          </section>
 
           <figure id="derived-image-panel" class="derived-image-panel" hidden>
             <div class="derived-image-frame">

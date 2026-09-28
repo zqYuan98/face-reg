@@ -63,6 +63,7 @@ class UpstreamState:
                     "portrait": "ready",
                     "image_verification": "ready",
                     "video_verification": "ready",
+                    "video_presence": "ready",
                     "witness_blur": "ready",
                 },
             }
@@ -480,7 +481,20 @@ class VisualConsoleHTTPTests(unittest.TestCase):
             json.loads(body)["error"]["code"], "UPSTREAM_RESPONSE_TOO_LARGE"
         )
 
-    def test_all_five_post_routes_stream_to_the_fixed_upstream(self) -> None:
+    def test_presence_is_allowlisted_with_full_equivalent_budgets_and_readiness(self) -> None:
+        path = "/api/v2/verify/video/presence"
+        self.assertIn(path, console_server.POST_ROUTES)
+        self.assertEqual(console_server.POST_ROUTES[path], console_server.POST_ROUTES["/api/v2/verify/video/full"])
+        self.assertEqual(console_server.POST_ROUTES[path].body_limit, 540_082_176)
+        self.assertEqual(console_server.POST_ROUTES[path].total_seconds, 620.0)
+        status, _headers, body = self.running.request("GET", "/api/console/ready")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["capabilities"]["video_presence"], "ready")
+        self.running.upstream_state.ready_body = b'{"status":"healthy","ready":true,"capabilities":{}}'
+        _status, _headers, body = self.running.request("GET", "/api/console/ready")
+        self.assertEqual(json.loads(body)["capabilities"]["video_presence"], "unavailable")
+
+    def test_all_six_post_routes_stream_to_the_fixed_upstream(self) -> None:
         token = self.running.session_token()
         body = b"--" + BOUNDARY.encode() + b"--\r\n"
         for path in console_server.POST_ROUTES:

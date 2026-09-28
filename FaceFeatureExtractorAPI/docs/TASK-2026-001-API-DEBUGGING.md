@@ -1,13 +1,15 @@
 # TASK-2026-001 新算法 API 联调文档
 
 本文供业务后端、APP、测试和实施人员在公司内网联调新的人脸算法服务。接口以当前
-测试环境和提交 `872c9694e1589f00968e0c63d67024ea101a760e` 为准。
+候选代码契约为准。presence 为本次候选新增能力，尚待发布与目标服务器验证；本文不把
+历史提交 `872c9694e1589f00968e0c63d67024ea101a760e` 当作 presence 已上线证据。
+最终发布 commit、容器与线上验证证据由发布负责人补入验证手册。
 
 | 项目 | 值 |
 |---|---|
-| API 版本 | `2.0.0` |
+| API 版本 | `2.1.0` |
 | 配置版本 | `2026-08-24-v1` |
-| 文档更新时间 | `2026-09-21` |
+| 文档更新时间 | `2026-09-28`（presence 候选版本 / 待上线验证） |
 | 特征契约 | `recognizer_v1_1024`，固定 `1024` 维 |
 | 测试环境 Base URL | `http://<server-37>:18002` |
 | 可视化测试台 | `http://<server-37>:18003` |
@@ -17,6 +19,7 @@
 > 当前身份阈值仍处于 `UNCALIBRATED`。图片和视频即使相似度很高，也会安全返回
 > `REVIEW + THRESHOLD_UNCALIBRATED`，不能将它解释为人员不一致，也不能自行写死
 > `0.6`、`0.7` 等阈值。视频接口当前还会同时返回 `CALIBRATION_REQUIRED`。
+> 新 presence 进一步固定 `decision=INCONCLUSIVE`、`found=null`，包括高分或无可用脸的情况。
 
 ## 1. 五分钟开始联调
 
@@ -31,10 +34,10 @@ curl -sS http://<server-37>:18002/health/ready
 - HTTP 状态码为 `200`；
 - `ready=true`；
 - 需要的能力为 `ready`：`portrait`、`witness_blur`、`image_verification` 或
-  `video_verification`；
+  `video_verification` 或 `video_presence`；
 - 当前测试环境应显示 `8` 个模型均为 `ready`。
 
-当前环境响应节选：
+就绪响应结构节选（presence 部分属于候选版本，线上状态待发布后核验）：
 
 ```json
 {
@@ -52,6 +55,7 @@ curl -sS http://<server-37>:18002/health/ready
     "portrait": "ready",
     "image_verification": "ready",
     "video_verification": "ready",
+    "video_presence": "ready",
     "witness_blur": "ready"
   }
 }
@@ -63,6 +67,7 @@ curl -sS http://<server-37>:18002/health/ready
 | `witness_blur` | `/api/v2/witness/blur-background` |
 | `image_verification` | `/api/v2/verify/images` |
 | `video_verification` | `/api/v2/verify/video/quick`、`/api/v2/verify/video/full` |
+| `video_presence` | `/api/v2/verify/video/presence` |
 
 `status=degraded + ready=true` 可能表示核心模型可用但某个可选能力不可用，因此必须检查
 具体 capability，不能只判断顶层 `ready`。
@@ -76,9 +81,8 @@ http://<server-37>:18002/openapi.json
 ```
 
 服务关闭了 Swagger UI 和 ReDoc 页面，因此 `/docs`、`/redoc` 不可用是正常现象。
-OpenAPI 主要用于生成路径和 multipart 请求；本文的响应字段说明是联调依据。
-OpenAPI 自动生成内容可能把字段校验标为 `422`，但当前应用真实契约是
-`400 + INVALID_IMAGE`，客户端应以本文和实际响应为准。
+候选版本 OpenAPI 将同时描述 multipart 请求和类型化响应；发布后导入并核对六条 v2 路由。
+应用字段校验的实际契约是 `400 + INVALID_IMAGE`，不是框架默认的 `422`。
 
 Postman/Apifox 中所有文件字段都选择 `form-data` 的 **File** 类型，不要把文件路径、
 Base64 或 JSON 当作请求体发送。
@@ -104,19 +108,32 @@ Base64 或 JSON 当作请求体发送。
 | 白底头肩照 | `POST /api/v2/portrait/generate` | `image` | 30 秒 |
 | 人证背景虚化 | `POST /api/v2/witness/blur-background` | `image` | 30 秒 |
 | 两图身份比对 | `POST /api/v2/verify/images` | `reference_image`, `probe_image` | 30 秒 |
-| 视频快速核验 | `POST /api/v2/verify/video/quick` | `reference_image`, `video` | 60 秒 |
-| 视频完整核验 | `POST /api/v2/verify/video/full` | `reference_image`, `video` | 600 秒 |
+| 视频快速持续一致性 | `POST /api/v2/verify/video/quick` | `reference_image`, `video` | 60 秒 |
+| 视频完整持续一致性 | `POST /api/v2/verify/video/full` | `reference_image`, `video` | 600 秒 |
+| 视频目标出现（候选） | `POST /api/v2/verify/video/presence` | `reference_image`, `video` | 600 秒 |
+
+其他 HTTP 接口也属于接入契约：
+
+| 方法与路径 | 输入 | 响应/注册条件 |
+|---|---|---|
+| `GET /health/live` | 无 | 200，`{"status":"live"}`；仅进程存活 |
+| `GET /health/ready` | 无 | 200/503，`status,ready,models,capabilities`；按所需能力判断 |
+| `GET /health` | 无 | 与 ready 相同的兼容别名，不是仅检查存活 |
+| `GET /openapi.json` | 无 | 200，OpenAPI 文档（`openapi,info,paths,components`） |
+| `POST /api/detect_face` | `image`、可选 `expand_scale` | `legacy.detect_face_enabled=true` 时注册；候选默认 true |
+| `POST /api/extract_feature` | `image` + legacy 鉴权 | 候选默认关闭/404；受控兼容场景见第 15 节 |
 
 截止时间从请求进入算法服务开始计算，包含上传、multipart 解析、等待唯一算法执行槽、
 推理和派生图编码。调试客户端超时应略大于服务截止时间，例如图片 40 秒、quick 75 秒、
-full 620～660 秒；不要通过大量并发请求绕过单执行槽。
+full/presence 630～660 秒；不要通过大量并发请求绕过单执行槽。测试台代理视频完整/
+presence 总预算为 620 秒，浏览器截止为 630 秒，服务算法预算仍为 600 秒。
 
 ## 3. 统一结果判定规则
 
 ### 3.1 HTTP 状态和算法建议是两层含义
 
 HTTP `200` 表示服务已正常给出算法结果，不等于身份通过。业务代码必须优先读取
-`suggestion`：
+`suggestion`（presence 的身份结论必须改读 `decision/found`，见第 8A 节）：
 
 | `suggestion` | 业务含义 | 推荐动作 |
 |---|---|---|
@@ -135,9 +152,9 @@ HTTP `200` 表示服务已正常给出算法结果，不等于身份通过。业
 
 ```text
 1. 先判断 HTTP 状态码；
-2. HTTP 200 时读取 suggestion；
+2. HTTP 200 时，presence 读取 decision/found；其他五个 v2 读取 suggestion；
 3. RECAPTURE/REVIEW 时读取 reason_codes；
-4. 仅在 PASS 时执行自动通过动作；
+4. 未标定不得自动通过；presence 首版始终转人工，不把 success/suggestion 当身份结果；
 5. 保存 trace_id、config_version、model_versions 和业务请求号用于审计。
 ```
 
@@ -321,14 +338,15 @@ curl -sS -X POST \
 
 ### 6.2 当前未标定响应示例
 
-下面是相同合成主体实测后的关键字段节选。相似度很高，但因为尚未发布客户标定包，
-结果仍为 `REVIEW`：
+下面是完整 DTO 结构示例（以既有合成样本结果为背景，质量/坐标等数值仅作说明，不是本次
+上线实测证据）。相似度很高，但尚未发布客户标定包，结果仍为 `REVIEW`：
 
 ```json
 {
   "success": true,
   "suggestion": "REVIEW",
   "reason_codes": ["THRESHOLD_UNCALIBRATED"],
+  "model_versions": {"face_detector": "legacy-v1", "face_recognizer": "legacy-v1"},
   "feature_version": "recognizer_v1_1024",
   "config_version": "2026-08-24-v1",
   "processing_time_ms": 380.8,
@@ -341,6 +359,9 @@ curl -sS -X POST \
     "original_width": 1024,
     "original_height": 1536,
     "box": {"x1": 427.84, "y1": 190.53, "x2": 617.0, "y2": 503.78, "confidence": 0.99999},
+    "landmarks": {"points": [{"x": 475.0, "y": 285.0}, {"x": 567.0, "y": 285.0}, {"x": 521.0, "y": 345.0}, {"x": 486.0, "y": 414.0}, {"x": 556.0, "y": 414.0}]},
+    "quality": {"passed": true, "metrics": [], "reason_codes": []},
+    "pose": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
     "rotation_quarter_turns": 0,
     "processing_time_ms": 181.0,
     "trace_id": "f6642f2333ea4abd81e9b77c8fb5d110"
@@ -352,7 +373,13 @@ curl -sS -X POST \
     "reason_codes": [],
     "original_width": 1024,
     "original_height": 1536,
-    "rotation_quarter_turns": 0
+    "box": {"x1": 427.84, "y1": 190.53, "x2": 617.0, "y2": 503.78, "confidence": 0.99999},
+    "landmarks": {"points": [{"x": 475.0, "y": 285.0}, {"x": 567.0, "y": 285.0}, {"x": 521.0, "y": 345.0}, {"x": 486.0, "y": 414.0}, {"x": 556.0, "y": 414.0}]},
+    "quality": {"passed": true, "metrics": [], "reason_codes": []},
+    "pose": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
+    "rotation_quarter_turns": 0,
+    "processing_time_ms": 181.0,
+    "trace_id": "probe-example-uncalibrated"
   },
   "similarity_score": 0.9999999999999998,
   "matcher_version": "l2_dot_v1",
@@ -366,7 +393,7 @@ curl -sS -X POST \
 }
 ```
 
-实际 `reference` 和 `probe` 还会返回 `landmarks`、`quality.metrics` 和 `pose`。坐标基于
+实际 `quality.metrics` 会包含逐项质量指标，模型版本按实际运行返回。坐标基于
 算法旋转校正后的图片，结合 `rotation_quarter_turns` 使用。
 
 业务处理：
@@ -390,7 +417,8 @@ Content-Type: multipart/form-data
 | `reference_image` | File | 是 | 可信参考照，JPEG/PNG |
 | `video` | File | 是 | 推荐 MP4；最多 500 MiB、600 秒、120 FPS |
 
-quick 默认抽取 12 帧，至少需要 5 个有效帧，适合交互式预检查。
+quick 默认抽取 12 帧，至少需要 5 个有效帧，适合持续身份一致性的交互式预检查。
+它检查采样主体是否持续一致，不用于“某个人曾在视频某处出现”；该需求应使用 presence。
 
 ```bash
 curl -sS -X POST \
@@ -401,7 +429,7 @@ curl -sS -X POST \
 
 ### 7.2 当前未标定响应示例
 
-以下为关键字段节选；完整顶层和嵌套类型见第 13 节：
+以下为完整结构示例；模型版本仅列示关键模型，完整字段类型见第 13 节：
 
 ```json
 {
@@ -411,6 +439,7 @@ curl -sS -X POST \
   "feature_version": "recognizer_v1_1024",
   "config_version": "2026-08-24-v1",
   "processing_time_ms": 4707.6,
+  "model_versions": {"face_detector": "legacy-v1", "face_recognizer": "legacy-v1"},
   "trace_id": "e213eb2661df4f368b0c029d98e15784",
   "mode": "quick",
   "duration_seconds": 10.0,
@@ -463,7 +492,8 @@ Content-Type: multipart/form-data
 ```
 
 字段与 quick 相同。full 默认每 0.5 秒抽一帧，至少需要 20 个有效帧，最多分析 1200 帧，
-还会检查主轨迹覆盖率、第二主体比例、主体切换和最长无人脸间隔。
+还会检查主轨迹覆盖率、第二主体比例、主体切换和最长无人脸间隔。这是持续一致性规则，
+不等于视频内目标出现检索；新 presence 不改变这些旧门禁。
 
 ```bash
 curl -sS -X POST \
@@ -472,21 +502,54 @@ curl -sS -X POST \
   http://<server-37>:18002/api/v2/verify/video/full
 ```
 
-响应结构与 quick 相同，`mode` 为 `full`。10 秒、4 FPS 合成视频的实测计数为：
+响应结构与 quick 相同，`mode` 为 `full`。以下是完整结构示例；计数沿用既有 10 秒合成
+视频背景，分数/耗时/标定摘要仅作说明，不是本次候选上线证据：
 
 ```json
 {
+  "success": true,
   "mode": "full",
   "duration_seconds": 10.0,
   "frames": {
     "requested_frames": 20,
     "decoded_frames": 20,
     "analyzed_frames": 20,
-    "valid_frames": 20
+    "valid_frames": 20,
+    "no_face_frames": 0,
+    "multiple_face_frames": 0,
+    "bad_quality_frames": 0,
+    "failed_frames": 0,
+    "first_timestamp_seconds": 0.0,
+    "last_timestamp_seconds": 9.5,
+    "reason_codes": []
   },
   "suggestion": "REVIEW",
   "reason_codes": ["CALIBRATION_REQUIRED", "THRESHOLD_UNCALIBRATED"],
+  "model_versions": {"face_detector": "legacy-v1", "face_recognizer": "legacy-v1"},
+  "feature_version": "recognizer_v1_1024",
+  "config_version": "2026-08-24-v1",
+  "processing_time_ms": 8000.0,
+  "trace_id": "full-example-uncalibrated",
+  "aggregate_score": 0.98,
+  "median_score": 0.99,
+  "minimum_score": 0.97,
+  "pass_ratio": null,
+  "primary_track_coverage": 1.0,
+  "secondary_track_ratio": 0.0,
+  "longest_no_face_gap_seconds": 0.0,
   "feature_dimension": 1024,
+  "matcher_version": "l2_dot_v1",
+  "calibration": {
+    "status": "UNCALIBRATED",
+    "calibration_id": null,
+    "artifact_sha256": null,
+    "frame_threshold": null,
+    "aggregate_threshold": null,
+    "min_pass_ratio": null,
+    "decision_rule_version": null,
+    "pipeline_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+    "policy_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
   "liveness_evaluated": false
 }
 ```
@@ -494,6 +557,131 @@ curl -sS -X POST \
 full 是同步算法接口，但最长截止时间为 600 秒。APP/网页不要直接维持该长连接，应由
 业务后端异步任务调用，并实现幂等、任务状态、结果回写和超时补偿。算法服务本身不保存
 任务状态。
+
+## 8A. 视频目标出现（presence，候选版本）
+
+### 8A.1 请求与边界
+
+```http
+POST /api/v2/verify/video/presence
+Content-Type: multipart/form-data
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---:|---|
+| `reference_image` | File | 是 | 可信目标参考照，JPEG/PNG，≤15 MiB、25 MP |
+| `video` | File | 是 | 待扫描视频，≤500 MiB、600 秒、120 FPS，单帧≤25 MP |
+
+```bash
+curl -sS --max-time 660 -X POST \
+  -F "reference_image=@./reference.jpg;filename=reference.jpg;type=image/jpeg" \
+  -F "video=@./capture.mp4;filename=capture.mp4;type=video/mp4" \
+  http://<server-37>:18002/api/v2/verify/video/presence
+```
+
+参考图允许一个明确主脸，背景较小的脸不必直接拒绝；大小相近的多人歧义仍拒绝。
+仅检测框贴边不直接失败，但关键点、姿态、模糊度、亮度和对齐质量仍须通过。
+参考图的人脸最低尺寸策略为 112 像素，视频候选为 64 像素；这些是未标定的可用性策略，
+不是身份阈值、不是识别准确率保证。多人视频逐候选评分，不把人数>1直接当作整帧失败。
+
+默认按 0.5 秒间隔顺序扫描，最多 1200 个采样帧，每帧最多评估 5 个候选，保留最多 5 个
+不同帧的最佳证据。其他人在场不等于目标不存在，也不要求目标全程持续出现。
+短于采样间隔的出现、遮挡、模糊、过小人脸或候选预算触顶可能遗漏目标。
+最大时长与采样预算同时生效：补采实际末帧也计入 1200 帧预算，接近 600 秒的视频可能
+需要 1201 帧并返回 HTTP 413 / `VIDEO_SCAN_LIMIT_REACHED`；600 秒并非所有编码的可扫描保证。
+
+### 8A.2 身份语义（必须保留 null）
+
+| `decision` | `found` | 含义与本版可达性 |
+|---|---|---|
+| `INCONCLUSIVE` | `null` | 无法给出已标定身份结论；首版所有结果只能是这一组合 |
+| `FOUND` | `true` | 保留状态，未来经独立标定后表示扫描中发现目标；本版不会产出 |
+| `NOT_FOUND_IN_SCAN` | `false` | 保留状态，未来表示已扫描范围未找到；本版不会产出，也不是整段绝对不存在 |
+
+`success=true` 只表示本次算法流程正常给出观察结果；`suggestion` 只控制重拍/人工处理，
+不能替代 `decision/found`。首版固定 `calibration_status=UNCALIBRATED`，即便最佳分数接近 1、
+没有可用脸或完整扫描完毕，也必须是 `INCONCLUSIVE + found=null`，不能转成 false 或 PASS。
+无可评分候选时两个 `best_*` 同时为 null，`evidence_frames=[]`；这不是“没有此人”的证明。
+参考图质量失败通常建议 RECAPTURE；系统处理失败 `success=false + REVIEW`。
+所有算法 presence 结果均带 `CALIBRATION_REQUIRED`、`THRESHOLD_UNCALIBRATED`。
+
+下面是完整、符合本版 DTO 的未标定结构示例，数值仅供说明，并非线上实测/识别率证据：
+
+```json
+{
+  "success": true,
+  "suggestion": "REVIEW",
+  "reason_codes": ["CALIBRATION_REQUIRED", "THRESHOLD_UNCALIBRATED"],
+  "model_versions": {"face_detector": "legacy-v1", "face_recognizer": "legacy-v1"},
+  "feature_version": "recognizer_v1_1024",
+  "config_version": "2026-08-24-v1",
+  "processing_time_ms": 800.0,
+  "trace_id": "presence-example-uncalibrated",
+  "mode": "presence",
+  "decision": "INCONCLUSIVE",
+  "found": null,
+  "best_score": 0.9234,
+  "best_timestamp_seconds": 0.5,
+  "evidence_frames": [
+    {"frame_index": 15, "timestamp_seconds": 0.5, "score": 0.9234},
+    {"frame_index": 0, "timestamp_seconds": 0.0, "score": 0.8123}
+  ],
+  "scan_complete": true,
+  "sampling_interval_seconds": 0.5,
+  "sampled_frames": 2,
+  "decoded_frames": 30,
+  "valid_face_frames": 2,
+  "candidate_count": 3,
+  "candidate_limit_hit": false,
+  "duration_seconds": 1.0,
+  "timestamp_source": "pts",
+  "calibration_status": "UNCALIBRATED",
+  "feature_dimension": 1024,
+  "matcher_version": "l2_dot_v1",
+  "liveness_evaluated": false
+}
+```
+
+`scan_complete=true` 仅表示采样扫描计划正常完成，不表示逐帧穷尽人脸或已完成身份标定。
+`candidate_limit_hit=true`/`CANDIDATE_LIMIT_REACHED` 表示部分候选未评估；
+`VIDEO_SCAN_LIMIT_REACHED` 表示扫描预算受限，应结合 `scan_complete` 与计数人工处理。
+PTS 可用时优先采用；无法可靠获得时可能使用 FPS 推算，`timestamp_source` 会披露
+`pts/estimated/mixed/unknown`。不要把 estimated 的小数位当作精确帧时间。
+
+### 8A.3 Python 调用示例
+
+安装 `requests` 后在业务 worker 中调用；先判断 HTTP，不能只看 success 或高分：
+
+```python
+import requests
+
+url = "http://<server-37>:18002/api/v2/verify/video/presence"
+with open("reference.jpg", "rb") as reference, open("capture.mp4", "rb") as video:
+    response = requests.post(
+        url,
+        files={
+            "reference_image": ("reference.jpg", reference, "image/jpeg"),
+            "video": ("capture.mp4", video, "video/mp4"),
+        },
+        timeout=(5, 660),
+    )
+response.raise_for_status()  # 400/413/500/503/504 先按 HTTP 错误处理
+result = response.json()
+if result.get("calibration_status") == "UNCALIBRATED":
+    assert result.get("decision") == "INCONCLUSIVE" and result.get("found") is None
+    action = "manual_review"  # 首版只能复核；保留证据定位信息，禁止裸分数阈值
+elif result.get("decision") == "FOUND" and result.get("found") is True:
+    action = "review_version_and_calibration"  # 保留状态，本版不支持；不可直接自动放行
+elif result.get("decision") == "NOT_FOUND_IN_SCAN" and result.get("found") is False:
+    action = "review_scan_scope"  # 不声称整段视频绝对不存在目标
+else:
+    action = "manual_review"
+print(action, result.get("decision"), result.get("best_timestamp_seconds"))
+```
+
+`requests` 的 read timeout 不是完整业务任务的绝对时限；队列仍需配置幂等、整体超时、
+重试退避、结果回写和人工兜底。presence 与 full 一样是同步算法接口，不保存任务状态。
+没有活体、反翻拍或“真人确实在场”保证，也不能替代签署全程持续一致性验证。
 
 ## 9. 媒体规格
 
@@ -507,13 +695,18 @@ full 是同步算法接口，但最长截止时间为 600 秒。APP/网页不要
 | 视频时长 | 最多 600 秒 |
 | 视频帧率 | 最多 120 FPS |
 | 单视频帧像素 | 最多 2500 万像素 |
-| 视频格式 | 优先使用 MP4；当前合成回归已验证 MP4V-in-MP4，其他编码必须在目标容器实测 |
+| 视频格式 | 推荐 MP4；现有上传保留 `.mp4/.mov/.avi/.mkv/.webm/.m4v` 后缀，其他后缀匿名为 `.video`；实际容器/编码由 OpenCV 解码能力决定，不能只靠 MIME/扩展名保证支持 |
 
 整个 multipart 请求体也有上限：单图接口约 `15 MiB + 64 KiB`，两图接口约
 `30 MiB + 64 KiB`，视频接口约 `515 MiB + 64 KiB`。额外或未声明字段同样计入总请求体，
 不能利用无关字段附带大文件。
 
 JPEG 的 EXIF 自动旋转不会被 OpenCV直接采用，服务会使用自己的方向分类器统一校正。
+
+MP4、AVI、MOV 可按原有上传路径提交，目标发布镜像仍须分别验证实际编码；现有合成回归
+已验证 MP4V-in-MP4，不能据此声称所有 H.264/H.265/AVI/MOV 变体均已验收。视频会临时产生
+multipart spool 和私有解码文件两份占用，按 500 MiB 上限需预留接近两份空间及余量。
+服务单 worker/单算法槽；超时并不保证底层不可中断推理已立即停止，文件由持有者结束后清理。
 
 ## 10. HTTP 状态码与错误响应
 
@@ -530,14 +723,15 @@ JPEG 的 EXIF 自动旋转不会被 OpenCV直接采用，服务会使用自己�
 
 | HTTP | 常见原因码 | 调用方处理 |
 |---:|---|---|
-| `200` | 业务语义结果 | 读取 `suggestion` 和 `reason_codes` |
+| `200` | 业务语义结果 | presence 读取 `decision/found`；其余读取 `suggestion`，均检查 `reason_codes` |
+| `403` | `ACCESS_DENIED` | 仅已启用的 legacy 特征路由鉴权失败；不要为联调打开权限 |
 | `400` | `INVALID_IMAGE`, `UNSUPPORTED_FORMAT`, `INVALID_VIDEO` | 修正字段或媒体后重试 |
-| `413` | `IMAGE_TOO_LARGE`, `VIDEO_TOO_LARGE` | 压缩/缩放或重新采集 |
+| `413` | `IMAGE_TOO_LARGE`, `VIDEO_TOO_LARGE`, `VIDEO_TOO_LONG`, `VIDEO_SCAN_LIMIT_REACHED` | 压缩/缩放、缩短或重新采集；presence 解码输入预算错误映射到此状态 |
 | `404` | 路径不存在或可选能力未注册 | 核对版本、路径和 readiness |
 | `405` | HTTP 方法不正确 | 使用本文规定的方法 |
 | `500` | `INFERENCE_ERROR` | 记录时间和请求上下文，联系算法人员 |
 | `503` | `MODEL_UNAVAILABLE`, `CALIBRATION_REQUIRED` | 暂停流量，检查 readiness/模型/标定包 |
-| `504` | `ALGORITHM_TIMEOUT` | 不要立即并发重试；按业务幂等策略补偿 |
+| `504` | `ALGORITHM_TIMEOUT` | 包括等待唯一执行槽超时；不要立即并发重试，按幂等策略补偿 |
 
 缺字段、字段名错误或 multipart 结构错误统一按 HTTP `400 + INVALID_IMAGE` 处理。
 但请求甚至没有合法 multipart boundary、路径不存在或方法错误时，框架可能返回
@@ -571,6 +765,8 @@ JPEG 的 EXIF 自动旋转不会被 OpenCV直接采用，服务会使用自己�
 | `THRESHOLD_UNCALIBRATED` | 身份阈值尚未标定 | 只能 REVIEW，不得自动判定 |
 | `IDENTITY_UNCERTAIN` | 已标定但相似度未达通过条件 | 转人工复核 |
 | `CALIBRATION_REQUIRED` | 缺少可信标定结果 | 检查标定发布状态 |
+| `CANDIDATE_LIMIT_REACHED` | presence 单帧候选评估预算触顶 | 未评估候选可能含目标，不能推断不存在 |
+| `VIDEO_SCAN_LIMIT_REACHED` | presence 扫描预算触顶 | 检查扫描完整度与计数，转人工 |
 | `FEATURE_VERSION_MISMATCH` | 特征模型契约不一致 | 禁止比较，核对模型版本 |
 | `FEATURE_FAILED` | 特征提取失败 | 转人工并联系算法人员 |
 | `MODEL_UNAVAILABLE` | 所需模型不可用 | 检查 `/health/ready` |
@@ -579,8 +775,13 @@ JPEG 的 EXIF 自动旋转不会被 OpenCV直接采用，服务会使用自己�
 人证虚化中的证卡识别是可选增强：`CARD_NOT_FOUND`、`CARD_TOO_SMALL`、
 `CARD_CROPPED`、`CARD_DETECTION_UNCERTAIN` 不应成为人物虚化成功的业务门禁。
 
-视频的媒体元数据或解码问题可能以 HTTP `200 + REVIEW` 返回；只有上传请求体字节数
-超过入口限制时才一定是 HTTP `413`。因此所有 200 响应仍必须读取 `suggestion`。
+旧 quick/full 的媒体元数据或解码问题可能以 HTTP `200 + REVIEW` 返回。presence 对抛出的
+解码输入错误作安全 HTTP 映射：视频大小/时长/扫描输入预算超限为 413，INVALID_VIDEO 等为
+400，解码 deadline 超时为 504；不要把这些输入错误当成正常扫描。其他正常 200 结果仍须读取能力语义；presence 读取
+`decision/found` 而不是把 REVIEW 理解为未出现。`18003` 代理另有 429（繁忙）、502/504
+（上游异常/超时）等 `{success:false,error:{code,message}}` 错误包，不能当成 18002 算法 DTO。
+18002 忙时会在唯一执行槽前等待直到本请求 deadline，队列超时为 504，不是立即返回 503；
+503 用于模型或服务停止等不可用状态。不要把测试台的即时 429 与算法接口混为一谈。
 
 ## 11. 派生图片解码
 
@@ -610,10 +811,10 @@ const previewUrl = URL.createObjectURL(blob);
 2. 使用 Postman/Apifox 或 `curl` 发 multipart 文件，不发 JSON/Base64 请求；
 3. 上传时使用匿名文件名，例如 `upload.jpg`，不要透传身份证号、姓名等本地文件名；
 4. 先验证白底照和人证虚化，确认能够解码 `image_base64`；
-5. 身份接口按 `suggestion` 判定，不按 `success` 或裸 `similarity_score` 判定；
+5. 图片/quick/full 按已标定的 `suggestion` 判定；presence 按 `decision/found`，不按 `success` 或裸分数；
 6. 确认 `feature_dimension=1024`、`feature_version=recognizer_v1_1024`；
 7. 当前未标定环境应得到 `REVIEW + THRESHOLD_UNCALIBRATED`，不得得到身份 `PASS`；
-8. quick 可同步调试；full 由业务异步 worker 调用；
+8. quick 可同步调试；full/presence 由业务异步 worker 调用；
 9. 记录 `trace_id`、配置/模型版本和业务请求号，但不记录媒体及 Base64；
 10. 出现 HTTP 500/503/504 时附上发生时间、接口、HTTP 状态和安全的结构化响应联系算法人员。
 
@@ -625,14 +826,14 @@ const previewUrl = URL.createObjectURL(blob);
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `success` | `boolean` | 流水线是否形成该能力的可用结果；不能代替 `suggestion` |
-| `suggestion` | `"PASS" / "RECAPTURE" / "REVIEW"` | 业务处理主依据 |
+| `success` | `boolean` | 流水线是否正常给出结果；不能代替建议或 presence 身份结论 |
+| `suggestion` | `"PASS" / "RECAPTURE" / "REVIEW"` | 处理建议；presence 首版禁止 PASS，身份只看 decision/found |
 | `reason_codes` | `string[]` | 结构化原因；成功通常为空数组 |
 | `model_versions` | `Record<string,string>` | 本次实际使用的模型版本 |
 | `config_version` | `string` | 算法配置版本 |
 | `processing_time_ms` | `number` | 算法侧非负耗时 |
 | `trace_id` | `string` | 本次算法结果 ID；标准 HTTP 错误体没有此字段 |
-| `feature_version` | `"recognizer_v1_1024"` | 仅身份图片/视频结果包含 |
+| `feature_version` | `"recognizer_v1_1024"` | 身份图片、quick/full 和 presence 结果包含；派生图接口不包含 |
 
 ### 13.2 白底照字段
 
@@ -723,6 +924,37 @@ decision_rule_version: "video_track_aggregate_v1" | null
 pipeline_fingerprint, policy_fingerprint: 64 位十六进制字符串
 ```
 
+### 13.6 presence 完整附加字段
+
+presence 包含第 13.1 节全部公共字段，额外字段如下；不复用 quick/full 的 `frames` 或
+`calibration` 嵌套结构，不包含参考图、视频帧图片或任何特征数组。
+
+| 字段 | 类型 / 含义 |
+|---|---|
+| `mode` | 固定 `"presence"` |
+| `decision` | `"FOUND" / "NOT_FOUND_IN_SCAN" / "INCONCLUSIVE"`；本版仅 INCONCLUSIVE |
+| `found` | `boolean | null`；本版仅 null，必须原样保留 |
+| `best_score` | `number | null`，范围 [-1,1]，不是概率；与最佳时间同时可空 |
+| `best_timestamp_seconds` | 非负 `number | null`，与 best_score 同时为空或非空 |
+| `evidence_frames` | 0–5 个 `{frame_index:integer>=0,timestamp_seconds:number>=0,score:number[-1,1]}`；各帧序号唯一 |
+| `scan_complete` | `boolean`，仅表示扫描计划完成，不等于逐帧穷尽或身份可信 |
+| `sampling_interval_seconds` | 正 `number`，默认 0.5 |
+| `sampled_frames` | 非负 `integer`，实际选取的采样帧 |
+| `decoded_frames` | 非负 `integer`，顺序解码总帧数，含未采样帧 |
+| `valid_face_frames` | 非负 `integer`，至少有一个可评分候选的采样帧 |
+| `candidate_count` | 非负 `integer`，实际评估候选总数，不是视频里总人数 |
+| `candidate_limit_hit` | `boolean`，是否曾超出每帧最多 5 候选的预算 |
+| `duration_seconds` | 正 `number | null`，无法可靠获得时为 null |
+| `timestamp_source` | `"pts" / "estimated" / "mixed" / "unknown"` |
+| `calibration_status` | 本版固定 `"UNCALIBRATED"`，独立于 quick/full 校准包 |
+| `feature_dimension` | 固定 `1024` |
+| `matcher_version` | 固定 `"l2_dot_v1"` |
+| `liveness_evaluated` | 固定 `false` |
+
+计数应满足 `valid_face_frames <= sampled_frames <= decoded_frames`，
+`valid_face_frames <= candidate_count <= sampled_frames * 5`。候选证据不泄露路径、帧像素、
+embedding 或原始文件名；其排序/最佳值用于人工定位，不能充当未标定身份阈值。
+
 ## 14. 能力与业务模块对应
 
 | 业务需求 | 调用接口 | 业务侧仍需负责 |
@@ -732,5 +964,49 @@ pipeline_fingerprint, policy_fingerprint: 64 位十六进制字符串
 | 入场人员身份比对 | `/api/v2/verify/images` | 锁定可信参考照、人员/入场状态和审计 |
 | 签署人脸一致性快速检查 | `/api/v2/verify/video/quick` | APP 采集交互和重拍提示 |
 | 签署人脸一致性完整核验 | `/api/v2/verify/video/full` | 异步任务、合同状态、幂等、补偿和人工复核 |
+| 视频中目标是否曾出现 | `/api/v2/verify/video/presence` | 锁定参考目标、异步扫描、证据复核；首版不作自动身份结论 |
 
 算法服务不访问业务数据库，不判断合同是否有效，不创建人工任务，也不负责保存原始证据。
+
+## 15. Legacy 兼容接口（按实际开关，不为联调开启权限）
+
+候选 `config/algorithm.yaml` 当前为 `detect_face_enabled: true`、
+`extract_feature_enabled: false`。发布环境仍应以配置和 OpenAPI 实际注册情况确认。
+
+### 15.1 `POST /api/detect_face`
+
+multipart：必填 `image`（JPEG/PNG，≤15 MiB、25 MP），可选 `expand_scale` 为有限数，
+默认 0.0，范围 `[0,2]`。截止 30 秒；禁用检测开关时 404。
+
+```bash
+curl -sS -F "image=@./photo.jpg;filename=upload.jpg;type=image/jpeg" \
+  -F "expand_scale=0.0" http://<server-37>:18002/api/detect_face
+```
+
+完整成功结构示例：
+
+```json
+{"success":true,"message":"Success","faces":[{"x1":100.0,"y1":50.0,"x2":200.0,"y2":150.0,"score":0.98}],"processing_time":0.02}
+```
+
+无脸是 HTTP 200：`{"success":false,"message":"No face detected","faces":[],"processing_time":0.02}`。
+坐标裁切至解码图片边界；`processing_time` 单位是秒，与 v2 的毫秒字段不同。不返回特征。
+
+### 15.2 `POST /api/extract_feature`
+
+默认未注册，调用应为 HTTP 404；不要为调试 presence 开启此路由。仅在另行批准的迁移
+部署同时启用开关、注入至少 32 UTF-8 字节高熵 `FACE_ALGO_LEGACY_TOKEN`、配置客户端 CIDR
+与可信代理 CIDR 后可用。客户端必须带 `X-Internal-Token`；Uvicorn 必须禁用自动 proxy headers。
+完整代理链仅在直接对端属于可信代理网段时解析，任一访问条件失败为 `403 + ACCESS_DENIED`。
+
+已获授权时 multipart 仅必填 `image`（JPEG/PNG，≤15 MiB、25 MP），截止 30 秒。
+成功响应字段为 `success:true,message:"Success",feature:number[1024],feature_dim:1024,
+processing_time:number`，向量必须为有限 float32 固定 1024 维；此处不刊登或记录真实向量。
+无可用脸的完整响应结构为：
+
+```json
+{"success":false,"message":"No usable face detected","feature":null,"feature_dim":null,"processing_time":0.02}
+```
+
+这是唯一允许返回特征的受控 legacy 例外。v2/测试台不提供该能力，也不转发内部令牌。
+安全接入和回收期限见 [算法接入说明](ALGORITHM_API_INTEGRATION.md)。

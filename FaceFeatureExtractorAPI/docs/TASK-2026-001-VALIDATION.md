@@ -1,5 +1,8 @@
 # TASK-2026-001 验证手册
 
+2026-09-28 presence 候选补充：代码测试结果与线上发布证据分开记录。本节不宣称已上线；
+最终 commit、镜像/容器状态、目标服务器验收时间由发布负责人补充。
+
 ## 1. 入口
 
 - 可视化测试台：`http://<server-37>:18003`
@@ -37,11 +40,41 @@
 
 ## 4. 严格能力回归
 
-- 图片身份比对、合同参考照和视频帧仍执行严格单脸；不得沿用白底照/人证的容错策略。
+- 旧图片身份比对、quick/full 合同参考照和视频帧继续严格单脸；presence 使用独立主脸/
+  多候选策略，不得反向放宽旧接口。
 - 未发布签名标定包时，图片和视频身份结论应为 `REVIEW + THRESHOLD_UNCALIBRATED`，
   不能显示为身份通过。
 - 所有特征维度字段均为 `1024`；公共响应不得出现 embedding 或特征数组。
-- quick 视频用于交互检查，full 视频用于业务异步任务；full 最长可运行 600 秒。
+- quick 视频用于持续一致性交互检查，full 用于持续一致性异步任务；full/presence 最长 600 秒。
+
+## 4A. 目标出现候选验收（新接口）
+
+先确认 OpenAPI 出现第六条 v2：`/api/v2/verify/video/presence`，readiness 的
+`video_presence=ready`，测试台出现“视频目标出现”，旧五入口仍可使用。
+
+| 场景 | 预期 |
+|---|---|
+| 清晰目标仅出现在后半段或多人画面 | 保留最佳候选时刻/数字证据，不因“非全程一致”拒绝整段 |
+| 极高相似度、完整扫描 | 仍 `UNCALIBRATED + INCONCLUSIVE + found=null`，不能显示 PASS |
+| 全程无可用脸 | 两个 best 字段均 null、空证据；found 仍 null，不能伪装 false |
+| 参考照明确主脸且检测框贴边 | 仍检查关键点/质量；不只因 bbox 贴边拒绝 |
+| 参考照两个近似大小的人脸 | 主脸歧义，建议重拍；无身份结论 |
+| 单帧候选超过 5 | `candidate_limit_hit=true` 与 `CANDIDATE_LIMIT_REACHED`；不声称穷尽 |
+| 扫描到预算或无法完整解码 | 检查 `scan_complete`、原因和实际计数，不能产生排除结论 |
+| PTS 不可用或混合时间戳 | `timestamp_source` 如实为 estimated/mixed/unknown，不假装精确 |
+| 上游证据包含恶意字符串 | 测试台不执行 HTML，仅允许有界数字单元格 |
+| HTTP 非 2xx / 模型未就绪 / 超时 | 先按 HTTP 错误处理，不根据 suggestion/success 判身份 |
+
+最多 5 条证据，只能包含 `frame_index,timestamp_seconds,score`，不得输出视频帧、特征数组、
+本地路径或原始文件名。64 像素视频人脸下限是未标定可用性策略，不是身份阈值。
+所有视频均 `liveness_evaluated=false`，不提供活体/反翻拍保证。
+
+候选测试台验证（本地，不等于线上证据）：
+
+- `node --test tools/visual-console/tests/core.test.mjs`：19 项通过；
+- `python -m pytest tools/visual-console/tests -q`：28 项通过；
+- TDD 首轮确认新增入口/decision/证据/代理测试先失败，再实现转绿；旧功能用例全部保留。
+- 实际浏览器布局、目标服务器六接口、MP4/AVI/MOV 编码验证与发布 commit：待发布阶段补充。
 
 ## 5. 现场图片随机抽检
 

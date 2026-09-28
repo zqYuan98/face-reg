@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import * as core from "../core.js";
+import { readFile } from "node:fs/promises";
 
 import {
   CAPABILITIES,
@@ -25,13 +27,14 @@ function media(name, size, type, metadata = {}) {
   };
 }
 
-test("CAPABILITIES freezes the exact five deployed v2 contracts", () => {
+test("CAPABILITIES freezes the exact six v2 contracts", () => {
   assert.deepEqual(CAPABILITIES.map(({ id }) => id), [
     "portrait",
     "witness",
     "verify-images",
     "verify-video-quick",
     "verify-video-full",
+    "verify-video-presence",
   ]);
   assert.deepEqual(
     CAPABILITIES.map(({ endpoint }) => endpoint),
@@ -41,6 +44,7 @@ test("CAPABILITIES freezes the exact five deployed v2 contracts", () => {
       "/api/v2/verify/images",
       "/api/v2/verify/video/quick",
       "/api/v2/verify/video/full",
+      "/api/v2/verify/video/presence",
     ],
   );
   assert.deepEqual(getCapability("verify-images").fields.map(({ name }) => name), [
@@ -57,9 +61,91 @@ test("CAPABILITIES freezes the exact five deployed v2 contracts", () => {
   assert.equal(getCapability("full").limits.maxVideoBytes, 500 * MIB);
   assert.equal(getCapability("full").limits.maxVideoDurationSeconds, 600);
   assert.equal(getCapability("full").limits.maxAnalyzedFrames, 1_200);
-  assert.deepEqual(CAPABILITIES.map(({ timeoutMs }) => timeoutMs), [30_000, 30_000, 30_000, 60_000, 600_000]);
+  assert.deepEqual(CAPABILITIES.map(({ timeoutMs }) => timeoutMs), [30_000, 30_000, 30_000, 60_000, 600_000, 600_000]);
   assert.equal(Object.isFrozen(CAPABILITIES), true);
   assert.equal(Object.isFrozen(CAPABILITIES[0].fields[0]), true);
+});
+
+test("presence keeps nullable identity and uses decision rather than suggestion or high score", () => {
+  const result = { mode: "presence", success: true, suggestion: "PASS", decision: "INCONCLUSIVE", found: null,
+    best_score: 0.9999, calibration_status: "UNCALIBRATED", feature_dimension: 1024, liveness_evaluated: false };
+  const view = getSuggestionView(result);
+  assert.equal(view.key, "inconclusive");
+  assert.equal(view.canTreatAsPass, false);
+  assert.ok(view.notices.some((notice) => notice.includes("未标定")));
+  assert.equal(getSuggestionView({ ...result, decision: "FOUND", found: true }).key, "inconclusive");
+  assert.equal(getSuggestionView({ ...result, decision: "FOUND", found: true, calibration_status: undefined }).key, "inconclusive");
+  assert.equal(getSuggestionView({ ...result, best_score: null, best_timestamp_seconds: null, reason_codes: ["NO_FACE"] }).key, "inconclusive");
+  const details = buildResultDetails("presence", { ...result, best_timestamp_seconds: 1.5, scan_complete: false,
+    sampling_interval_seconds: 0.5, sampled_frames: 3, decoded_frames: 45, valid_face_frames: 2,
+    candidate_count: 4, candidate_limit_hit: true, timestamp_source: "pts" });
+  const values = Object.fromEntries(details.map(({ key, value }) => [key, value]));
+  assert.equal(values.found, "未确定（null）");
+  assert.equal(values["best-score"], "0.9999");
+  assert.equal(values["best-timestamp"], "1.500 秒");
+  assert.equal(values["scan-complete"], "否（扫描未完整覆盖）");
+  assert.equal(values["candidate-count"], "4");
+  assert.equal(values["sampling-interval"], "0.500 秒");
+  assert.equal(values["timestamp-source"], "pts");
+  assert.equal(getCapability("video_presence")?.timeoutMs, getCapability("full").timeoutMs);
+  assert.deepEqual(getCapability("presence").fields.map(({ name }) => name), ["reference_image", "video"]);
+});
+
+test("presence evidence is bounded numeric text rendered without HTML interpolation", () => {
+  assert.equal(typeof core.renderEvidenceFrames, "function");
+  const makeNode = (tag) => ({ tag, children: [], textContent: "", append(...items) { this.children.push(...items); },
+    replaceChildren(...items) { this.children = items; } });
+  const body = makeNode("tbody");
+  body.ownerDocument = { createElement: makeNode };
+  const evidence = [{ frame_index: 12, timestamp_seconds: 0.5, score: 0.999 },
+    { frame_index: "<img src=x onerror=alert(1)>", timestamp_seconds: 1, score: 1 },
+    ...Array.from({ length: 9 }, (_, i) => ({ frame_index: i + 20, timestamp_seconds: i + 1, score: 0.7 }))];
+  core.renderEvidenceFrames(body, { evidence_frames: evidence });
+  assert.equal(body.children.length, 5);
+  assert.deepEqual(body.children[0].children.map((cell) => cell.textContent), ["12", "0.500", "0.9990"]);
+  assert.ok(body.children.every((row) => row.children.every((cell) => !String(cell.textContent).includes("<"))));
+  core.renderEvidenceFrames(body, { evidence_frames: [] });
+  assert.equal(body.children.length, 0);
+});
+
+test("presence v1 rejects forged active decisions and never labels them calibrated or found", () => {
+  const valid = { mode: "presence", success: true, suggestion: "REVIEW", decision: "INCONCLUSIVE", found: null,
+    calibration_status: "UNCALIBRATED", feature_dimension: 1024, feature_version: "recognizer_v1_1024", matcher_version: "l2_dot_v1",
+    liveness_evaluated: false, reason_codes: ["CALIBRATION_REQUIRED", "THRESHOLD_UNCALIBRATED"], model_versions: {},
+    config_version: "test-v1", processing_time_ms: 1, trace_id: "test", best_score: null, best_timestamp_seconds: null,
+    evidence_frames: [], scan_complete: true, sampling_interval_seconds: 0.5, sampled_frames: 2, decoded_frames: 30,
+    valid_face_frames: 0, candidate_count: 0, candidate_limit_hit: false, duration_seconds: 1, timestamp_source: "pts" };
+  assert.equal(getSuggestionView(valid).label, "无法确定目标是否出现");
+  const forged = { mode: "presence", success: true, suggestion: "PASS", feature_dimension: 1024,
+    calibration_status: "ACTIVE", decision: "FOUND", found: true, liveness_evaluated: true };
+  for (const result of [forged, { ...forged, decision: "NOT_FOUND_IN_SCAN", found: false, scan_complete: true },
+    { ...forged, calibration_status: "UNCALIBRATED", decision: "INCONCLUSIVE", found: null },
+    { mode: "presence" }, { ...valid, liveness_evaluated: true }, { ...valid, evidence_frames: undefined },
+    { ...valid, calibration_status: "ACTIVE", decision: "FOUND", found: true }]) {
+    const view = getSuggestionView(result);
+    assert.equal(view.key, "inconclusive");
+    assert.equal(view.canTreatAsPass, false);
+    assert.match(view.label, /不可用|人工复核/);
+    assert.doesNotMatch(view.label, /扫描中发现|已扫描范围未发现|已标定/);
+    const values = Object.fromEntries(buildResultDetails("presence", result).map(({ key, value }) => [key, value]));
+    assert.doesNotMatch(values.calibration, /已标定/);
+    assert.doesNotMatch(values.decision, /FOUND/);
+    assert.doesNotMatch(values.found, /true|false/);
+  }
+});
+
+test("presence UI wires readiness, evidence and a bounded browser deadline", async () => {
+  const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
+  assert.match(app, /"verify-video-presence": "video_presence"/);
+  assert.match(app, /renderEvidenceFrames\(nodes\.evidenceBody/);
+  assert.match(app, /signal: AbortSignal\.timeout\(capability\.timeoutMs \+ 30_000\)/);
+  assert.match(app, /CAPABILITIES\.map\(\(capability\) => state\.capabilities\[READINESS_KEYS\[capability\.id\]\]\)/);
+  assert.match(app.match(/function clearResult\(\) \{[\s\S]*?\n\}/)?.[0] ?? "", /renderEvidenceFrames\(nodes\.evidenceBody, \{\}\)/);
+  assert.match(html, /data-capability="video_presence"/);
+  assert.match(html, /id="evidence-frames-body"/);
+  assert.doesNotMatch(app, /innerHTML|insertAdjacentHTML/);
+  assert.doesNotMatch(app, /found: "FOUND"|"not-found": "NOT_FOUND_IN_SCAN"/);
 });
 
 test("capability readiness is independent from the global core state", () => {

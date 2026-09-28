@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, File, Request, UploadFile
+from fastapi.responses import JSONResponse
 
 from face_algorithm.runtime.config import AlgorithmConfig
+from face_algorithm.presence.contracts import VideoPresenceResult
 
 from ..execution import AlgorithmExecutor
 from ..deadline import request_deadline
@@ -16,6 +18,7 @@ from ..serialization import (
     derived_image_payload,
     image_verification_payload,
     video_verification_payload,
+    video_presence_payload,
     witness_contract_available,
 )
 
@@ -157,6 +160,51 @@ def create_v2_router(
             video_upload=video,
             mode="full",
         )
+
+    @router.post(
+        "/verify/video/presence",
+        operation_id="verify_video_presence",
+        response_model=VideoPresenceResult,
+        summary="视频中查找给定目标人脸的出现证据",
+        description=(
+            "与 quick/full 的持续主体一致性检查不同，逐候选查找目标出现证据。"
+            "首版未标定，仅返回 INCONCLUSIVE 与 found=null，不提供活体结论。"
+        ),
+    )
+    async def verify_video_presence(
+        request: Request,
+        reference_image: UploadFile = File(...),
+        video: UploadFile = File(...),
+    ) -> JSONResponse:
+        deadline = request_deadline(
+            request, fallback_seconds=config.route_deadlines.video_full_seconds
+        )
+        reference = await read_image_upload(
+            reference_image,
+            max_bytes=resources.max_image_bytes,
+            max_pixels=resources.max_image_pixels,
+            deadline_monotonic=deadline,
+        )
+        async with spool_video_upload(
+            video,
+            max_bytes=resources.max_video_bytes,
+            deadline_monotonic=deadline,
+        ) as spooled_video:
+            cleanup = spooled_video.transfer_cleanup()
+            payload = await executor.run(
+                lambda: video_presence_payload(
+                    services.verify_video_presence(
+                        reference,
+                        Path(spooled_video.path),
+                        deadline_monotonic=deadline,
+                    )
+                ),
+                deadline_monotonic=deadline,
+                on_complete=cleanup,
+            )
+            # The serializer already revalidates the strict Python DTO before
+            # converting enums/tuples into their JSON wire representation.
+            return JSONResponse(content=payload)
 
     witness_operation = getattr(services, "blur_witness_background", None)
     if callable(witness_operation) and witness_contract_available():

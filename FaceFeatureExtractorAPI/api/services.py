@@ -48,6 +48,7 @@ class DefaultAlgorithmServices:
         self._witness = None
         self._image_verifier = None
         self._video_verifier = None
+        self._video_presence = None
         self._legacy = None
 
     @classmethod
@@ -85,6 +86,7 @@ class DefaultAlgorithmServices:
             self._witness = None
             self._image_verifier = None
             self._video_verifier = None
+            self._video_presence = None
             raise
         finally:
             self._release_source_registry_instances()
@@ -95,6 +97,7 @@ class DefaultAlgorithmServices:
             self._witness = None
             self._image_verifier = None
             self._video_verifier = None
+            self._video_presence = None
             self._legacy = None
             self._health = None
             self._release_source_registry_instances()
@@ -144,6 +147,7 @@ class DefaultAlgorithmServices:
                 "portrait": "ready" if portrait_ready else "unavailable",
                 "image_verification": "ready" if core_ready else "unavailable",
                 "video_verification": "ready" if core_ready else "unavailable",
+                "video_presence": "ready" if core_ready else "unavailable",
                 "witness_blur": (
                     "ready"
                     if witness_face_ready and portrait_ready
@@ -210,6 +214,21 @@ class DefaultAlgorithmServices:
                     self._release_source_registry_instances()
                 self._video_verifier = runtime
             return self._video_verifier
+
+    def _presence_runtime(self):
+        with self._lock:
+            if self._video_presence is None:
+                from face_algorithm.presence import build_video_presence_runtime
+
+                try:
+                    runtime = build_video_presence_runtime(
+                        config=self._config,
+                        registry=self._registry,
+                    )
+                finally:
+                    self._release_source_registry_instances()
+                self._video_presence = runtime
+            return self._video_presence
 
     def _legacy_runtime(self):
         with self._lock:
@@ -282,6 +301,22 @@ class DefaultAlgorithmServices:
                 deadline_monotonic=deadline_monotonic,
             )
         raise ValueError("video mode must be quick or full")
+
+    def verify_video_presence(
+        self,
+        reference_image: np.ndarray,
+        video_path: Path,
+        *,
+        deadline_monotonic: float,
+    ):
+        self._check_deadline(deadline_monotonic)
+        result = self._presence_runtime().verify(
+            reference_image,
+            video_path,
+            deadline_monotonic=deadline_monotonic,
+        )
+        self._check_deadline(deadline_monotonic)
+        return result
 
     def detect_faces(self, image: np.ndarray):
         return self._legacy_runtime().detect_faces(image)

@@ -118,7 +118,7 @@ export const CAPABILITIES = Object.freeze([
   freezeCapability({
     id: "verify-video-quick",
     label: "视频快速核验",
-    description: "提交前抽帧快速检查",
+    description: "抽帧检查持续身份一致性，不是目标是否曾出现",
     endpoint: "/api/v2/verify/video/quick",
     method: "POST",
     timeoutMs: 60_000,
@@ -139,7 +139,7 @@ export const CAPABILITIES = Object.freeze([
   freezeCapability({
     id: "verify-video-full",
     label: "视频完整核验",
-    description: "整段视频同步分析；正式业务应由异步 worker 调用",
+    description: "整段视频持续身份一致性，不是目标是否曾出现；正式业务应由异步 worker 调用",
     endpoint: "/api/v2/verify/video/full",
     method: "POST",
     timeoutMs: 600_000,
@@ -148,6 +148,25 @@ export const CAPABILITIES = Object.freeze([
       imageField("reference_image", "可信参考照片"),
       videoField("video", "签署视频"),
     ],
+    limits: {
+      maxImageBytes: IMAGE_BYTES,
+      maxImagePixels: IMAGE_PIXELS,
+      maxVideoBytes: VIDEO_BYTES,
+      maxVideoDurationSeconds: 600,
+      maxVideoFps: 120,
+      maxAnalyzedFrames: 1_200,
+      maxMultipartBytes: IMAGE_BYTES + VIDEO_BYTES + MULTIPART_OVERHEAD_BYTES,
+    },
+  }),
+  freezeCapability({
+    id: "verify-video-presence",
+    label: "视频目标出现",
+    description: "扫描目标是否曾出现；首版未标定，仅提供候选证据，不作身份结论",
+    endpoint: "/api/v2/verify/video/presence",
+    method: "POST",
+    timeoutMs: 600_000,
+    responseKind: "video-presence",
+    fields: [imageField("reference_image", "目标参考照片"), videoField("video", "待扫描视频")],
     limits: {
       maxImageBytes: IMAGE_BYTES,
       maxImagePixels: IMAGE_PIXELS,
@@ -205,6 +224,8 @@ const CAPABILITY_ALIASES = new Map([
   ["video-full", "verify-video-full"],
   ["video_full", "verify-video-full"],
   ["verify_video_full", "verify-video-full"],
+  ["presence", "verify-video-presence"],
+  ["video_presence", "verify-video-presence"],
   ...CAPABILITIES.map((item) => [item.endpoint, item.id]),
 ]);
 
@@ -238,6 +259,8 @@ export const REASON_LABELS = Object.freeze({
   VIDEO_TOO_LARGE: "视频超过限制",
   VIDEO_TOO_LONG: "视频时长超过限制",
   VIDEO_DECODE_FAILED: "视频解码失败",
+  CANDIDATE_LIMIT_REACHED: "候选人脸预算已达上限",
+  VIDEO_SCAN_LIMIT_REACHED: "视频扫描预算已达上限",
   INSUFFICIENT_VALID_FRAMES: "有效视频帧不足",
   MULTIPLE_SUBJECTS: "视频中存在多名稳定人物",
   SUBJECT_SWITCH: "视频人物发生切换",
@@ -442,12 +465,14 @@ export function translateReasons(reasonCodes) {
 function hasUncalibratedSemantics(result, reasonCodes) {
   return (
     reasonCodes.includes("THRESHOLD_UNCALIBRATED") ||
+    String(result?.calibration_status ?? "").toUpperCase() === "UNCALIBRATED" ||
     String(result?.calibration?.status ?? "").toUpperCase() === "UNCALIBRATED"
   );
 }
 
 /** Returns a fail-closed, presentation-ready interpretation of an API result. */
 export function getSuggestionView(result) {
+  if (result?.mode === "presence") return getPresenceView(result);
   if (!result || typeof result !== "object") {
     return Object.freeze({
       key: "unknown",
@@ -542,6 +567,48 @@ export function getSuggestionView(result) {
   });
 }
 
+/** V1 presence is uncalibrated only; future decisions are invalid, not forward-compatible. */
+function getPresenceView(result) {
+  const reasons = normalizedReasonCodes(result.reason_codes);
+  const notices = ["目标出现阈值尚未标定，任何高分都不能作为身份通过依据。",
+    "本接口未评估活体或反翻拍，不能据此认定真人在场。"];
+  const requiredFields = ["model_versions", "config_version", "processing_time_ms", "trace_id", "best_score",
+    "best_timestamp_seconds", "evidence_frames", "scan_complete", "sampling_interval_seconds", "sampled_frames",
+    "decoded_frames", "valid_face_frames", "candidate_count", "candidate_limit_hit", "duration_seconds", "timestamp_source"];
+  const validContract = result.success === true && result.feature_dimension === EXPECTED_FEATURE_DIMENSION
+    && result.feature_version === "recognizer_v1_1024" && result.matcher_version === "l2_dot_v1"
+    && result.calibration_status === "UNCALIBRATED" && result.decision === "INCONCLUSIVE" && result.found === null
+    && result.liveness_evaluated === false && ["REVIEW", "RECAPTURE"].includes(result.suggestion)
+    && reasons.includes("CALIBRATION_REQUIRED") && reasons.includes("THRESHOLD_UNCALIBRATED")
+    && requiredFields.every((field) => Object.hasOwn(result, field) && result[field] !== undefined);
+  if (!validContract) notices.push("响应不符合 presence 首版契约或请求未完成，结果不可用；请先检查 HTTP 状态并人工复核。");
+  return Object.freeze({
+    key: "inconclusive",
+    label: validContract ? "无法确定目标是否出现" : "结果不可用，需人工复核",
+    message: "本版不支持已标定身份结论；未检测到可用人脸也不等于目标未出现。",
+    tone: validContract ? "warning" : "danger", notices: Object.freeze(notices), canTreatAsPass: false,
+  });
+}
+
+/** Render only bounded, numeric evidence cells; never interpret returned HTML. */
+export function renderEvidenceFrames(body, result) {
+  if (!body) return;
+  body.replaceChildren();
+  const frames = Array.isArray(result?.evidence_frames) ? result.evidence_frames : [];
+  const safeFrames = frames.filter((frame) => frame && Number.isInteger(frame.frame_index) && frame.frame_index >= 0
+    && typeof frame.timestamp_seconds === "number" && Number.isFinite(frame.timestamp_seconds) && frame.timestamp_seconds >= 0
+    && typeof frame.score === "number" && Number.isFinite(frame.score)).slice(0, 5);
+  for (const frame of safeFrames) {
+    const row = body.ownerDocument.createElement("tr");
+    for (const value of [String(frame.frame_index), frame.timestamp_seconds.toFixed(3), frame.score.toFixed(4)]) {
+      const cell = body.ownerDocument.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    }
+    body.append(row);
+  }
+}
+
 function formatBytes(value) {
   const bytes = Number(value);
   if (!Number.isFinite(bytes)) {
@@ -627,8 +694,8 @@ export function buildResultDetails(capabilityId, result) {
     details.push(Object.freeze({ key, label, value: String(value) }));
   };
 
-  const suggestionView = getSuggestionView(result);
-  add("suggestion", "算法建议", suggestionView.label);
+  const suggestionView = capability?.responseKind === "video-presence" ? getPresenceView(result) : getSuggestionView(result);
+  add("suggestion", capability?.responseKind === "video-presence" ? "身份结论" : "算法建议", suggestionView.label);
   const reasons = translateReasons(result.reason_codes);
   add("reasons", "原因", reasons.length ? reasons.join("、") : "无");
   const processingTime = finiteText(result.processing_time_ms, 1);
@@ -663,6 +730,27 @@ export function buildResultDetails(capabilityId, result) {
     add("calibration", "校准状态", calibrationText(result.calibration));
     add("reference", "参考照片", sideText(result.reference));
     add("probe", "待核验照片", sideText(result.probe));
+  } else if (capability?.responseKind === "video-presence") {
+    add("decision", "decision（首版安全展示）", "INCONCLUSIVE");
+    add("found", "found（首版安全展示）", "未确定（null）");
+    add("best-score", "最佳分数（不是身份概率）", finiteText(result.best_score, 4) ?? "无可评分候选");
+    const timestamp = finiteText(result.best_timestamp_seconds, 3);
+    add("best-timestamp", "最佳候选时间", timestamp === null ? "无可评分候选" : `${timestamp} 秒`);
+    add("scan-complete", "扫描完整", result.scan_complete === true ? "是（仅指采样计划）" : "否（扫描未完整覆盖）");
+    const interval = finiteText(result.sampling_interval_seconds, 3);
+    add("sampling-interval", "采样间隔", interval === null ? null : `${interval} 秒`);
+    for (const [field, key, label] of [["sampled_frames", "sampled-frames", "采样帧数"], ["decoded_frames", "decoded-frames", "解码帧数"],
+      ["valid_face_frames", "valid-face-frames", "有可评分人脸的帧数"], ["candidate_count", "candidate-count", "已评估候选数"]]) {
+      add(key, label, Number.isInteger(result[field]) ? result[field] : null);
+    }
+    add("candidate-limit", "候选预算触顶", result.candidate_limit_hit === true ? "是" : "否");
+    add("timestamp-source", "时间戳来源", result.timestamp_source);
+    const duration = finiteText(result.duration_seconds, 1);
+    add("duration", "视频时长", duration === null ? "未知" : `${duration} 秒`);
+    add("calibration", "标定状态", result.calibration_status === "UNCALIBRATED" ? "未标定（仅供复核）" : "不可用（首版仅支持未标定）");
+    add("feature-dimension", "特征维度", result.feature_dimension === undefined ? null : `${result.feature_dimension} 维`);
+    add("matcher-version", "匹配器", result.matcher_version);
+    add("liveness", "活体 / 反翻拍", "未评估，无真人在场保证");
   } else if (capability?.responseKind === "video-verification") {
     add("mode", "核验模式", result.mode === "full" ? "完整" : result.mode === "quick" ? "快速" : null);
     const duration = finiteText(result.duration_seconds, 1);

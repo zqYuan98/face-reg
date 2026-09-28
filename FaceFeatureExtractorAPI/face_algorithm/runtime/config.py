@@ -22,6 +22,8 @@ from pydantic import (
 from yaml.nodes import MappingNode
 from yaml.resolver import BaseResolver
 
+from face_algorithm.presence.config import VideoPresencePolicy
+
 __all__ = ["resolve_config_path", "load_config"]
 
 _CONFIG_ENVIRONMENT_VARIABLE = "FACE_ALGO_CONFIG"
@@ -510,8 +512,23 @@ class AlgorithmConfig(_StrictModel):
     witness: WitnessOptions
     image_verification: ImageVerificationConfig
     video_verification: VideoVerificationPolicy
+    video_presence: VideoPresencePolicy = Field(default_factory=VideoPresencePolicy)
     route_deadlines: RouteDeadlines
     legacy: LegacyRoutes
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_presence_within_legacy_budget(cls, value: Any) -> Any:
+        if isinstance(value, Mapping) and "video_presence" not in value:
+            resources = value.get("resources")
+            if isinstance(resources, Mapping):
+                frame_limit = resources.get("max_full_video_frames")
+                if type(frame_limit) is int and frame_limit > 0:
+                    value = dict(value)
+                    value["video_presence"] = {
+                        "max_analyzed_frames": min(1200, frame_limit)
+                    }
+        return value
 
     @model_validator(mode="after")
     def validate_cross_section_contracts(self) -> Self:
@@ -524,6 +541,8 @@ class AlgorithmConfig(_StrictModel):
             raise ValueError("full video policy exceeds the resource frame limit")
         if self.witness.max_witness_pixels > self.resources.max_image_pixels:
             raise ValueError("witness pixel limit exceeds the shared image limit")
+        if self.video_presence.max_analyzed_frames > self.resources.max_full_video_frames:
+            raise ValueError("presence policy exceeds the shared video frame limit")
         return self
 
 

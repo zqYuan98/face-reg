@@ -2,6 +2,10 @@
 
 本文档详细说明了人脸识别系统的后端业务接口与算法服务接口，供开发人员集成使用。
 
+算法部分已迁移到模块化 v2，完整请求/响应、鉴权、资源、错误与调用示例以
+[API 联调文档](FaceFeatureExtractorAPI/docs/TASK-2026-001-API-DEBUGGING.md) 为准。
+下面第 1 节为历史 Java 业务接口描述，其中旧检索阈值不适用于 v2 或 presence。
+
 ## 1. 系统业务接口 (Java Backend)
 
 后端服务主要提供分组管理和人员信息管理功能。所有接口统一通过 HTTP 协议调用，返回 JSON 格式数据。
@@ -179,82 +183,52 @@
 
 ---
 
-## 2. 算法服务接口 (Python - FaceFeatureExtractor)
+## 2. 当前算法服务（模块化 v2）
 
-该接口通常由 Java 后端内部调用，但如果开发人员需要独立调试算法或进行集成，可直接调用该微服务。
+2026-09-28 presence 候选版本；发布 commit 和线上证据待补，不代表已部署。
+内网 Base URL：`http://<server-37>:18002`；人工测试台：`http://<server-37>:18003`。
+新开发不要调用保留回退服务 `18001`。算法不访问业务库、不保存合同状态或持久化客户媒体。
 
-**功能**: 接收图片，进行质量检测（人脸检测、模糊度、亮度、姿态等），合格后提取 1024 维人脸特征向量。
+### 2.1 全部接口索引
 
-**默认端口**: `8000` (具体取决于 docker-compose 配置)
+| 方法与路径 | 请求 | 响应/用途 |
+|---|---|---|
+| `GET /health/live` | 无 | `{"status":"live"}`；仅进程存活 |
+| `GET /health/ready` | 无 | 200/503，模型与五个能力 readiness，需检查目标能力 |
+| `GET /health` | 无 | ready 的兼容别名，不是仅检查存活 |
+| `GET /openapi.json` | 无 | 类型化请求/响应契约；`/docs`、`/redoc` 关闭 |
+| `POST /api/v2/portrait/generate` | multipart `image` | 白底头肩照，30 秒 |
+| `POST /api/v2/witness/blur-background` | multipart `image` | 人物优先背景虚化，30 秒 |
+| `POST /api/v2/verify/images` | multipart `reference_image,probe_image` | 两图比对，30 秒 |
+| `POST /api/v2/verify/video/quick` | multipart `reference_image,video` | 持续身份一致性快检，60 秒 |
+| `POST /api/v2/verify/video/full` | multipart `reference_image,video` | 持续身份一致性完整检查，600 秒 |
+| `POST /api/v2/verify/video/presence` | multipart `reference_image,video` | 目标出现候选扫描，600 秒，不是持续一致性 |
+| `POST /api/detect_face` | multipart `image,expand_scale?` | 按 legacy 检测开关注册，候选默认开，无特征返回 |
+| `POST /api/extract_feature` | multipart `image`，受控内部鉴权 | 候选默认关闭/404，不为新增功能开启 |
 
-### 2.1 提取人脸特征
-*   **接口地址**: `/api/extract_feature`
-*   **请求方式**: `POST`
-*   **请求类型**: `multipart/form-data`
-*   **请求参数**:
+### 2.2 结果、资源与安全边界
 
-    | 参数名 | 类型 | 必填 | 说明 |
-    | :--- | :--- | :--- | :--- |
-    | image | File | 是 | 图片文件 (支持 jpg, png 等常见格式) |
+先检查 HTTP；200 不等于身份通过。旧图片/quick/full 看标定后的 suggestion；presence 的
+身份结论只读 `decision/found`，不把 `success` 或分数当同一人结论。首版 presence 必定是
+`calibration_status=UNCALIBRATED,decision=INCONCLUSIVE,found=null`，没有可用脸也不能转成 false。
+FOUND/NOT_FOUND_IN_SCAN 为保留状态，本版不产出；所有视频均无活体/反翻拍保证。
 
-*   **返回结果 (JSON)**:
+图片仅 JPEG/PNG，每张≤15 MiB、25 MP（witness≤16 MP）；视频≤500 MiB、600 秒、120 FPS。
+MP4/AVI/MOV 等经现有上传路径处理，但实际编码须在目标镜像验证。整个 multipart body
+也有限制；full/presence 应由业务异步 worker 调用。v2 不返回特征数组、原图、帧或私有路径。
 
-    **成功响应**:
-    ```json
-    {
-        "success": true,
-        "message": "Success",
-        "feature": [0.123, -0.456, ...],  // 1024维浮点数组
-        "feature_dim": 1024,
-        "processing_time": 0.045
-    }
-    ```
+v2 内网接口无应用层 Authorization 要求，默认无 CORS；公网入口必须另配 TLS、认证、
+授权、限流和审计。测试台有 Origin/CSRF/白名单保护，不是业务 API、也不是公网安全网关。
+400/413 修正上传，503 检查模型，504 按幂等补偿，500 联系运维；错误体和所有 DTO 的完整
+字段见 [API 联调文档](FaceFeatureExtractorAPI/docs/TASK-2026-001-API-DEBUGGING.md)。
 
-    **失败/质量不合格响应**:
-    ```json
-    {
-        "success": false,
-        "message": "No face detected" // 或 "Face quality check failed...", "Server error..."
-    }
-    ```
+### 2.3 兼容接口
 
-### 2.2 健康检查
-*   **接口地址**: `/health`
-*   **请求方式**: `GET`
-*   **返回结果**: `{"status": "healthy", "service": "Face Feature Extractor"}`
+`detect_face` 的 `expand_scale` 默认为 0、范围 `[0,2]` 且必须有限。响应为
+`success:boolean,message:string,faces:[{x1,y1,x2,y2,score:number}],processing_time:number`，
+坐标裁切至图片边界，耗时单位秒；无脸时 faces 为空、success=false，HTTP 200。
 
-### 2.3 人脸检测 (获取坐标)
-*   **接口地址**: `/api/detect_face`
-*   **请求方式**: `POST`
-*   **请求类型**: `multipart/form-data`
-*   **请求参数**:
-
-    | 参数名 | 类型 | 必填 | 说明 |
-    | :--- | :--- | :--- | :--- |
-    | image | File | 是 | 图片文件 |
-    | expand_scale | Float | 否 | 扩充比例，默认 0.0。例如 0.3 表示长宽各扩充 30% |
-
-*   **返回结果**:
-
-    > **坐标说明**:
-    > *   `x1`, `y1`: 人脸检测框 **左上角** 的像素坐标。
-    > *   `x2`, `y2`: 人脸检测框 **右下角** 的像素坐标。
-    > *   `score`: 检测置信度 (0-1之间)。
-    > *   **注意**: 即使设置了 `expand_scale`，返回的坐标也会被限制在图片边界内 (Clip to bounds)。
-
-    ```json
-    {
-        "success": true,
-        "message": "Success",
-        "faces": [
-            {
-                "x1": 100.0,
-                "y1": 50.0,
-                "x2": 200.0,
-                "y2": 150.0,
-                "score": 0.98
-            }
-        ],
-        "processing_time": 0.02
-    }
-    ```
+`extract_feature` 默认不注册。仅在批准的迁移环境中同时满足开关、高熵内部令牌、客户端
+CIDR、可信代理链和 `X-Internal-Token` 后才可用，否则 403；禁用时 404。不要为联调打开。
+其唯一特征例外、完整请求/响应和责任边界见联调文档第 15 节及
+[安全接入说明](FaceFeatureExtractorAPI/docs/ALGORITHM_API_INTEGRATION.md)。

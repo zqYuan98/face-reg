@@ -3,6 +3,29 @@
 面向私有化 CPU 部署的模块化人脸算法包及薄 FastAPI 适配层。算法模块不访问数据库、
 不判断合同状态，也不创建业务工单。
 
+## 接口入口（2026-09-28 候选版本）
+
+公司内网 API：`http://<server-37>:18002`；人工测试台：`http://<server-37>:18003`。
+presence 为本次候选新增能力，发布 commit 和线上验证待补；旧 `18001` 不属于新开发入口。
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/health/live`、`/health/ready`、`/health` | 存活、模型/能力就绪、ready 兼容别名 |
+| GET | `/openapi.json` | 接入契约；`/docs`、`/redoc` 关闭 |
+| POST | `/api/v2/portrait/generate` | 白底头肩照 |
+| POST | `/api/v2/witness/blur-background` | 人物优先背景虚化 |
+| POST | `/api/v2/verify/images` | 双图身份比对 |
+| POST | `/api/v2/verify/video/quick` | 持续身份一致性快速抽样 |
+| POST | `/api/v2/verify/video/full` | 持续身份一致性完整检查 |
+| POST | `/api/v2/verify/video/presence` | 视频目标出现候选证据，非持续一致性 |
+| POST | `/api/detect_face` | legacy 检测，按 detect_face_enabled 注册（默认开） |
+| POST | `/api/extract_feature` | legacy 特征，默认关闭/404，不为新功能开启 |
+
+六个 v2 使用 multipart 文件上传；presence 与 full 都有 600 秒算法截止，正式业务由异步
+worker 调用。presence 首版固定 `UNCALIBRATED + INCONCLUSIVE + found=null`，高分和无脸
+均不能作身份通过/排除结论，也无活体或反翻拍保证。业务先检查 HTTP，再读取
+`decision/found`；不要把 `success` 当“同一人”。完整字段、错误、安全边界和示例见下方文档。
+
 ## 本地验证
 
 要求 Python 3.12：

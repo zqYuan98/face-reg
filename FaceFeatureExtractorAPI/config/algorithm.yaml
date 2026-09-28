@@ -234,6 +234,15 @@ video_verification:
     max_no_face_gap_seconds: 5.0
     aggregate_percentile: 0.10
 
+video_presence:
+  mode: uncalibrated
+  sample_interval_seconds: 0.5
+  max_analyzed_frames: 1200
+  max_face_candidates: 5
+  max_evidence_frames: 5
+  reference_min_face_size: 112
+  video_min_face_size: 64
+
 route_deadlines:
   image_seconds: 30
   video_quick_seconds: 60

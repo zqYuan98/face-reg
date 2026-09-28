@@ -22,6 +22,7 @@ from face_algorithm.schemas import (
     ReasonCode,
     VideoVerificationResult,
 )
+from face_algorithm.presence.contracts import VideoPresenceResult
 
 from .errors import ApiError
 
@@ -96,6 +97,17 @@ def video_verification_payload(result: object) -> dict[str, Any]:
     try:
         raw = result.model_dump(mode="python", warnings="error")
         validated = VideoVerificationResult.model_validate(raw)
+        return validated.model_dump(mode="json", warnings="error")
+    except Exception:
+        raise _contract_error() from None
+
+
+def video_presence_payload(result: object) -> dict[str, Any]:
+    if type(result) is not VideoPresenceResult:
+        raise _contract_error()
+    try:
+        raw = result.model_dump(mode="python", warnings="error")
+        validated = VideoPresenceResult.model_validate(raw)
         return validated.model_dump(mode="json", warnings="error")
     except Exception:
         raise _contract_error() from None

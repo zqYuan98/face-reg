@@ -107,6 +107,7 @@ def multipart_body_limits(
         "/api/v2/verify/images": (two_images, ReasonCode.IMAGE_TOO_LARGE),
         "/api/v2/verify/video/quick": (video, ReasonCode.VIDEO_TOO_LARGE),
         "/api/v2/verify/video/full": (video, ReasonCode.VIDEO_TOO_LARGE),
+        "/api/v2/verify/video/presence": (video, ReasonCode.VIDEO_TOO_LARGE),
         "/api/detect_face": (image, ReasonCode.IMAGE_TOO_LARGE),
         "/api/extract_feature": (image, ReasonCode.IMAGE_TOO_LARGE),
     }

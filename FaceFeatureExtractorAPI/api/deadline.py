@@ -107,6 +107,7 @@ def algorithm_route_deadlines(
         "/api/v2/verify/images": image_seconds,
         "/api/v2/verify/video/quick": video_quick_seconds,
         "/api/v2/verify/video/full": video_full_seconds,
+        "/api/v2/verify/video/presence": video_full_seconds,
         "/api/detect_face": image_seconds,
         "/api/extract_feature": image_seconds,
     }

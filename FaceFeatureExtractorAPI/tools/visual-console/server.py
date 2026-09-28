@@ -109,6 +109,9 @@ POST_ROUTES: Final = {
     "/api/v2/verify/video/full": RoutePolicy(
         IMAGE_VIDEO_BODY_LIMIT, VIDEO_VERIFY_RESPONSE_LIMIT, 620.0
     ),
+    "/api/v2/verify/video/presence": RoutePolicy(
+        IMAGE_VIDEO_BODY_LIMIT, VIDEO_VERIFY_RESPONSE_LIMIT, 620.0
+    ),
 }
 
 
@@ -678,6 +681,7 @@ class VisualConsoleHandler(http.server.BaseHTTPRequestHandler):
                     "portrait",
                     "image_verification",
                     "video_verification",
+                    "video_presence",
                     "witness_blur",
                 )
             }

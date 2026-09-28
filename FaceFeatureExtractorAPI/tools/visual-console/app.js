@@ -5,6 +5,7 @@ import {
   getCapability,
   getSuggestionView,
   isCapabilityReady,
+  renderEvidenceFrames,
   safeUploadFilename,
   safeJsonText,
   translateReasons,
@@ -33,14 +34,20 @@ const CONTENT = Object.freeze({
   "verify-video-quick": {
     eyebrow: "QUICK VIDEO VERIFY",
     title: "视频快速身份核验",
-    description: "从视频中抽取少量代表帧，快速检查人物身份一致性。",
+    description: "从少量代表帧检查持续身份一致性；不是检查目标是否曾出现。",
     action: "开始视频快检",
   },
   "verify-video-full": {
     eyebrow: "FULL VIDEO VERIFY",
     title: "视频完整身份核验",
-    description: "分析整段视频的采样帧和人物轨迹；该测试最长可能持续十分钟。",
+    description: "分析整段采样帧和人物轨迹的持续身份一致性；不是检查目标是否曾出现，最长十分钟。",
     action: "开始视频全检",
+  },
+  "verify-video-presence": {
+    eyebrow: "VIDEO TARGET PRESENCE",
+    title: "视频目标出现",
+    description: "扫描视频中的目标候选，显示最佳时刻与证据。首版未标定，所有身份结论均为 INCONCLUSIVE；不评估活体或反翻拍。",
+    action: "扫描目标出现",
   },
 });
 
@@ -50,6 +57,7 @@ const READINESS_KEYS = Object.freeze({
   "verify-images": "image_verification",
   "verify-video-quick": "video_verification",
   "verify-video-full": "video_verification",
+  "verify-video-presence": "video_presence",
 });
 
 const $ = (selector) => document.querySelector(selector);
@@ -74,6 +82,8 @@ const nodes = {
   resultDuration: $("#result-duration"),
   resultTraceId: $("#result-trace-id"),
   resultMetrics: $("#result-metrics"),
+  evidencePanel: $("#evidence-frames-panel"),
+  evidenceBody: $("#evidence-frames-body"),
   derivedPanel: $("#derived-image-panel"),
   derivedImage: $("#derived-image"),
   downloadResult: $("#download-result"),
@@ -438,6 +448,8 @@ function renderInputs() {
 
 function clearResult() {
   revokeDerivedImage();
+  renderEvidenceFrames(nodes.evidenceBody, {});
+  if (nodes.evidencePanel) nodes.evidencePanel.hidden = true;
   if (nodes.resultEmpty) nodes.resultEmpty.hidden = false;
   if (nodes.resultContent) nodes.resultContent.hidden = true;
   if (nodes.resultMetrics) nodes.resultMetrics.replaceChildren();
@@ -521,10 +533,13 @@ function renderResult(payload, httpStatus, elapsedMs) {
   if (nodes.resultEmpty) nodes.resultEmpty.hidden = true;
   if (nodes.resultContent) nodes.resultContent.hidden = false;
 
-  const view = getSuggestionView(payload);
+  const presence = currentCapability().responseKind === "video-presence";
+  const view = getSuggestionView({ ...payload, ...(presence ? { mode: "presence" } : {}),
+    ...(httpStatus && (httpStatus < 200 || httpStatus >= 300) ? { success: false } : {}) });
   const suggestion = String(payload.suggestion ?? "ERROR").toUpperCase();
-  const displaySuggestion = ["PASS", "RECAPTURE", "REVIEW"].includes(suggestion) ? suggestion : "ERROR";
-  if (nodes.resultSummary) nodes.resultSummary.dataset.suggestion = displaySuggestion;
+  const displaySuggestion = presence ? "INCONCLUSIVE"
+    : suggestion === "PASS" && !view.canTreatAsPass ? "REVIEW" : ["PASS", "RECAPTURE", "REVIEW"].includes(suggestion) ? suggestion : "ERROR";
+  if (nodes.resultSummary) nodes.resultSummary.dataset.suggestion = presence ? "REVIEW" : displaySuggestion;
   setText(nodes.resultStatus, displaySuggestion);
   setText(nodes.resultSuggestion, view.label);
 
@@ -542,6 +557,8 @@ function renderResult(payload, httpStatus, elapsedMs) {
   setText(nodes.resultTraceId, trace);
 
   renderMetrics(buildResultDetails(state.capabilityId, payload));
+  if (nodes.evidencePanel) nodes.evidencePanel.hidden = !presence;
+  renderEvidenceFrames(nodes.evidenceBody, presence ? payload : {});
   try {
     renderDerivedImage(payload);
   } catch {
@@ -641,6 +658,7 @@ async function runCurrentTest(event) {
       cache: "no-store",
       credentials: "omit",
       redirect: "error",
+      signal: AbortSignal.timeout(capability.timeoutMs + 30_000),
     });
     const payload = await parseResponse(response);
     const elapsed = performance.now() - started;
@@ -669,7 +687,7 @@ function applyReadiness(payload) {
   state.ready = payload.ready === true;
   state.capabilities = payload.capabilities && typeof payload.capabilities === "object" ? payload.capabilities : {};
   const counts = modelCounts(payload);
-  const capabilityValues = Object.values(state.capabilities);
+  const capabilityValues = CAPABILITIES.map((capability) => state.capabilities[READINESS_KEYS[capability.id]]);
   const capabilityReadyCount = capabilityValues.filter((value) => value === "ready").length;
 
   if (nodes.serviceStatusContainer) nodes.serviceStatusContainer.dataset.state = state.ready ? "ready" : "offline";

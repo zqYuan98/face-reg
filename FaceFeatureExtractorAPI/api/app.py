@@ -22,11 +22,13 @@ from face_algorithm.runtime.calibration import CalibrationLoadError
 from face_algorithm.runtime.config import AlgorithmConfig, load_config
 from face_algorithm.runtime.model_registry import ModelRegistryError
 from face_algorithm.schemas import ReasonCode
+from face_algorithm.video.decoder import VideoDeadlineExceeded, VideoInputError
 
 from .body_limit import RequestBodyLimitMiddleware, multipart_body_limits
 from .deadline import RequestDeadlineMiddleware, algorithm_route_deadlines
 from .errors import ApiError, error_payload
 from .execution import AlgorithmExecutor
+from .openapi import install_public_openapi
 from .routes.legacy import create_legacy_router
 from .routes.v2 import create_v2_router
 from .security import LegacyAccessMiddleware
@@ -85,7 +87,7 @@ def create_app(
 
     app = FastAPI(
         title="Private Face Algorithm API",
-        version="2.0.0",
+        version="2.1.0",
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
@@ -172,10 +174,23 @@ def create_app(
             content=error_payload(ReasonCode.MODEL_UNAVAILABLE, "portrait model is unavailable"),
         )
 
+    @app.exception_handler(VideoInputError)
+    async def handle_video_input_error(_request: Request, error: VideoInputError) -> JSONResponse:
+        limited = error.reason_code in {
+            ReasonCode.VIDEO_TOO_LARGE,
+            ReasonCode.VIDEO_TOO_LONG,
+            ReasonCode.VIDEO_SCAN_LIMIT_REACHED,
+        }
+        return JSONResponse(
+            status_code=413 if limited else 400,
+            content=error_payload(error.reason_code, "video resource limit exceeded" if limited else "invalid video input"),
+        )
+
     @app.exception_handler(AlgorithmDeadlineExceeded)
+    @app.exception_handler(VideoDeadlineExceeded)
     async def handle_algorithm_deadline(
         _request: Request,
-        _error: AlgorithmDeadlineExceeded,
+        _error: Exception,
     ) -> JSONResponse:
         return JSONResponse(
             status_code=504,
@@ -233,6 +248,7 @@ def create_app(
             legacy_token=token,
         )
     )
+    install_public_openapi(app)
     return app
 
 
