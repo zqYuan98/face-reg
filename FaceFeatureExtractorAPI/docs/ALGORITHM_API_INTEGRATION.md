@@ -4,9 +4,9 @@
 [TASK-2026-001 新算法 API 联调文档](TASK-2026-001-API-DEBUGGING.md)。本文侧重安全边界、
 部署约束和生产接入责任。
 
-版本状态（2026-09-28）：presence 为本次候选新增能力，待发布负责人补上线 commit 与目标
-服务器验证证据。局域网算法地址为 `http://<server-37>:18002`，测试台为
-`http://<server-37>:18003`；不能仅凭文档推定候选已上线。
+版本状态（2026-09-28）：presence 已部署，算法提交 `1e6b57b5b1dd32693497c21a0ce0039b4f77fc1b`。
+局域网算法地址为 `http://<server-37>:18002`，测试台为 `http://<server-37>:18003`。
+[发布验收记录](reports/2026-09-28-presence-release-validation.md) 包含版本、测试和回滚证据。
 
 ## 1. 边界与责任
 
@@ -31,7 +31,7 @@ HTTP 长连接。算法建议不等于合同审批结果。
 | `GET /health/live` | 进程事件循环可响应，不代表模型可用 | 200 |
 | `GET /health/ready` | 必需模型完成哈希、契约及 Provider 检查；artifact 模式还完成签名校准绑定 | ready 时 200，否则 503 |
 | `GET /health` | 兼容别名，语义同 ready | 200/503 |
-| `GET /openapi.json` | 类型化请求/响应与错误契约；候选新增 presence，上线后重新导入 | 200 |
+| `GET /openapi.json` | 类型化请求/响应与错误契约；已部署 presence，请重新导入 API 2.1.0 契约 | 200 |
 
 `degraded + ready=true` 表示核心人脸能力可用、某个可选能力（例如 MODNet）不可用；
 调用不可用能力仍返回 503，不能只看 liveness 接流量。

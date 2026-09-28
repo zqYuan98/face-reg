@@ -1,13 +1,13 @@
 # TASK-2026-001 验证手册
 
-2026-09-28 presence 候选补充：代码测试结果与线上发布证据分开记录。本节不宣称已上线；
-最终 commit、镜像/容器状态、目标服务器验收时间由发布负责人补充。
+2026-09-28 presence 已部署，代码测试和线上证据分开记录。
+确切 commit、镜像、现场回归及回滚见 [发布验收记录](reports/2026-09-28-presence-release-validation.md)。
 
 ## 1. 入口
 
 - 可视化测试台：`http://<server-37>:18003`
-- 候选算法健康检查：`http://<server-37>:18002/health/ready`
-- 旧服务 `18001` 仅用于回退，不参与本次切换。
+- 算法健康检查：`http://<server-37>:18002/health/ready`
+- 历史服务 `18001` 不参与本次切换；回滚恢复保留的 18002/18003 旧容器。
 
 测试台显示“服务未就绪”时，仍以每个能力右侧的“就绪/不可用”为准；人物虚化、
 白底照和身份核验可以独立验收。
@@ -71,10 +71,10 @@
 
 候选测试台验证（本地，不等于线上证据）：
 
-- `node --test tools/visual-console/tests/core.test.mjs`：19 项通过；
+- `node --test tools/visual-console/tests/core.test.mjs`：20 项通过；
 - `python -m pytest tools/visual-console/tests -q`：28 项通过；
 - TDD 首轮确认新增入口/decision/证据/代理测试先失败，再实现转绿；旧功能用例全部保留。
-- 实际浏览器布局、目标服务器六接口、MP4/AVI/MOV 编码验证与发布 commit：待发布阶段补充。
+- 目标镜像六接口、MP4/AVI/MOV 编码验证与发布 commit：见发布验收记录。
 
 ## 5. 现场图片随机抽检
 

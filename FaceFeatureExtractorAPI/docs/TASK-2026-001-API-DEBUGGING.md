@@ -1,15 +1,14 @@
 # TASK-2026-001 新算法 API 联调文档
 
-本文供业务后端、APP、测试和实施人员在公司内网联调新的人脸算法服务。接口以当前
-候选代码契约为准。presence 为本次候选新增能力，尚待发布与目标服务器验证；本文不把
-历史提交 `872c9694e1589f00968e0c63d67024ea101a760e` 当作 presence 已上线证据。
-最终发布 commit、容器与线上验证证据由发布负责人补入验证手册。
+本文供业务后端、APP、测试和实施人员在公司内网联调人脸算法服务。
+2026-09-28 已部署算法提交 `1e6b57b5b1dd32693497c21a0ce0039b4f77fc1b`，新增独立 presence 接口。
+完整测试、镜像、端口和回滚证据见 [发布验收记录](reports/2026-09-28-presence-release-validation.md)。
 
 | 项目 | 值 |
 |---|---|
 | API 版本 | `2.1.0` |
 | 配置版本 | `2026-08-24-v1` |
-| 文档更新时间 | `2026-09-28`（presence 候选版本 / 待上线验证） |
+| 文档更新时间 | `2026-09-28`（presence 已部署，身份阈值仍未标定） |
 | 特征契约 | `recognizer_v1_1024`，固定 `1024` 维 |
 | 测试环境 Base URL | `http://<server-37>:18002` |
 | 可视化测试台 | `http://<server-37>:18003` |
@@ -37,7 +36,7 @@ curl -sS http://<server-37>:18002/health/ready
   `video_verification` 或 `video_presence`；
 - 当前测试环境应显示 `8` 个模型均为 `ready`。
 
-就绪响应结构节选（presence 部分属于候选版本，线上状态待发布后核验）：
+就绪响应结构节选（线上已核验 8 个模型和 5 个能力键就绪）：
 
 ```json
 {
@@ -81,7 +80,7 @@ http://<server-37>:18002/openapi.json
 ```
 
 服务关闭了 Swagger UI 和 ReDoc 页面，因此 `/docs`、`/redoc` 不可用是正常现象。
-候选版本 OpenAPI 将同时描述 multipart 请求和类型化响应；发布后导入并核对六条 v2 路由。
+线上 OpenAPI 已同时描述 multipart 请求和类型化响应；请重新导入并核对六条 v2 路由。
 应用字段校验的实际契约是 `400 + INVALID_IMAGE`，不是框架默认的 `422`。
 
 Postman/Apifox 中所有文件字段都选择 `form-data` 的 **File** 类型，不要把文件路径、
@@ -110,7 +109,7 @@ Base64 或 JSON 当作请求体发送。
 | 两图身份比对 | `POST /api/v2/verify/images` | `reference_image`, `probe_image` | 30 秒 |
 | 视频快速持续一致性 | `POST /api/v2/verify/video/quick` | `reference_image`, `video` | 60 秒 |
 | 视频完整持续一致性 | `POST /api/v2/verify/video/full` | `reference_image`, `video` | 600 秒 |
-| 视频目标出现（候选） | `POST /api/v2/verify/video/presence` | `reference_image`, `video` | 600 秒 |
+| 视频目标出现 | `POST /api/v2/verify/video/presence` | `reference_image`, `video` | 600 秒 |
 
 其他 HTTP 接口也属于接入契约：
 
@@ -558,7 +557,7 @@ full 是同步算法接口，但最长截止时间为 600 秒。APP/网页不要
 业务后端异步任务调用，并实现幂等、任务状态、结果回写和超时补偿。算法服务本身不保存
 任务状态。
 
-## 8A. 视频目标出现（presence，候选版本）
+## 8A. 视频目标出现（presence，已部署）
 
 ### 8A.1 请求与边界
 
@@ -624,13 +623,14 @@ curl -sS --max-time 660 -X POST \
   "best_timestamp_seconds": 0.5,
   "evidence_frames": [
     {"frame_index": 15, "timestamp_seconds": 0.5, "score": 0.9234},
-    {"frame_index": 0, "timestamp_seconds": 0.0, "score": 0.8123}
+    {"frame_index": 0, "timestamp_seconds": 0.0, "score": 0.8123},
+    {"frame_index": 29, "timestamp_seconds": 0.9666666667, "score": 0.7000}
   ],
   "scan_complete": true,
   "sampling_interval_seconds": 0.5,
-  "sampled_frames": 2,
+  "sampled_frames": 3,
   "decoded_frames": 30,
-  "valid_face_frames": 2,
+  "valid_face_frames": 3,
   "candidate_count": 3,
   "candidate_limit_hit": false,
   "duration_seconds": 1.0,

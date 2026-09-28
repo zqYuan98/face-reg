@@ -4,12 +4,13 @@
 
 新算法接入请优先阅读 [完整 API 联调文档](FaceFeatureExtractorAPI/docs/TASK-2026-001-API-DEBUGGING.md)
 和 [安全边界说明](FaceFeatureExtractorAPI/docs/ALGORITHM_API_INTEGRATION.md)。公司内网 API 为
-`http://<server-37>:18002`，测试台为 `http://<server-37>:18003`；旧 `18001` 保留回退，不供新开发接入。
+`http://<server-37>:18002`，测试台为 `http://<server-37>:18003`；历史 `18001` 未改动，不供新开发接入。
 
-2026-09-28 候选包含六个 v2：portrait、witness、images、video/quick、video/full、
+2026-09-28 已部署 API 2.1.0，包含六个 v2：portrait、witness、images、video/quick、video/full、
 video/presence。新增“视频目标出现”与旧 quick/full 的持续身份一致性不同，首版未标定，
-所有 presence 身份结果均为 `INCONCLUSIVE/found=null`，不保证活体或反翻拍。上线 commit
-和目标服务器验证证据待发布负责人补齐；不要因本节存在推定候选已上线。
+所有 presence 身份结果均为 `INCONCLUSIVE/found=null`，不保证活体或反翻拍。
+算法提交 `1e6b57b5b1dd32693497c21a0ce0039b4f77fc1b`；
+[发布验收和回滚记录](FaceFeatureExtractorAPI/docs/reports/2026-09-28-presence-release-validation.md)。
 
 `GET /health/live` 只查存活；`GET /health/ready`（`/health` 别名）按能力检查模型；
 `GET /openapi.json` 导入契约。legacy `/api/detect_face` 按开关注册，
