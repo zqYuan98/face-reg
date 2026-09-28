@@ -5,7 +5,10 @@
 2026-09-28 服务器 37 的 `18002/18003` 已更新且均 healthy，发布代码提交为
 `d78e723b8fb8737b09e12859e57aa9856a640db6`。本轮镜像、端口、发布验证和回滚证据见
 [发布验收记录](reports/2026-09-28-presence-best-effort-release.md)；历史 `18001` 完全未改动。
-当前 presence 仍默认未配置阈值；上线不等于生产精度已验证。本轮本地测试及人工标签/阈值边界另见
+37 的 presence 运行配置随后已按用户指定设为试用阈值 `0.5`，返回 `CONFIGURED_UNVALIDATED`，
+业务仍需人工 REVIEW。此次仅改 presence 运行配置，代码版本、源码默认配置、images/quick/full、
+18001 和测试台不变；配置验证与回退见 [0.5 试用阈值记录](reports/2026-09-28-presence-threshold-050.md)。
+上线或指定试用阈值不等于生产精度已验证。本轮本地测试及人工标签/阈值边界另见
 [2.2.0 尽力比对本地验证记录](reports/2026-09-28-presence-best-effort-validation.md)。
 
 | 项目 | 值 |
@@ -13,6 +16,8 @@
 | 文档 / 源码 API 版本 | `2.2.0`（已部署） |
 | 服务器 37 已部署 API 版本 | `2.2.0`（发布代码 `d78e723`） |
 | 配置版本 | `2026-08-24-v1` |
+| 37 当前 presence 运行配置 | `mode=configured`、`threshold=0.5`；`CONFIGURED_UNVALIDATED`，业务仍 REVIEW |
+| 37 当前 presence 阈值 ID | `TASK-2026-001-presence-trial-050-20260928` |
 | 文档更新时间 | `2026-09-28`（区分功能上线与未完成的现场精度验证） |
 | 特征契约 | `recognizer_v1_1024`，固定 `1024` 维 |
 | 测试环境 Base URL | `http://<server-37>:18002` |
@@ -26,7 +31,8 @@
 > 2.2.0 presence 独立使用服务端 `configured` / `uncalibrated` 配置：前者返回
 > `CONFIGURED_UNVALIDATED` 并可产生三态结果，后者仍计算证据但返回
 > `THRESHOLD_NOT_CONFIGURED + INCONCLUSIVE/null`。本接口不要求签名校准包或活体门禁，
-> 试用结果也不能自动放行业务。服务器 37 已支持新契约，当前部署仍使用 `uncalibrated`，不提供生产判定阈值。
+> 试用结果也不能自动放行业务。服务器 37 当前为 `configured + threshold=0.5`；源码默认仍为
+> `uncalibrated`，不得将用户指定的试用阈值称为已验证的生产判定阈值。
 
 ## 1. 五分钟开始联调
 
@@ -627,7 +633,7 @@ curl -sS --max-time 660 -X POST \
 服务端 `video_presence.mode=configured` 要求显式、有限的 `-1 < threshold < 1` 和非空
 `threshold_id`（最长 128 字符），返回 `CONFIGURED_UNVALIDATED`；运行时生成并返回绑定
 模型、匹配器、采样/质量配置的 `policy_fingerprint`。它不是签名校准证书，不能写成 ACTIVE。
-默认 `uncalibrated` 的 threshold/threshold_id 均为 null，仍提特征、比对并返回证据，
+源码默认 `uncalibrated` 的 threshold/threshold_id 均为 null，仍提特征、比对并返回证据，
 不伪造任何默认身份阈值。仅当 `success=true`、`scan_complete=true` 且
 `comparison_status=COMPARED` 时，未配置阈值的主标题才是“比对已完成，尚未配置判定阈值”。
 失败、参考无效、扫描未完成、无可比脸有更高显示优先级，必须显示对应原因；不能无条件宣称已完成，
@@ -639,7 +645,8 @@ curl -sS --max-time 660 -X POST \
 不是热更新，也不是请求参数。下面仅是完整配置中的片段，不能单独充当完整配置文件；
 模型等相对路径按 YAML 所在目录解析，另存配置时须保留正确路径与其他能力的既有设置。
 
-默认服务端配置片段：
+源码默认配置片段（不是当前 37 运行配置；当前实例为 `configured`、`threshold: 0.5`、
+`threshold_id: TASK-2026-001-presence-trial-050-20260928`）：
 
 ```yaml
 video_presence:
@@ -657,13 +664,14 @@ video_presence:
 
 仅在合成联调环境中验证 configured 路径时，可以将上面三项改为
 `mode: configured`、`threshold: 0.35`、`threshold_id: synthetic-only-example`；这是
-synthetic-only 测试配置，不是现场推荐或可直接上线的阈值。实际试用点必须由独立人工标签和
-业务风险目标确定，并保留版本/策略指纹。默认配置没有 `0.7` 或其他隐含身份阈值。
+synthetic-only 测试配置，不是现场推荐或可直接上线的阈值。用于生产的阈值必须经过独立人工标签和
+业务风险目标验证，并保留版本/策略指纹；37 当前用户指定的 `0.5` 仍仅为未验证试用点。
+源码默认配置没有 `0.7` 或其他隐含身份阈值。
 
 以下三份完整 DTO 均为 synthetic-only 结构示例；模型版本、指纹、分数、耗时均为合成值，
 不是线上实测、真实阈值推荐或生产精度证据。示例配置阈值 `0.35` 仅验证三态，禁止直接部署到现场。
 
-未配置阈值，但完成了数值比对：
+通用未配置响应示例（不是当前 37 实例）：未配置阈值，但完成了数值比对。
 
 ```json
 {

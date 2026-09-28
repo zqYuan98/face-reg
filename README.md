@@ -11,9 +11,13 @@
 发布代码提交为 `d78e723b8fb8737b09e12859e57aa9856a640db6`；
 [本轮发布验收和回滚记录](FaceFeatureExtractorAPI/docs/reports/2026-09-28-presence-best-effort-release.md)。
 
+随后按用户指定，37 的 presence 运行配置已设为试用阈值 `0.5`（`configured`），返回
+`CONFIGURED_UNVALIDATED`，业务仍需人工 REVIEW；代码版本不变，images/quick/full、18001 和测试台未改动。
+配置 ID、验证与配置回退见 [0.5 试用阈值记录](FaceFeatureExtractorAPI/docs/reports/2026-09-28-presence-threshold-050.md)。
+
 当前源码、联调文档与已部署服务均为 API 2.2.0。presence 将低质量作为软提示并按预算补采，
 可用特征继续比较；服务端显式试用阈值配置支持 `FOUND/true`、`NOT_FOUND_IN_SCAN/false`、
-`INCONCLUSIVE/null`，返回 `CONFIGURED_UNVALIDATED`。默认无阈值仍计算证据但为
+`INCONCLUSIVE/null`，返回 `CONFIGURED_UNVALIDATED`。源码默认未配置阈值时仍计算证据但为
 `THRESHOLD_NOT_CONFIGURED + INCONCLUSIVE/null`，请求不能自带阈值。扫描不完整或无可比脸
 不能作肯定/否定结论，试用结果保持业务 REVIEW，不输出自动 PASS。
 这与旧 quick/full 的持续一致性及签名 calibration 独立；不要求活体门禁，也无活体/反翻拍保证。

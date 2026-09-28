@@ -188,7 +188,10 @@
 本节对应已部署的 API 2.2.0。2026-09-28 服务器 37 的 `18002/18003` 已更新且均 healthy，
 发布代码提交为 `d78e723b8fb8737b09e12859e57aa9856a640db6`。
 本轮发布测试和回滚见 [发布验收记录](FaceFeatureExtractorAPI/docs/reports/2026-09-28-presence-best-effort-release.md)；
-上线不代表现场阈值或生产识别精度已验证，presence 仍使用默认无阈值配置。
+37 的 presence 运行配置随后已按用户指定设为试用阈值 `0.5`（`configured`），返回
+`CONFIGURED_UNVALIDATED`，业务仍需人工 REVIEW；不表示生产精度已验证。
+本次只改 presence 运行配置，源码默认仍无阈值，images/quick/full、18001 和测试台未改动；
+详见 [0.5 试用阈值记录](FaceFeatureExtractorAPI/docs/reports/2026-09-28-presence-threshold-050.md)。
 内网 Base URL：`http://<server-37>:18002`；人工测试台：`http://<server-37>:18003`。
 新开发不要调用历史服务 `18001`，本次未改动该服务。算法不访问业务库、不保存合同状态或持久化客户媒体。
 
@@ -214,7 +217,7 @@
 先检查 HTTP；200 不等于身份通过。旧图片/quick/full 看标定后的 suggestion；presence 的
 匹配结论只读 `decision/found`，不把 `success` 或分数当同一人结论。2.2.0 presence 服务端显式
 `configured` 阈值与 ID 返回 `CONFIGURED_UNVALIDATED`，可产生 `FOUND/true`、
-`NOT_FOUND_IN_SCAN/false`、`INCONCLUSIVE/null`；默认无阈值仍计算证据，附
+`NOT_FOUND_IN_SCAN/false`、`INCONCLUSIVE/null`；使用源码默认无阈值配置时仍计算证据，附
 `THRESHOLD_NOT_CONFIGURED`，判定为 INCONCLUSIVE/null。没有默认身份阈值，请求不接受调用方阈值。
 扫描不完整、参考无效、无可比脸或全局失败都不给肯定/否定结果；低于阈值但有候选截断/局部失败
 也为 null。试用 `suggestion=REVIEW` 不能遮盖 FOUND，更不能转成业务自动 PASS。

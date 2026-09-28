@@ -8,7 +8,10 @@
 服务器 37 的 `http://<server-37>:18002` 与测试台 `http://<server-37>:18003` 已更新且均 healthy，
 发布代码提交为 `d78e723b8fb8737b09e12859e57aa9856a640db6`，历史 `18001` 未改动。
 部署证据和当前回滚入口见 [本轮发布验收记录](reports/2026-09-28-presence-best-effort-release.md)。
-presence 仍默认未配置阈值；功能上线不表示人工标签、生产阈值或识别精度已验收。
+37 随后按用户指定仅将 presence 运行配置设为 `configured`、试用阈值 `0.5`，返回
+`CONFIGURED_UNVALIDATED`，业务仍需人工 REVIEW；源码默认无阈值、代码版本、images/quick/full、
+18001 和测试台均不变。配置 ID、验证和回退见 [0.5 试用阈值记录](reports/2026-09-28-presence-threshold-050.md)。
+功能上线或指定试用阈值不表示人工标签、生产阈值或识别精度已验收。
 
 ## 1. 边界与责任
 
@@ -93,7 +96,7 @@ processing_time_ms,trace_id`。新增 `mode=presence`、`decision`、可空 `fou
 `NOT_FOUND_IN_SCAN/false`。其余为 `INCONCLUSIVE/null`，尤其扫描不完整时即便已有高分也不能
 给出肯定/否定结论。普通解码/推理失败的算法 DTO 可保留 partial 数字证据，并为
 `comparison_status=FAILED`；硬截止/执行器超时仍返回 HTTP 504 `ApiErrorResponse`，不保证部分证据。
-无可比脸不等于未出现；有限扫描未匹配也不证明全片绝对不存在。默认 `uncalibrated` 仍提取
+无可比脸不等于未出现；有限扫描未匹配也不证明全片绝对不存在。源码默认 `uncalibrated` 仍提取
 1024 维特征并比对，返回 `THRESHOLD_NOT_CONFIGURED` 和证据，不要求签名校准或活体后才比较。
 `suggestion` 保留 REVIEW（参考目标无效可 RECAPTURE），不允许业务 PASS。
 
@@ -164,13 +167,15 @@ artifact 模式必须由业务组合工厂从独立信任源构造只读 `Truste
 store、签名无效或模型/策略绑定不符时，启动阶段预建对应 image/video runtime 失败，
 readiness 返回 503；请求侧统一为安全的 `CALIBRATION_REQUIRED`，不泄露路径或签名细节。
 
-presence 使用独立服务端 `video_presence.mode`：默认 `uncalibrated` 的 `threshold/threshold_id`
+presence 使用独立服务端 `video_presence.mode`：源码默认 `uncalibrated` 的 `threshold/threshold_id`
 必须为 null；`configured` 必须显式配置有限 `-1 < threshold < 1` 和非空 `threshold_id`，
 HTTP 请求不接受调用方阈值。返回 `CONFIGURED_UNVALIDATED`、阈值/ID 和运行时生成的
 `policy_fingerprint`，不能自称 ACTIVE 或生产精度已验证，也不新增签名证书系统。
 默认工厂在启动时加载 `config/algorithm.yaml`（源码运行），可用 `FACE_ALGO_CONFIG` 指向
 受控完整配置；变更后重启候选服务，不支持热更新。相对模型路径按该 YAML 所在目录解析。
-没有推荐的默认身份阈值；文档里的数值阈值仅为 synthetic-only，不能用于真实上线。
+没有推荐的默认身份阈值；标明 synthetic-only 的数值示例不能用于真实上线。
+37 当前运行实例使用用户指定试用点 `0.5`，阈值 ID 为 `TASK-2026-001-presence-trial-050-20260928`，
+不代表经过人工标签和风险目标验证的生产阈值。
 
 视频最高分是 L2 归一化 1024 维特征点积，不是出现概率、真值或准确率。先按人员划分
 tuning/evaluation，再由业务独立看完整视频标注 present/absent/uncertain/unknown；同名只代表

@@ -8,7 +8,10 @@
 `http://<server-37>:18002` 与测试台 `http://<server-37>:18003` 已更新且均 healthy，
 发布代码提交为 `d78e723b8fb8737b09e12859e57aa9856a640db6`；发布证据、浏览器验收状态与回滚入口见
 [本轮发布验收记录](../../docs/reports/2026-09-28-presence-best-effort-release.md)。
-当前 presence 仍默认未配置阈值，显示数值证据不等于生产精度或目标出现结论已经验收。
+37 的 presence 上游运行配置随后已按用户指定设为试用阈值 `0.5`（`configured`），返回
+`CONFIGURED_UNVALIDATED`，业务仍需人工 REVIEW；显示匹配结论不等于生产精度已经验收。
+本次未改测试台、18001 或 images/quick/full，源码默认无阈值不变；详见
+[0.5 试用阈值记录](../../docs/reports/2026-09-28-presence-threshold-050.md)。
 完整请求响应见 [API 联调文档](../../docs/TASK-2026-001-API-DEBUGGING.md)。
 
 ## 配置
@@ -80,7 +83,7 @@ python3 server.py
   也不能把 FOUND 渲染成业务自动 PASS。
 - 服务端 `configured` 返回 `CONFIGURED_UNVALIDATED`、显式阈值/ID 与策略指纹；页面显示
   “试用阈值（精度未验证）”，不能把最高分格式化成准确概率，也不接受浏览器指定阈值后重算结果。
-  默认 `uncalibrated` 仍显示已算证据并附 `THRESHOLD_NOT_CONFIGURED`；仅在 `success=true`、
+  使用源码默认 `uncalibrated` 的实例仍显示已算证据并附 `THRESHOLD_NOT_CONFIGURED`；仅在 `success=true`、
   `scan_complete=true`、`comparison_status=COMPARED` 时主显示为“比对已完成，尚未配置判定阈值”。
   失败、参考无效、扫描未完成、无可比脸的标题优先，不能无条件显示已完成；不提示缺少有效签名或活体失败。
 - 扫描不完整/全局失败/无可比脸/参考无效只能是 INCONCLUSIVE/null，已有 partial 证据可保留。

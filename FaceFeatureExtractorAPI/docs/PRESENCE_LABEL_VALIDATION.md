@@ -2,8 +2,11 @@
 
 适用已部署 API `2.2.0`。2026-09-28 服务器 37 的 `18002/18003` 已更新且均 healthy，
 发布代码提交为 `d78e723b8fb8737b09e12859e57aa9856a640db6`；部署证据与回滚入口见
-[本轮发布验收记录](reports/2026-09-28-presence-best-effort-release.md)。当前仍默认未配置阈值，
-本文提供离线标注/汇总方法；功能上线不代表人工标签已齐、生产阈值已选择或识别精度已验证。
+[本轮发布验收记录](reports/2026-09-28-presence-best-effort-release.md)。37 随后按用户指定仅将
+presence 运行配置设为试用阈值 `0.5`（`configured`），返回 `CONFIGURED_UNVALIDATED`，业务仍需人工 REVIEW；
+源码默认无阈值、代码版本、images/quick/full、18001 和测试台不变。详见
+[0.5 试用阈值记录](reports/2026-09-28-presence-threshold-050.md)。
+本文提供离线标注/汇总方法；用户指定试用点不代表人工标签已齐、生产阈值已验证或识别精度已验证。
 完整响应契约见 [API 联调文档](TASK-2026-001-API-DEBUGGING.md)。
 
 ## 1. 先分集，再独立标注
