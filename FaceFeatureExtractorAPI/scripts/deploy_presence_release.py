@@ -27,9 +27,10 @@ API = 'face-algorithm-task-2026-001'
 CONSOLE = 'face-algorithm-visual-console-task-2026-001'
 PROTECTED = 'face-algorithm'
 PROTECTED_ID = 'd6773816222a2200ee76b0b23f35af51786cc64a46147e04933ff7d3281ece7f'
-OLD_REVISION = '872c969'
-OLD_SOURCE = ROOT / 'source-872c9694e1589f00' / 'FaceFeatureExtractorAPI'
-OLD_CONFIG = ROOT / 'runtime' / 'algorithm-872c969.yaml'
+OLD_COMMIT = '1e6b57b5b1dd32693497c21a0ce0039b4f77fc1b'
+OLD_REVISION = OLD_COMMIT[:12]
+OLD_SOURCE = ROOT / ('source-' + OLD_COMMIT) / 'FaceFeatureExtractorAPI'
+OLD_CONFIG = ROOT / 'runtime' / ('algorithm-' + OLD_COMMIT + '.yaml')
 CHECKPOINT = ROOT / 'runtime/checkpoints/modnet_photographic_portrait_matting.ckpt'
 REVISION_LABEL = 'org.opencontainers.image.revision'
 OWNER_LABEL = 'face-algorithm.release-owner'
@@ -42,7 +43,10 @@ SAFE_ENV = {'FACE_ALGO_LEGACY_TOKEN', 'FACE_ALGO_CORS_ORIGINS'}
 PRESENCE_BLOCK = '''
 video_presence:
   mode: uncalibrated
+  threshold: null
+  threshold_id: null
   sample_interval_seconds: 0.5
+  max_supplemental_frames: 2
   max_analyzed_frames: 1200
   max_face_candidates: 5
   max_evidence_frames: 5
@@ -121,9 +125,42 @@ def extract_archive(archive: Path, target: Path, commit: str) -> None:
 
 
 def merged_config(old: str) -> str:
-    if re.search(r'^video_presence\s*:', old, flags=re.MULTILINE):
+    """Patch only new scalar defaults in the approved plain YAML section.
+
+    Keep every existing value/text intact. Nonstandard or ambiguous section
+    syntax is refused rather than guessing without a host YAML dependency.
+    The build's containerized YAML validation remains the semantic authority.
+    """
+    lines = old.splitlines(keepends=True)
+    headers = [index for index, line in enumerate(lines)
+               if re.match(r'''^(?:video_presence|['"]video_presence['"])[ \t]*:''', line)]
+    if not headers:
+        return old.rstrip('\r\n') + '\n' + PRESENCE_BLOCK
+    require(len(headers) == 1, 'Ambiguous duplicate video_presence section')
+    index = headers[0]
+    require(re.fullmatch(r'video_presence:[ \t]*(?:#[^\r\n]*)?(?:\r?\n)?', lines[index]) is not None,
+            'Unsupported video_presence section syntax')
+    keys = set()
+    for line in lines[index + 1:]:
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        if not line[0].isspace():
+            break
+        field = re.fullmatch(r'  ([a-z_][a-z_0-9]*):(?:[ \t]+[^\r\n]*)?(?:\r?\n)?', line)
+        require(field is not None, 'Unsupported video_presence field syntax')
+        key = field.group(1)
+        require(key not in keys, 'Ambiguous duplicate video_presence field')
+        keys.add(key)
+    newline = '\r\n' if lines[index].endswith('\r\n') else '\n'
+    additions = ''.join('  ' + key + ': ' + value + newline for key, value in (
+        ('threshold', 'null'), ('threshold_id', 'null'), ('max_supplemental_frames', '2'),
+    ) if key not in keys)
+    if not additions:
         return old
-    return old.rstrip('\r\n') + '\n' + PRESENCE_BLOCK
+    if not lines[index].endswith('\n'):
+        lines[index] += newline
+    lines.insert(index + 1, additions)
+    return ''.join(lines)
 
 
 def port_free(host: str, port: int) -> None:
@@ -170,6 +207,21 @@ def wait_http(base: str, *, presence: bool, timeout: float = 180) -> None:
                     schema = json.load(response)
                 require('/api/v2/verify/video/presence' in schema['paths'],
                         'New presence route is absent')
+                require(schema['info']['version'] == '2.2.0', 'Expected API 2.2.0 is absent')
+                response = schema['paths']['/api/v2/verify/video/presence']['post']['responses']['200']
+                require(response['content']['application/json']['schema']['$ref'] ==
+                        '#/components/schemas/VideoPresenceResult', 'Presence response contract differs')
+                models = schema['components']['schemas']
+                properties = models['VideoPresenceResult']['properties']
+                require({
+                    'comparison_status', 'threshold', 'threshold_id', 'policy_fingerprint',
+                    'sampling_strategy', 'requested_sampling_interval_seconds', 'base_frames',
+                    'supplemental_frames', 'compared_candidates', 'failed_candidates', 'quality_warnings',
+                } <= properties.keys(), 'Best-effort presence fields are absent')
+                require(set(properties['calibration_status']['enum']) ==
+                        {'UNCALIBRATED', 'CONFIGURED_UNVALIDATED'}, 'Presence trial contract differs')
+                require({'candidate_index', 'quality_warnings'} <=
+                        models['PresenceEvidenceFrame']['properties'].keys(), 'Presence evidence fields are absent')
             return
         except (OSError, ValueError, KeyError, ReleaseError):
             time.sleep(2)
@@ -247,7 +299,7 @@ class Release:
                '--mount', f'type=bind,src={OLD_CONFIG},dst=/old.yaml,readonly',
                '--mount', f'type=bind,src={self.config},dst=/new.yaml,readonly',
                '--mount', f'type=bind,src={self.source / "config/algorithm.yaml"},dst=/source.yaml,readonly',
-               'face-algorithm:task-2026-001-872c969', 'python', '-c', validation)
+               'face-algorithm:task-2026-001-' + OLD_REVISION, 'python', '-c', validation)
         shutil.copyfile(OLD_SOURCE / 'Dockerfile.offline', self.source / 'Dockerfile.offline')
         print('Building pinned API image (offline wheelhouse)')
         docker('build', '--label', f'{REVISION_LABEL}={self.commit}',
