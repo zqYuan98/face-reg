@@ -161,7 +161,7 @@ export const CAPABILITIES = Object.freeze([
   freezeCapability({
     id: "verify-video-presence",
     label: "视频目标出现",
-    description: "扫描目标是否曾出现；首版未标定，仅提供候选证据，不作身份结论",
+    description: "按服务端试用阈值判断本次扫描是否匹配，提供分数、质量提示与候选证据",
     endpoint: "/api/v2/verify/video/presence",
     method: "POST",
     timeoutMs: 600_000,
@@ -246,6 +246,7 @@ export const REASON_LABELS = Object.freeze({
   FEATURE_FAILED: "人脸特征提取失败",
   FEATURE_VERSION_MISMATCH: "特征版本不匹配",
   THRESHOLD_UNCALIBRATED: "身份阈值尚未标定",
+  THRESHOLD_NOT_CONFIGURED: "尚未配置判定阈值",
   MATTING_FAILED: "人像分割失败",
   MATTING_LOW_CONFIDENCE: "人像分割可信度不足",
   SUBJECT_CROPPED: "人物主体被裁切",
@@ -471,8 +472,10 @@ function hasUncalibratedSemantics(result, reasonCodes) {
 }
 
 /** Returns a fail-closed, presentation-ready interpretation of an API result. */
-export function getSuggestionView(result) {
-  if (result?.mode === "presence") return getPresenceView(result);
+export function getSuggestionView(result, capabilityId) {
+  if (result?.mode === "presence" || getCapability(capabilityId)?.responseKind === "video-presence") {
+    return getPresenceView(result && typeof result === "object" ? result : {});
+  }
   if (!result || typeof result !== "object") {
     return Object.freeze({
       key: "unknown",
@@ -567,45 +570,188 @@ export function getSuggestionView(result) {
   });
 }
 
-/** V1 presence is uncalibrated only; future decisions are invalid, not forward-compatible. */
-function getPresenceView(result) {
-  const reasons = normalizedReasonCodes(result.reason_codes);
-  const notices = ["目标出现阈值尚未标定，任何高分都不能作为身份通过依据。",
-    "本接口未评估活体或反翻拍，不能据此认定真人在场。"];
-  const requiredFields = ["model_versions", "config_version", "processing_time_ms", "trace_id", "best_score",
-    "best_timestamp_seconds", "evidence_frames", "scan_complete", "sampling_interval_seconds", "sampled_frames",
-    "decoded_frames", "valid_face_frames", "candidate_count", "candidate_limit_hit", "duration_seconds", "timestamp_source"];
-  const validContract = result.success === true && result.feature_dimension === EXPECTED_FEATURE_DIMENSION
-    && result.feature_version === "recognizer_v1_1024" && result.matcher_version === "l2_dot_v1"
-    && result.calibration_status === "UNCALIBRATED" && result.decision === "INCONCLUSIVE" && result.found === null
-    && result.liveness_evaluated === false && ["REVIEW", "RECAPTURE"].includes(result.suggestion)
-    && reasons.includes("CALIBRATION_REQUIRED") && reasons.includes("THRESHOLD_UNCALIBRATED")
-    && requiredFields.every((field) => Object.hasOwn(result, field) && result[field] !== undefined);
-  if (!validContract) notices.push("响应不符合 presence 首版契约或请求未完成，结果不可用；请先检查 HTTP 状态并人工复核。");
-  return Object.freeze({
-    key: "inconclusive",
-    label: validContract ? "无法确定目标是否出现" : "结果不可用，需人工复核",
-    message: "本版不支持已标定身份结论；未检测到可用人脸也不等于目标未出现。",
-    tone: validContract ? "warning" : "danger", notices: Object.freeze(notices), canTreatAsPass: false,
-  });
+const PRESENCE_QUALITY_CODES = new Set(["TOO_DARK", "TOO_BRIGHT", "TOO_BLURRY", "BAD_POSE", "FACE_TOO_SMALL", "FACE_CROPPED"]);
+const finiteNumber = (value) => typeof value === "number" && Number.isFinite(value);
+const count = (value) => Number.isSafeInteger(value) && value >= 0;
+const score = (value) => finiteNumber(value) && value >= -1 && value <= 1;
+const nonemptyText = (value) => typeof value === "string" && value.trim().length > 0;
+const reasonArray = (value) => Array.isArray(value) && value.every(nonemptyText);
+const qualityArray = (value) => Array.isArray(value) && value.length <= 6
+  && new Set(value).size === value.length && value.every((code) => PRESENCE_QUALITY_CODES.has(code));
+const fingerprint = (value) => typeof value === "string" && /^[a-f\d]{64}$/.test(value);
+
+function validPresenceObservations(result, modern) {
+  if (result.mode !== "presence" || typeof result.success !== "boolean" || result.feature_dimension !== EXPECTED_FEATURE_DIMENSION
+    || result.feature_version !== "recognizer_v1_1024" || result.matcher_version !== "l2_dot_v1"
+    || result.liveness_evaluated !== false || !["REVIEW", "RECAPTURE"].includes(result.suggestion)
+    || (!result.success && result.suggestion !== "REVIEW")
+    || !reasonArray(result.reason_codes) || !result.model_versions || typeof result.model_versions !== "object"
+    || Array.isArray(result.model_versions) || !nonemptyText(result.config_version) || !nonemptyText(result.trace_id)
+    || !finiteNumber(result.processing_time_ms) || result.processing_time_ms < 0
+    || typeof result.scan_complete !== "boolean" || typeof result.candidate_limit_hit !== "boolean"
+    || !finiteNumber(result.sampling_interval_seconds) || result.sampling_interval_seconds <= 0
+    || !["pts", "estimated", "mixed", "unknown"].includes(result.timestamp_source)
+    || !(result.duration_seconds === null || (finiteNumber(result.duration_seconds) && result.duration_seconds > 0))) return false;
+  if (!["sampled_frames", "decoded_frames", "valid_face_frames", "candidate_count"].every((field) => count(result[field]))) return false;
+  if (result.valid_face_frames > result.sampled_frames || result.sampled_frames > result.decoded_frames
+    || result.valid_face_frames > result.candidate_count || result.candidate_count > result.sampled_frames * 5
+    || (result.scan_complete && (!result.success || result.sampled_frames === 0))
+    || result.candidate_limit_hit !== result.reason_codes.includes("CANDIDATE_LIMIT_REACHED")) return false;
+  const evidence = result.evidence_frames;
+  if (!Array.isArray(evidence) || evidence.length > 5 || evidence.length > result.valid_face_frames) return false;
+  if ((result.best_score === null) !== (result.best_timestamp_seconds === null)
+    || (result.best_score !== null && (!score(result.best_score) || !finiteNumber(result.best_timestamp_seconds) || result.best_timestamp_seconds < 0))
+    || Boolean(evidence.length) !== (result.best_score !== null)
+    || Boolean(evidence.length) !== Boolean(result.valid_face_frames)) return false;
+  if (new Set(evidence.map((frame) => frame?.frame_index)).size !== evidence.length) return false;
+  for (const frame of evidence) {
+    if (!frame || !count(frame.frame_index) || frame.frame_index >= result.decoded_frames || !score(frame.score)
+      || !finiteNumber(frame.timestamp_seconds) || frame.timestamp_seconds < 0
+      || (result.duration_seconds !== null && frame.timestamp_seconds > result.duration_seconds)) return false;
+    if (modern && (!count(frame.candidate_index) || frame.candidate_index > 4 || !qualityArray(frame.quality_warnings)
+      || !frame.quality_warnings.every((code) => result.quality_warnings.includes(code)))) return false;
+  }
+  const ordered = [...evidence].sort((a, b) => b.score - a.score
+    || (modern ? a.quality_warnings.length - b.quality_warnings.length : 0)
+    || a.timestamp_seconds - b.timestamp_seconds || a.frame_index - b.frame_index);
+  if (evidence.length && (result.best_score !== ordered[0].score || result.best_timestamp_seconds !== ordered[0].timestamp_seconds)) return false;
+  return !modern || ordered.every((frame, index) => frame === evidence[index]);
 }
 
-/** Render only bounded, numeric evidence cells; never interpret returned HTML. */
-export function renderEvidenceFrames(body, result) {
+function validModernPresence(result) {
+  if (!qualityArray(result.quality_warnings) || !validPresenceObservations(result, true)
+    || !["COMPARED", "NO_COMPARABLE_FACE", "INVALID_REFERENCE", "FAILED"].includes(result.comparison_status)
+    || result.sampling_strategy !== "presence_adaptive_v1"
+    || !finiteNumber(result.requested_sampling_interval_seconds) || result.requested_sampling_interval_seconds <= 0
+    || result.sampling_interval_seconds < result.requested_sampling_interval_seconds || !fingerprint(result.policy_fingerprint)
+    || !["base_frames", "supplemental_frames", "compared_candidates", "failed_candidates"].every((field) => count(result[field]))
+    || result.base_frames + result.supplemental_frames !== result.sampled_frames
+    || result.compared_candidates + result.failed_candidates > result.candidate_count
+    || (result.success && result.compared_candidates + result.failed_candidates !== result.candidate_count)
+    || (result.suggestion === "RECAPTURE" && result.comparison_status !== "INVALID_REFERENCE")
+    || result.valid_face_frames > result.compared_candidates
+    || Boolean(result.valid_face_frames) !== Boolean(result.compared_candidates)) return false;
+  if ((result.comparison_status === "FAILED") !== (result.success === false)
+    || (result.comparison_status === "COMPARED") !== (result.success && result.compared_candidates > 0)
+    || (result.comparison_status === "INVALID_REFERENCE" && (result.sampled_frames !== 0 || result.compared_candidates !== 0))) return false;
+  const configured = result.calibration_status === "CONFIGURED_UNVALIDATED";
+  if (configured) {
+    if (!finiteNumber(result.threshold) || result.threshold <= -1 || result.threshold >= 1
+      || !nonemptyText(result.threshold_id) || result.threshold_id.length > 128
+      || result.reason_codes.includes("THRESHOLD_NOT_CONFIGURED")) return false;
+  } else if (result.calibration_status !== "UNCALIBRATED" || result.threshold !== null || result.threshold_id !== null
+    || !result.reason_codes.includes("THRESHOLD_NOT_CONFIGURED")) return false;
+  if (result.decision === "INCONCLUSIVE") return result.found === null && (!configured || !result.success
+    || !result.scan_complete || result.comparison_status !== "COMPARED"
+    || (result.best_score < result.threshold && (result.candidate_limit_hit || result.failed_candidates > 0)));
+  if (!configured || !result.success || !result.scan_complete || result.comparison_status !== "COMPARED") return false;
+  if (result.decision === "FOUND") return result.found === true && result.best_score >= result.threshold;
+  if (result.decision === "NOT_FOUND_IN_SCAN") return result.found === false && result.best_score < result.threshold
+    && result.candidate_limit_hit === false && result.failed_candidates === 0;
+  return false;
+}
+
+/** Validate the service decision, never infer one from a locally compared score. */
+function getPresenceView(result) {
+  const modern = Object.hasOwn(result, "comparison_status");
+  const reasons = normalizedReasonCodes(result.reason_codes);
+  const legacy = !modern && !["threshold", "threshold_id", "policy_fingerprint", "compared_candidates", "quality_warnings",
+    "sampling_strategy", "base_frames", "supplemental_frames", "failed_candidates", "requested_sampling_interval_seconds"]
+    .some((field) => Object.hasOwn(result, field));
+  const validContract = modern ? validModernPresence(result)
+    : legacy && validPresenceObservations(result, false) && result.success === true
+      && result.calibration_status === "UNCALIBRATED" && result.decision === "INCONCLUSIVE" && result.found === null
+      && reasons.includes("CALIBRATION_REQUIRED") && reasons.includes("THRESHOLD_UNCALIBRATED");
+  const decision = validContract ? result.decision : "UNAVAILABLE";
+  let label = "结果不可用，需人工复核";
+  let message = "响应不符合 presence 契约，请检查 HTTP 状态和后端响应。";
+  let key = "inconclusive";
+  let tone = validContract ? "warning" : "danger";
+  const notices = [];
+  if (validContract) {
+    message = "结果仅限本次实际扫描；抽样未匹配不代表整段视频从未出现目标。";
+    if (decision === "FOUND") {
+      label = "本次扫描检测到匹配";
+      key = "found";
+      tone = "success";
+    } else if (decision === "NOT_FOUND_IN_SCAN") {
+      label = "本次扫描未检测到匹配";
+      key = "not-found";
+    } else if (!modern) {
+      label = "无法确定目标是否出现";
+      message = "旧版未标定响应，仅展示历史候选证据，不作目标出现结论。";
+    } else if (result.comparison_status === "FAILED") {
+      label = "处理失败，无法完成判断";
+    } else if (result.comparison_status === "INVALID_REFERENCE") {
+      label = "参考目标不可用，无法比较";
+    } else if (!result.scan_complete) {
+      label = "扫描未完成，无法有效判断";
+    } else if (result.comparison_status === "NO_COMPARABLE_FACE") {
+      label = "未获得可比人脸，无法判断";
+    } else if (result.calibration_status === "UNCALIBRATED") {
+      label = "比对已完成，尚未配置判定阈值";
+    } else {
+      label = "证据不足，无法确定目标是否匹配";
+    }
+    notices.push(result.suggestion === "RECAPTURE" ? "业务建议：重新采集。" : "业务建议：人工复核（REVIEW），不自动放行。");
+    if (result.calibration_status === "CONFIGURED_UNVALIDATED") notices.push("当前为试用阈值，识别精度尚未验证。");
+  }
+  return Object.freeze({ key, decision, validContract, legacy: !modern, label, message, tone,
+    notices: Object.freeze(notices), canTreatAsPass: false });
+}
+
+const evidenceRenderTokens = new WeakMap();
+
+/** Render bounded text and local seek actions; reset invalidates detached buttons too. */
+export function renderEvidenceFrames(body, result, { onSeek } = {}) {
   if (!body) return;
+  const token = {};
+  evidenceRenderTokens.set(body, token);
   body.replaceChildren();
   const frames = Array.isArray(result?.evidence_frames) ? result.evidence_frames : [];
   const safeFrames = frames.filter((frame) => frame && Number.isInteger(frame.frame_index) && frame.frame_index >= 0
     && typeof frame.timestamp_seconds === "number" && Number.isFinite(frame.timestamp_seconds) && frame.timestamp_seconds >= 0
-    && typeof frame.score === "number" && Number.isFinite(frame.score)).slice(0, 5);
+    && score(frame.score) && (!Object.hasOwn(frame, "candidate_index") || (count(frame.candidate_index) && frame.candidate_index <= 4))
+    && (!Object.hasOwn(frame, "quality_warnings") || qualityArray(frame.quality_warnings))).slice(0, 5);
   for (const frame of safeFrames) {
     const row = body.ownerDocument.createElement("tr");
-    for (const value of [String(frame.frame_index), frame.timestamp_seconds.toFixed(3), frame.score.toFixed(4)]) {
+    const values = [String(frame.frame_index), frame.timestamp_seconds.toFixed(3), frame.score.toFixed(4),
+      count(frame.candidate_index) ? String(frame.candidate_index) : "—",
+      qualityArray(frame.quality_warnings) ? translateReasons(frame.quality_warnings).join("、") || "无" : "旧响应未提供"];
+    for (const [index, value] of values.entries()) {
       const cell = body.ownerDocument.createElement("td");
-      cell.textContent = value;
+      if (index === 1 && typeof onSeek === "function") {
+        const button = body.ownerDocument.createElement("button");
+        button.type = "button";
+        button.className = "button button--quiet";
+        button.textContent = `${value} 秒`;
+        button.setAttribute("aria-label", `跳转本地视频至 ${value} 秒`);
+        button.addEventListener("click", () => {
+          if (evidenceRenderTokens.get(body) === token) onSeek(frame.timestamp_seconds);
+        });
+        cell.append(button);
+      } else {
+        cell.textContent = value;
+      }
       row.append(cell);
     }
     body.append(row);
+  }
+}
+
+/** Seeks only an existing browser-owned preview; never assigns or fetches a media URL. */
+export function seekEvidencePreview(preview, localUrl, timestamp) {
+  if (!preview || typeof localUrl !== "string" || !localUrl.startsWith("blob:") || preview.src !== localUrl
+    || !finiteNumber(timestamp) || timestamp < 0 || !finiteNumber(preview.duration)
+    || preview.duration <= 0 || timestamp > preview.duration) return false;
+  try {
+    preview.pause();
+    preview.currentTime = timestamp;
+    preview.focus();
+    preview.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -696,7 +842,9 @@ export function buildResultDetails(capabilityId, result) {
 
   const suggestionView = capability?.responseKind === "video-presence" ? getPresenceView(result) : getSuggestionView(result);
   add("suggestion", capability?.responseKind === "video-presence" ? "身份结论" : "算法建议", suggestionView.label);
-  const reasons = translateReasons(result.reason_codes);
+  const reasons = translateReasons(capability?.responseKind === "video-presence"
+    ? normalizedReasonCodes(result.reason_codes).filter((code) => !["CALIBRATION_REQUIRED", "THRESHOLD_UNCALIBRATED"].includes(code))
+    : result.reason_codes);
   add("reasons", "原因", reasons.length ? reasons.join("、") : "无");
   const processingTime = finiteText(result.processing_time_ms, 1);
   add("processing-time", "处理耗时", processingTime === null ? null : `${processingTime} ms`);
@@ -731,26 +879,39 @@ export function buildResultDetails(capabilityId, result) {
     add("reference", "参考照片", sideText(result.reference));
     add("probe", "待核验照片", sideText(result.probe));
   } else if (capability?.responseKind === "video-presence") {
-    add("decision", "decision（首版安全展示）", "INCONCLUSIVE");
-    add("found", "found（首版安全展示）", "未确定（null）");
+    const usable = suggestionView.validContract;
+    add("decision", "本次扫描判定", usable ? result.decision : "不可用");
+    add("found", "是否检测到匹配", usable ? result.found === true ? "是（true）" : result.found === false ? "否（false）" : "未确定（null）" : "不可用");
+    add("business-suggestion", "业务建议", result.suggestion === "RECAPTURE" ? "重新采集" : "人工复核（REVIEW）");
+    add("comparison-status", "比对状态", result.comparison_status);
     add("best-score", "最佳分数（不是身份概率）", finiteText(result.best_score, 4) ?? "无可评分候选");
+    add("threshold", "本次使用的试用阈值", usable ? finiteText(result.threshold, 4) ?? "未配置" : "不可用");
+    add("threshold-id", "试用阈值标识", usable ? result.threshold_id : null);
     const timestamp = finiteText(result.best_timestamp_seconds, 3);
     add("best-timestamp", "最佳候选时间", timestamp === null ? "无可评分候选" : `${timestamp} 秒`);
     add("scan-complete", "扫描完整", result.scan_complete === true ? "是（仅指采样计划）" : "否（扫描未完整覆盖）");
     const interval = finiteText(result.sampling_interval_seconds, 3);
-    add("sampling-interval", "采样间隔", interval === null ? null : `${interval} 秒`);
+    add("sampling-interval", "实际基础采样间隔", interval === null ? null : `${interval} 秒`);
+    const requestedInterval = finiteText(result.requested_sampling_interval_seconds, 3);
+    add("requested-sampling-interval", "请求基础采样间隔", requestedInterval === null ? null : `${requestedInterval} 秒`);
+    add("sampling-strategy", "采样策略", result.sampling_strategy);
     for (const [field, key, label] of [["sampled_frames", "sampled-frames", "采样帧数"], ["decoded_frames", "decoded-frames", "解码帧数"],
-      ["valid_face_frames", "valid-face-frames", "有可评分人脸的帧数"], ["candidate_count", "candidate-count", "已评估候选数"]]) {
+      ["base_frames", "base-frames", "基础帧数"], ["supplemental_frames", "supplemental-frames", "补采帧数"],
+      ["valid_face_frames", "valid-face-frames", "有可评分人脸的帧数"], ["candidate_count", "candidate-count", "尝试候选数"],
+      ["compared_candidates", "compared-candidates", "成功比对候选数"], ["failed_candidates", "failed-candidates", "局部失败候选数"]]) {
       add(key, label, Number.isInteger(result[field]) ? result[field] : null);
     }
     add("candidate-limit", "候选预算触顶", result.candidate_limit_hit === true ? "是" : "否");
     add("timestamp-source", "时间戳来源", result.timestamp_source);
     const duration = finiteText(result.duration_seconds, 1);
     add("duration", "视频时长", duration === null ? "未知" : `${duration} 秒`);
-    add("calibration", "标定状态", result.calibration_status === "UNCALIBRATED" ? "未标定（仅供复核）" : "不可用（首版仅支持未标定）");
+    add("quality-warnings", "质量提示（不阻止比对）", qualityArray(result.quality_warnings)
+      ? translateReasons(result.quality_warnings).join("、") || "无" : suggestionView.legacy ? "旧响应未提供" : "不可用");
+    add("calibration", "阈值验证状态", !usable ? "不可用" : result.calibration_status === "CONFIGURED_UNVALIDATED"
+      ? "试用阈值（精度未验证）" : "未配置判定阈值");
+    add("policy-fingerprint", "策略指纹", usable ? result.policy_fingerprint : null);
     add("feature-dimension", "特征维度", result.feature_dimension === undefined ? null : `${result.feature_dimension} 维`);
     add("matcher-version", "匹配器", result.matcher_version);
-    add("liveness", "活体 / 反翻拍", "未评估，无真人在场保证");
   } else if (capability?.responseKind === "video-verification") {
     add("mode", "核验模式", result.mode === "full" ? "完整" : result.mode === "quick" ? "快速" : null);
     const duration = finiteText(result.duration_seconds, 1);

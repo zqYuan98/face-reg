@@ -87,7 +87,7 @@ def create_app(
 
     app = FastAPI(
         title="Private Face Algorithm API",
-        version="2.1.0",
+        version="2.2.0",
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,

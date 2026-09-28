@@ -83,7 +83,7 @@ class _Capture:
         self.released = True
 
 
-def _run_worker(tmp_path, monkeypatch, capture, limits=None, deadline=None):
+def _run_worker(tmp_path, monkeypatch, capture, limits=None, deadline=None, request=None):
     api = _api()
     path = tmp_path / "synthetic.bin"
     path.write_bytes(b"synthetic")
@@ -94,7 +94,7 @@ def _run_worker(tmp_path, monkeypatch, capture, limits=None, deadline=None):
     ))
     connection = _Connection()
     api._opencv_presence_worker(
-        connection, str(path), _request(), limits or _limits(), path.stat().st_size,
+        connection, str(path), request or _request(), limits or _limits(), path.stat().st_size,
         time.monotonic() + 30 if deadline is None else deadline,
     )
     assert capture.released
@@ -274,7 +274,7 @@ def _open(tmp_path, worker, **kwargs):
     path = tmp_path / "worker-input.bin"
     path.write_bytes(b"synthetic")
     return _api().OpenCvPresenceDecoder(worker_target=worker).open(
-        path, request=_request(), limits=_limits(),
+        path, request=kwargs.get("request", _request()), limits=kwargs.get("limits", _limits()),
         deadline_monotonic=kwargs.get("deadline", time.monotonic() + 10),
     )
 
@@ -450,3 +450,284 @@ def test_generated_video_sequential_decode(tmp_path):
         assert stream.summary.scan_complete
         assert stream.summary.decoded_frames == 21
         assert stream.summary.duration_seconds == pytest.approx(2.1)
+
+
+def _presence_request(interval=.5, supplemental=2):
+    return importlib.import_module("face_algorithm.presence.sampling").PresenceDecodeRequest(interval, supplemental)
+
+
+def test_new_request_emits_base_and_two_later_candidates_per_window(tmp_path, monkeypatch):
+    messages = _run_worker(tmp_path, monkeypatch, _Capture(actual=18, fps=12), request=_presence_request())
+    assert messages[-1][0] == "done", messages[-1]
+    frames = [m for m in messages if m[0] == "frame"]
+    assert [(m[1], m[4], m[5]) for m in frames] == [
+        (0, 0, "base"), (2, 0, "supplemental"), (4, 0, "supplemental"),
+        (6, 1, "base"), (8, 1, "supplemental"), (10, 1, "supplemental"),
+        (12, 2, "base"), (14, 2, "supplemental"), (16, 2, "supplemental"), (17, 3, "base"),
+    ]
+    assert messages[-1][1].sampled_frames == 10
+    assert messages[-1][1].scan_complete is True
+
+
+def test_terminal_supplemental_is_upgraded_to_base_without_duplicate(tmp_path, monkeypatch):
+    messages = _run_worker(tmp_path, monkeypatch, _Capture(actual=17, fps=12), request=_presence_request())
+    assert messages[-1][0] == "done", messages[-1]
+    frames = [m for m in messages if m[0] == "frame"]
+    assert frames[-1][1] == 16
+    assert frames[-1][2] == pytest.approx(16 / 12)
+    assert frames[-1][4:] == (3, "base")
+    assert len(frames) == len({m[1] for m in frames}) == 9
+
+
+def test_low_fps_target_collisions_preserve_base_priority(tmp_path, monkeypatch):
+    messages = _run_worker(tmp_path, monkeypatch, _Capture(actual=4, fps=1), request=_presence_request())
+    assert messages[-1][0] == "done", messages[-1]
+    assert [(m[1], m[4], m[5]) for m in messages if m[0] == "frame"] == [
+        (0, 0, "base"), (1, 2, "base"), (2, 4, "base"), (3, 6, "base"),
+    ]
+
+
+@pytest.mark.parametrize("budget,indices,complete", [(1, [0], False), (2, [0, 9], True), (3, [0, 5, 9], True)])
+def test_new_request_small_budgets_reserve_first_and_last(tmp_path, monkeypatch, budget, indices, complete):
+    messages = _run_worker(tmp_path, monkeypatch, _Capture(), _limits(max_analyzed_frames=budget),
+                           request=_presence_request())
+    assert messages[-1][0] == "done", messages[-1]
+    frames = [m for m in messages if m[0] == "frame"]
+    assert [m[1] for m in frames] == indices
+    assert messages[-1][1].decoded_frames == 10
+    assert messages[-1][1].sampled_frames <= budget
+    assert messages[-1][1].scan_complete is complete
+    assert frames[0][5] == frames[-1][5] == "base"
+
+
+def test_one_real_frame_can_complete_with_budget_one(tmp_path, monkeypatch):
+    messages = _run_worker(tmp_path, monkeypatch, _Capture(actual=1), _limits(max_analyzed_frames=1),
+                           request=_presence_request())
+    assert messages[-1][0] == "done", messages[-1]
+    assert messages[-1][1].scan_complete is True
+    assert [(m[1], m[5]) for m in messages if m[0] == "frame"] == [(0, "base")]
+
+
+def test_600_second_video_uniformly_uses_bounded_candidates_through_real_end(tmp_path, monkeypatch):
+    messages = _run_worker(tmp_path, monkeypatch, _Capture(actual=18000, fps=30), request=_presence_request())
+    assert messages[-1][0] == "done", messages[-1]
+    frames = [m for m in messages if m[0] == "frame"]
+    assert frames[0][1] == 0
+    assert frames[-1][1] == 17999
+    assert frames[-1][5] == "base"
+    assert len(frames) <= 1200
+    assert any(m[2] > 590 and m[5] == "base" for m in frames)
+    assert len(frames) == len({m[1] for m in frames})
+    assert messages[-1][1].scan_complete is True
+
+
+@pytest.mark.parametrize("capture", [
+    _Capture(actual=10, reported=3),
+    _Capture(actual=4, pts=[0, .2, .6, 1.2]),
+])
+def test_actual_timeline_beyond_planned_metadata_is_incomplete(tmp_path, monkeypatch, capture):
+    messages = _run_worker(tmp_path, monkeypatch, capture, request=_presence_request())
+    assert messages[-1][0] == "done", messages[-1]
+    frames = [m for m in messages if m[0] == "frame"]
+    assert frames[-1][1] == capture.actual - 1
+    assert frames[-1][5] == "base"
+    assert messages[-1][1].decoded_frames == capture.actual
+    assert messages[-1][1].scan_complete is False
+
+
+@pytest.mark.parametrize("extra", [1, 6])
+def test_new_request_tolerates_only_bounded_container_tail_overcount(tmp_path, monkeypatch, extra):
+    messages = _run_worker(tmp_path, monkeypatch, _Capture(actual=100, reported=100 + extra, fps=25),
+                           request=_presence_request())
+    assert messages[-1][0] == "done", messages[-1]
+    assert messages[-1][1].scan_complete is True
+    assert [m for m in messages if m[0] == "frame"][-1][1] == 99
+
+
+@pytest.mark.parametrize("capture,limits,reason", [
+    (_Capture(actual=10, reported=100), _limits(), ReasonCode.VIDEO_DECODE_FAILED),
+    (_Capture(reported=0), _limits(), ReasonCode.VIDEO_DECODE_FAILED),
+    (_Capture(actual=4, pts=[0, .5, 1, 3]), _limits(max_duration_seconds=2), ReasonCode.VIDEO_TOO_LONG),
+    (_Capture(actual=30, reported=4, pts=[i * .001 for i in range(30)]), _limits(max_duration_seconds=2), ReasonCode.VIDEO_TOO_LONG),
+])
+def test_new_request_preserves_decode_metadata_and_duration_errors(tmp_path, monkeypatch, capture, limits, reason):
+    messages = _run_worker(tmp_path, monkeypatch, capture, limits, request=_presence_request())
+    assert messages[-1][:2] == ("error", reason.value)
+
+
+def _new_request_worker(connection, _path, request, *_args):
+    api = importlib.import_module("face_algorithm.video.presence_decoder")
+    connection.send(("metadata", _metadata()))
+    connection.send(("frame", 0, 0.0, np.zeros((3, 4, 3), np.uint8), 0, "base"))
+    connection.send(("frame", 1, .5, np.zeros((3, 4, 3), np.uint8), 1, "base"))
+    connection.send(("done", api.PresenceDecodeSummary(2, 2, True, 1.0, "pts")))
+    connection.close()
+
+
+def test_parent_exposes_effective_interval_before_consuming_typed_frames(tmp_path):
+    with _open(tmp_path, _new_request_worker, request=_presence_request(), limits=_limits(max_analyzed_frames=2)) as stream:
+        assert stream.sampling_interval_seconds == 1.0
+        frames = list(stream)
+        sample_type = importlib.import_module("face_algorithm.presence.sampling").PresenceSampleFrame
+        assert all(isinstance(f, sample_type) for f in frames)
+        assert all(not f.image.flags.writeable for f in frames)
+        assert frames[-1].kind == "base"
+        assert stream.summary.sampled_frames == 2
+        assert stream.summary.scan_complete is True
+    assert not multiprocessing.active_children()
+
+
+def _incomplete_new_request_worker(connection, *_args):
+    api = importlib.import_module("face_algorithm.video.presence_decoder")
+    connection.send(("metadata", _metadata()))
+    connection.send(("frame", 0, 0.0, np.zeros((3, 4, 3), np.uint8), 0, "base"))
+    connection.send(("done", api.PresenceDecodeSummary(2, 1, False, 1.0, "pts")))
+    connection.close()
+
+
+def test_parent_accepts_honest_incomplete_summary_with_budget_one(tmp_path):
+    with _open(tmp_path, _incomplete_new_request_worker, request=_presence_request(), limits=_limits(max_analyzed_frames=1)) as stream:
+        assert len(list(stream)) == 1
+        assert stream.summary.decoded_frames == 2
+        assert stream.summary.scan_complete is False
+    assert not multiprocessing.active_children()
+
+
+def test_generated_video_new_request_end_to_end(tmp_path):
+    cv2 = pytest.importorskip("cv2")
+    path = tmp_path / "generated-presence.avi"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 12.0, (32, 24))
+    assert writer.isOpened()
+    try:
+        for index in range(17):
+            writer.write(np.full((24, 32, 3), index * 10, np.uint8))
+    finally:
+        writer.release()
+    with _api().OpenCvPresenceDecoder().open(path, request=_presence_request(),
+        limits=_limits(max_video_bytes=1_000_000, max_frame_pixels=1000),
+        deadline_monotonic=time.monotonic() + 15) as stream:
+        assert stream.sampling_interval_seconds == .5
+        frames = list(stream)
+        assert [f.index for f in frames] == list(range(0, 17, 2))
+        assert frames[-1].kind == "base"
+        assert stream.summary.scan_complete
+        assert stream.summary.sampled_frames == 9
+
+
+def test_incomplete_summary_must_still_include_last_frame_when_budget_allows(tmp_path):
+    with _open(tmp_path, _incomplete_new_request_worker, request=_presence_request(), limits=_limits(max_analyzed_frames=2)) as stream:
+        with pytest.raises(VideoDecodeError):
+            list(stream)
+        assert not stream.summary.scan_complete
+    assert not multiprocessing.active_children()
+
+
+def test_supplemental_candidate_is_never_earlier_than_its_target(tmp_path, monkeypatch):
+    target = 1 / 6
+    capture = _Capture(actual=5, fps=10, pts=[0, target - 5e-8, target + .01, .34, .4])
+    messages = _run_worker(tmp_path, monkeypatch, capture, request=_presence_request())
+    assert messages[-1][0] == "done", messages[-1]
+    frames = [m for m in messages if m[0] == "frame"]
+    assert [m[1] for m in frames] == [0, 2, 3, 4]
+    assert frames[1][2] >= target
+
+
+def test_nearly_next_window_frame_cannot_be_selected_as_early_base(tmp_path, monkeypatch):
+    capture = _Capture(actual=6, fps=6, pts=[0, .2, .4, .5 - 5e-8, .6, .8])
+    messages = _run_worker(tmp_path, monkeypatch, capture, request=_presence_request())
+    assert messages[-1][0] == "done", messages[-1]
+    frames = [m for m in messages if m[0] == "frame"]
+    assert [m[1] for m in frames if m[5] == "base"] == [0, 4, 5]
+
+
+def _bad_sampling_worker(connection, _path, request, *_args):
+    connection.send(("metadata", _metadata()))
+    connection.send(("frame", 0, 0.0, np.zeros((3, 4, 3), np.uint8), 0, "base"))
+    variant = request.sample_interval_seconds
+    bad = {1.0: (0, "base"), 2.0: (1, "supplemental"), 3.0: (True, "base"), 4.0: (1, "other")}[variant]
+    connection.send(("frame", 1, .5, np.zeros((3, 4, 3), np.uint8), *bad))
+    connection.close()
+
+
+@pytest.mark.parametrize("variant", [1.0, 2.0, 3.0, 4.0])
+def test_parent_rejects_corrupt_sampling_window_protocol(tmp_path, variant):
+    with _open(tmp_path, _bad_sampling_worker, request=_presence_request(variant)) as stream:
+        with pytest.raises(VideoDecodeError, match="sampling window contract"):
+            list(stream)
+        assert not stream.summary.scan_complete
+    assert not multiprocessing.active_children()
+
+
+@pytest.mark.parametrize("pts,source", [([0.0] * 5, "estimated"), ([float("nan")] * 5, "estimated"),
+                                        ([0, .25, .2, .8, 1], "mixed")])
+def test_new_request_preserves_repaired_timestamp_source(tmp_path, monkeypatch, pts, source):
+    messages = _run_worker(tmp_path, monkeypatch, _Capture(actual=5, pts=pts), request=_presence_request())
+    assert messages[-1][0] == "done", messages[-1]
+    assert messages[-1][1].timestamp_source == source
+
+
+def test_new_request_budget_exhaustion_does_not_skip_unsampled_validation(tmp_path, monkeypatch):
+    capture = _Capture(actual=10)
+    capture.frames[5] = np.zeros((3, 4, 3), np.float32)
+    messages = _run_worker(tmp_path, monkeypatch, capture, _limits(max_analyzed_frames=1), request=_presence_request())
+    assert messages[-1][:2] == ("error", ReasonCode.VIDEO_DECODE_FAILED.value)
+
+
+@pytest.mark.parametrize("count,fps,last_pts", [
+    (219, 29.00312250765912, 7.517644444444445),
+    (241, 28.865002548477634, 8.315944444444446),
+])
+def test_vfr_nominal_last_frame_duration_does_not_invalidate_covered_pts(tmp_path, monkeypatch, count, fps, last_pts):
+    # Anonymous field regressions: average container FPS differs from the final
+    # frame cadence by 1-2 ms, but the real terminal PTS is inside the plan.
+    pts = [i * last_pts / (count - 1) for i in range(count)]
+    capture = _Capture(actual=count, fps=fps, pts=pts)
+    messages = _run_worker(tmp_path, monkeypatch, capture, request=_presence_request())
+    assert messages[-1][0] == "done", messages[-1]
+    summary = messages[-1][1]
+    assert summary.duration_seconds > count / fps
+    assert summary.scan_complete is True
+    frames = [m for m in messages if m[0] == "frame"]
+    assert frames[-1][1] == count - 1
+    assert frames[-1][5] == "base"
+
+
+def test_metadata_underestimate_within_allocated_window_keeps_tail_candidates(tmp_path, monkeypatch):
+    # D=2.25 estimates five .5-second windows. All targets through 2.5 are
+    # already budgeted; the separately reserved real terminal frame is at 2.5.
+    messages = _run_worker(tmp_path, monkeypatch, _Capture(actual=11, reported=9), request=_presence_request())
+    assert messages[-1][0] == "done", messages[-1]
+    frames = [m for m in messages if m[0] == "frame"]
+    assert [(m[1], m[4], m[5]) for m in frames[-3:]] == [
+        (8, 4, "base"), (9, 4, "supplemental"), (10, 5, "base"),
+    ]
+    assert messages[-1][1].scan_complete is True
+
+
+def test_real_terminal_pts_beyond_allocated_window_horizon_stays_incomplete(tmp_path, monkeypatch):
+    messages = _run_worker(tmp_path, monkeypatch, _Capture(actual=12, reported=9), request=_presence_request())
+    assert messages[-1][0] == "done", messages[-1]
+    assert messages[-1][1].scan_complete is False
+    frames = [m for m in messages if m[0] == "frame"]
+    assert frames[-1][1] == 11
+    assert frames[-1][5] == "base"
+    assert not any(m[1] == 10 for m in frames)
+
+
+def _vfr_covered_worker(connection, *_args):
+    api = importlib.import_module("face_algorithm.video.presence_decoder")
+    fps = 29.00312250765912
+    terminal = 7.517644444444445
+    connection.send(("metadata", VideoMetadata(4, 3, fps, 219, 219 / fps, "synthetic")))
+    connection.send(("frame", 0, 0.0, np.zeros((3, 4, 3), np.uint8), 0, "base"))
+    connection.send(("frame", 218, terminal, np.zeros((3, 4, 3), np.uint8), 15, "base"))
+    connection.send(("done", api.PresenceDecodeSummary(219, 2, True, terminal + 1 / fps, "pts")))
+    connection.close()
+
+
+def test_parent_accepts_covered_real_pts_despite_nominal_duration_metadata_drift(tmp_path):
+    with _open(tmp_path, _vfr_covered_worker, request=_presence_request()) as stream:
+        assert len(list(stream)) == 2
+        assert stream.summary.scan_complete is True
+        assert stream.summary.duration_seconds > stream.metadata.duration_seconds
+    assert not multiprocessing.active_children()

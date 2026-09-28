@@ -4,8 +4,9 @@
 测试台通过固定白名单把六条公开 v2 请求流式转发给算法服务。服务端仅使用 Python
 标准库，不写入上传媒体，也不接受浏览器指定的上游地址。
 
-2026-09-28 presence 已部署（算法提交 `1e6b57b5b1dd`）；入口分别为算法
-`http://<server-37>:18002` 与测试台 `http://<server-37>:18003`。
+本地测试台已按 API `2.2.0` presence 契约同步，本轮功能尚未部署。2026-09-28 算法入口
+`http://<server-37>:18002` 与测试台 `http://<server-37>:18003` 仍为旧 `2.1.0`
+（算法提交 `1e6b57b5b1dd`），不能把旧线上页面作为本轮新行为的验收证据。
 完整请求响应见 [API 联调文档](../../docs/TASK-2026-001-API-DEBUGGING.md)。
 
 ## 配置
@@ -72,10 +73,27 @@ python3 server.py
 
 - “视频目标出现”使用 `video_presence` readiness，提交 `reference_image + video`，检查目标
   候选是否曾出现在采样范围；quick/full 保留，仍是持续身份一致性，不是此需求。
-- presence 显示 `decision/found`、最佳分数/时刻、扫描完整度、采样间隔与计数、最多 5 行数字
-  证据。所有单元格由 `textContent` 创建，拒绝非数值证据，不解析上游 HTML。
-- 首版 `UNCALIBRATED` 固定为 `INCONCLUSIVE/found=null`，即便高分、无可用脸或扫描完整也
-  不显示 PASS；FOUND/NOT_FOUND_IN_SCAN 为保留态，当前不能产出。没有活体/反翻拍保证。
+- 2.2.0 presence 以 `decision/found` 为主标题：`FOUND/true`、`NOT_FOUND_IN_SCAN/false`、
+  `INCONCLUSIVE/null`。正常试用结果 `suggestion=REVIEW` 是次级业务审核提示，不覆盖 FOUND，
+  也不能把 FOUND 渲染成业务自动 PASS。
+- 服务端 `configured` 返回 `CONFIGURED_UNVALIDATED`、显式阈值/ID 与策略指纹；页面显示
+  “试用阈值（精度未验证）”，不能把最高分格式化成准确概率，也不接受浏览器指定阈值后重算结果。
+  默认 `uncalibrated` 仍显示已算证据并附 `THRESHOLD_NOT_CONFIGURED`；仅在 `success=true`、
+  `scan_complete=true`、`comparison_status=COMPARED` 时主显示为“比对已完成，尚未配置判定阈值”。
+  失败、参考无效、扫描未完成、无可比脸的标题优先，不能无条件显示已完成；不提示缺少有效签名或活体失败。
+- 扫描不完整/全局失败/无可比脸/参考无效只能是 INCONCLUSIVE/null，已有 partial 证据可保留。
+  普通解码/推理失败的 DTO 才可能带部分证据；硬截止/执行器超时仍是 HTTP 504 错误体，不保证证据。
+  完整扫描且有命中时，其他候选局部失败不撤销命中；低于阈值但有候选截断/失败不得显示未匹配。
+  未匹配限于本次有限扫描，不代表整段视频绝对不存在。
+- 展示最佳分数/时刻、阈值、comparison_status、策略指纹、请求/实际基础间隔、
+  base/supplemental/decoded/sampled/valid-face/attempted/compared/failed 计数和软质量提示；
+  最多 5 行证据，各含真实帧号、时间、最佳候选序号、分数与受限 `quality_warnings`。
+  可跳转本地预览到证据时刻，不新增服务端截图或媒体保存。所有单元格使用 `textContent`，不解析上游 HTML。
+- 暗/糊/侧脸/小脸/贴边是软提示，不以视频 64px 为硬拒绝门槛；每窗口最多补采 2 帧，
+  总默认 1200 分析帧包含首尾和补采，长视频实际基础间隔可高于请求的 0.5 秒。
+  `liveness_evaluated=false` 表示未执行且接口不要求，不是门禁；仍无活体/反翻拍保证。
+- 新页面兼容旧 2.1.0 响应的历史 INCONCLUSIVE/null 含义；缺失/未知/不一致的新契约显示协议错误，
+  不将无效分数/计数/枚举升级为匹配成功。旧五入口与签名 calibration 展示规则不变。
 - presence/full 服务算法预算 600 秒、代理总预算 620 秒、浏览器请求截止 630 秒；三种视频
   请求体均为 540,082,176 字节上限、响应 4 MiB。超时后不立即并发重试。
 - readiness 返回五个能力键（quick/full 共享一个），页面按六个任务计算可用数量；缺失
@@ -115,3 +133,5 @@ node --test tests/core.test.mjs
 ```
 
 测试使用本机临时 HTTP 服务，不读取算法模型或客户媒体。
+三态用例中的阈值只用于 synthetic-only 夹具，不是推荐现场阈值；生产精度仍需独立人工标签，
+见 [匿名标签与离线验证](../../docs/PRESENCE_LABEL_VALIDATION.md)。

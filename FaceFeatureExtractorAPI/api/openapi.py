@@ -93,8 +93,8 @@ def install_public_openapi(app: FastAPI) -> None:
             title=app.title, version=app.version,
             description=(
                 "内网算法服务。业务后端调用API，测试台不是业务接口。"
-                "presence查询视频目标出现证据；quick/full仍检查持续主体一致性。"
-                "未标定时不得将分数或success解释为身份核验通过。"
+                "presence比较视频关键帧，支持显式试用阈值三态判定；quick/full仍检查持续主体一致性。"
+                "presence不要求活体，试用阈值不代表生产精度验证；不得将分数或success解释为业务审核通过。"
             ),
             routes=app.routes,
         )

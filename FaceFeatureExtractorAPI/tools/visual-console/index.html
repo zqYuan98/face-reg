@@ -197,7 +197,7 @@
             <span class="capability-button__index" aria-hidden="true">06</span>
             <span class="capability-button__copy">
               <strong>视频目标出现</strong>
-              <small>出现候选证据 · 未标定 · 仅人工复核</small>
+              <small>本次扫描三态 · 试用阈值 · 证据定位</small>
             </span>
             <span class="capability-state" data-capability-status data-state="checking">
               <span class="capability-state__dot" aria-hidden="true"></span>
@@ -331,9 +331,9 @@
 
           <section id="evidence-frames-panel" class="raw-json-panel" aria-labelledby="evidence-frames-title" hidden>
             <h3 id="evidence-frames-title">候选证据帧（最多 5 项）</h3>
-            <p>仅为候选定位，无截图、无活体或身份通过保证；空表不代表目标不存在。</p>
+            <p>点击时间跳转已上传的本地视频；仅为候选定位，不请求远端媒体。空表不代表目标不存在，试用阈值不代表精度已经验证。</p>
             <table aria-label="候选证据帧">
-              <thead><tr><th scope="col">帧序号</th><th scope="col">时间 / 秒</th><th scope="col">分数</th></tr></thead>
+              <thead><tr><th scope="col">帧序号</th><th scope="col">时间 / 秒</th><th scope="col">分数</th><th scope="col">候选序号</th><th scope="col">质量提示</th></tr></thead>
               <tbody id="evidence-frames-body"></tbody>
             </table>
           </section>

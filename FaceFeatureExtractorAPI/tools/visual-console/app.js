@@ -6,6 +6,7 @@ import {
   getSuggestionView,
   isCapabilityReady,
   renderEvidenceFrames,
+  seekEvidencePreview,
   safeUploadFilename,
   safeJsonText,
   translateReasons,
@@ -46,7 +47,7 @@ const CONTENT = Object.freeze({
   "verify-video-presence": {
     eyebrow: "VIDEO TARGET PRESENCE",
     title: "视频目标出现",
-    description: "扫描视频中的目标候选，显示最佳时刻与证据。首版未标定，所有身份结论均为 INCONCLUSIVE；不评估活体或反翻拍。",
+    description: "显示本次扫描的匹配判定、真实分数、试用阈值与质量提示；点击证据时间可查看本地视频。试用阈值不代表精度已经验证。",
     action: "扫描目标出现",
   },
 });
@@ -77,6 +78,7 @@ const nodes = {
   resultSummary: $("#result-summary"),
   resultStatus: $("#result-status"),
   resultSuggestion: $("#result-suggestion"),
+  resultPanelTitle: $("#result-panel-title"),
   resultMessage: $("#result-message"),
   resultReasons: $("#result-reasons"),
   resultDuration: $("#result-duration"),
@@ -105,6 +107,7 @@ const state = {
   capabilityId: "verify-images",
   files: new Map(),
   metadata: new Map(),
+  selectionRevision: 0,
   previewUrls: new Map(),
   derivedUrl: null,
   csrfToken: null,
@@ -328,6 +331,8 @@ function updateRunState() {
 async function handleSelectedFile(field, file) {
   setFieldError(field.name, "");
   if (!file) return;
+  state.selectionRevision += 1;
+  if (currentCapability().responseKind === "video-presence") clearResult();
   state.files.set(field.name, file);
   state.metadata.delete(field.name);
 
@@ -349,6 +354,8 @@ async function handleSelectedFile(field, file) {
 }
 
 function clearField(fieldName) {
+  state.selectionRevision += 1;
+  if (currentCapability().responseKind === "video-presence") clearResult();
   state.files.delete(fieldName);
   state.metadata.delete(fieldName);
   revokePreview(fieldName);
@@ -456,12 +463,14 @@ function clearResult() {
   if (nodes.resultReasons) nodes.resultReasons.replaceChildren();
   if (nodes.derivedPanel) nodes.derivedPanel.hidden = true;
   if (nodes.resultSummary) nodes.resultSummary.dataset.suggestion = "REVIEW";
+  if (nodes.resultStatus) delete nodes.resultStatus.dataset.tone;
   setText(nodes.resultTraceId, "—");
   setText(nodes.resultDuration, "");
   if (nodes.rawJson) nodes.rawJson.textContent = "尚未运行测试";
 }
 
 function clearWorkspace() {
+  state.selectionRevision += 1;
   revokeAllPreviews();
   state.files.clear();
   state.metadata.clear();
@@ -473,6 +482,7 @@ function updateWorkspaceCopy(capability) {
   setText(nodes.workspaceEyebrow, content.eyebrow);
   setText(nodes.workspaceTitle, content.title);
   setText(nodes.workspaceDescription, content.description);
+  setText(nodes.resultPanelTitle, capability.responseKind === "video-presence" ? "本次扫描判定优先" : "业务建议优先");
   setText(nodes.endpointLabel, capability.endpoint);
   setText(nodes.timeoutLabel, `${Math.round(capability.timeoutMs / 1000)} 秒截止`);
   if (nodes.inputRequirements) {
@@ -534,19 +544,25 @@ function renderResult(payload, httpStatus, elapsedMs) {
   if (nodes.resultContent) nodes.resultContent.hidden = false;
 
   const presence = currentCapability().responseKind === "video-presence";
-  const view = getSuggestionView({ ...payload, ...(presence ? { mode: "presence" } : {}),
-    ...(httpStatus && (httpStatus < 200 || httpStatus >= 300) ? { success: false } : {}) });
+  const interpretedResult = { ...payload,
+    ...(httpStatus && (httpStatus < 200 || httpStatus >= 300) ? { success: false } : {}) };
+  const view = getSuggestionView(interpretedResult, state.capabilityId);
   const suggestion = String(payload.suggestion ?? "ERROR").toUpperCase();
-  const displaySuggestion = presence ? "INCONCLUSIVE"
+  const displaySuggestion = presence ? view.decision
     : suggestion === "PASS" && !view.canTreatAsPass ? "REVIEW" : ["PASS", "RECAPTURE", "REVIEW"].includes(suggestion) ? suggestion : "ERROR";
   if (nodes.resultSummary) nodes.resultSummary.dataset.suggestion = presence ? "REVIEW" : displaySuggestion;
+  if (nodes.resultStatus) {
+    if (presence) nodes.resultStatus.dataset.tone = view.tone;
+    else delete nodes.resultStatus.dataset.tone;
+  }
   setText(nodes.resultStatus, displaySuggestion);
   setText(nodes.resultSuggestion, view.label);
 
   const notices = [...view.notices];
   if (httpStatus && httpStatus !== 200) notices.unshift(`HTTP ${httpStatus}`);
   if (Number.isFinite(elapsedMs)) notices.push(`浏览器往返 ${(elapsedMs / 1000).toFixed(2)} 秒`);
-  const reasons = translateReasons(payload.reason_codes);
+  const reasons = translateReasons(presence && Array.isArray(payload.reason_codes)
+    ? payload.reason_codes.filter((code) => !["CALIBRATION_REQUIRED", "THRESHOLD_UNCALIBRATED"].includes(code)) : payload.reason_codes);
   setText(nodes.resultMessage, [view.message, ...notices].filter(Boolean).join("；"));
   if (nodes.resultReasons) {
     nodes.resultReasons.replaceChildren();
@@ -556,16 +572,24 @@ function renderResult(payload, httpStatus, elapsedMs) {
   const trace = typeof payload.trace_id === "string" && payload.trace_id ? `${payload.trace_id.slice(0, 8)}…` : "—";
   setText(nodes.resultTraceId, trace);
 
-  renderMetrics(buildResultDetails(state.capabilityId, payload));
+  renderMetrics(buildResultDetails(state.capabilityId, presence ? interpretedResult : payload));
   if (nodes.evidencePanel) nodes.evidencePanel.hidden = !presence;
-  renderEvidenceFrames(nodes.evidenceBody, presence ? payload : {});
+  renderEvidenceFrames(nodes.evidenceBody, presence && view.validContract ? payload : {}, { onSeek: seekLocalEvidence });
   try {
-    renderDerivedImage(payload);
+    if (!presence) renderDerivedImage(payload);
   } catch {
     if (nodes.derivedPanel) nodes.derivedPanel.hidden = true;
     notify("派生图返回格式异常，结构化结果仍可查看。", "warning");
   }
   if (nodes.rawJson) nodes.rawJson.textContent = safeJsonText(payload);
+}
+
+function seekLocalEvidence(timestamp) {
+  if (currentCapability().responseKind !== "video-presence" || !state.files.has("video")) return;
+  const preview = document.querySelector('[data-upload-field][data-field-name="video"] [data-file-preview] video');
+  if (!seekEvidencePreview(preview, state.previewUrls.get("video"), timestamp)) {
+    notify("当前本地视频预览无法跳转到该时刻，请确认视频可播放。", "warning");
+  }
 }
 
 function renderRequestFailure(message, payload = {}) {
@@ -641,14 +665,18 @@ async function runCurrentTest(event) {
   clearResult();
   setRunning(true);
   const capability = currentCapability();
+  const requestRevision = state.selectionRevision;
+  const submittedFiles = new Map(state.files);
+  const isCurrentRequest = () => state.selectionRevision === requestRevision && state.capabilityId === capability.id;
   notify(`正在运行${capabilityContent(capability.id).title}，请保持页面打开。`, "neutral", true);
   const started = performance.now();
 
   try {
     const csrf = await getCsrfToken();
+    if (!isCurrentRequest()) return;
     const formData = new FormData();
     for (const field of capability.fields) {
-      const file = state.files.get(field.name);
+      const file = submittedFiles.get(field.name);
       formData.append(field.name, file, safeUploadFilename(field, file));
     }
     const response = await fetch(capability.endpoint, {
@@ -666,9 +694,14 @@ async function runCurrentTest(event) {
       state.csrfToken = null;
       state.csrfExpiresAt = 0;
     }
+    if (!isCurrentRequest()) {
+      notify("素材已变化，旧请求结果已丢弃；请重新运行。", "warning");
+      return;
+    }
     renderResult(payload, response.status, elapsed);
     notify(response.ok ? "算法请求已完成，请查看右侧建议。" : `请求失败（HTTP ${response.status}），请查看原因。`, response.ok ? "success" : "danger");
   } catch (error) {
+    if (!isCurrentRequest()) return;
     const message = error instanceof Error ? error.message : "无法连接测试台服务";
     renderRequestFailure(message);
     notify(message, "danger", true);

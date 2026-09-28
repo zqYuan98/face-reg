@@ -168,7 +168,9 @@ def create_v2_router(
         summary="视频中查找给定目标人脸的出现证据",
         description=(
             "与 quick/full 的持续主体一致性检查不同，逐候选查找目标出现证据。"
-            "首版未标定，仅返回 INCONCLUSIVE 与 found=null，不提供活体结论。"
+            "完成关键帧比对后，配置试用阈值时返回 FOUND、NOT_FOUND_IN_SCAN 或 INCONCLUSIVE；"
+            "未配置阈值仍返回分数与证据，身份结论为 INCONCLUSIVE、found=null。"
+            "质量问题仅提示，不提供活体结论，也不代表业务自动通过。"
         ),
     )
     async def verify_video_presence(

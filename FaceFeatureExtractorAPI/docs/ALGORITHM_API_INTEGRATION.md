@@ -4,9 +4,11 @@
 [TASK-2026-001 新算法 API 联调文档](TASK-2026-001-API-DEBUGGING.md)。本文侧重安全边界、
 部署约束和生产接入责任。
 
-版本状态（2026-09-28）：presence 已部署，算法提交 `1e6b57b5b1dd32693497c21a0ce0039b4f77fc1b`。
-局域网算法地址为 `http://<server-37>:18002`，测试台为 `http://<server-37>:18003`。
-[发布验收记录](reports/2026-09-28-presence-release-validation.md) 包含版本、测试和回滚证据。
+版本状态（2026-09-28）：本文描述 API `2.2.0` 本地开发契约，尚未部署。
+服务器 37 的 `http://<server-37>:18002` 与测试台 `http://<server-37>:18003` 仍为旧 API
+`2.1.0`，算法提交 `1e6b57b5b1dd32693497c21a0ce0039b4f77fc1b`。
+[历史发布验收记录](reports/2026-09-28-presence-release-validation.md) 只证明旧版发布与回滚，
+不证明本轮低质量比对、补采和试用阈值三态已上线或生产精度已验证。
 
 ## 1. 边界与责任
 
@@ -31,7 +33,7 @@ HTTP 长连接。算法建议不等于合同审批结果。
 | `GET /health/live` | 进程事件循环可响应，不代表模型可用 | 200 |
 | `GET /health/ready` | 必需模型完成哈希、契约及 Provider 检查；artifact 模式还完成签名校准绑定 | ready 时 200，否则 503 |
 | `GET /health` | 兼容别名，语义同 ready | 200/503 |
-| `GET /openapi.json` | 类型化请求/响应与错误契约；已部署 presence，请重新导入 API 2.1.0 契约 | 200 |
+| `GET /openapi.json` | 类型化请求/响应与错误契约；新行为须导入 2.2.0 候选服务并核对 info.version，线上仍是 2.1.0 | 200 |
 
 `degraded + ready=true` 表示核心人脸能力可用、某个可选能力（例如 MODNet）不可用；
 调用不可用能力仍返回 503，不能只看 liveness 接流量。
@@ -49,7 +51,7 @@ presence 对应 `capabilities.video_presence`；quick/full 共用 `video_verific
 | `POST /api/v2/verify/images` | `reference_image`, `probe_image` | 30 秒 | 工资卡见证照与入场照 1:1 |
 | `POST /api/v2/verify/video/quick` | `reference_image`, `video` | 60 秒 | 抽样持续一致性检查，不是目标出现 |
 | `POST /api/v2/verify/video/full` | `reference_image`, `video` | 600 秒 | 整段持续一致性检查，不是目标出现 |
-| `POST /api/v2/verify/video/presence` | `reference_image`, `video` | 600 秒 | 目标出现候选扫描，首版未标定，只供人工复核 |
+| `POST /api/v2/verify/video/presence` | `reference_image`, `video` | 600 秒 | 目标出现尽力扫描；可配置试用阈值三态，不是业务自动放行 |
 
 默认 `DefaultAlgorithmServices` 已绑定模块化 `WitnessBlurRuntime`，因此会注册见证照虚化
 路由。该能力只有在配置启用且 readiness 已验证 MODNet 与核心人脸模型时才可接流量；
@@ -80,17 +82,30 @@ curl -f -F "reference_image=@trusted.jpg;type=image/jpeg" \
 
 presence 同样包含 `success,suggestion,reason_codes,model_versions,feature_version,config_version,
 processing_time_ms,trace_id`。新增 `mode=presence`、`decision`、可空 `found`、同时可空的
-`best_score/best_timestamp_seconds`、最多五项数字证据、扫描完整度、采样/解码/有效脸/候选计数、
-候选预算触顶、时长和时间戳来源。完整字段、合法未标定 JSON、curl 与 Python 调用见联调文档
-第 8A/13.6 节；不返回任何原始帧、embedding、路径或内部人脸对象。
+`best_score/best_timestamp_seconds`、最多五项数字证据（各含 `candidate_index/quality_warnings`）、
+`comparison_status`、扫描完整度、基础/补采/解码/有效脸/尝试及成功/失败候选计数、候选预算触顶、
+请求/实际基础间隔、`sampling_strategy`、时长和时间戳来源，另有阈值/ID/策略指纹与软质量提示。
+完整字段、三个合法 synthetic-only JSON、curl 与 Python 调用见联调文档第 8A/13.6 节；
+不返回任何原始帧、embedding、路径或内部人脸对象。
 
-首版恒定 `calibration_status=UNCALIBRATED`、`decision=INCONCLUSIVE`、`found=null`，
-所有算法结果包含 `CALIBRATION_REQUIRED/THRESHOLD_UNCALIBRATED`，不允许 PASS。
-FOUND/NOT_FOUND_IN_SCAN 只是未来保留状态；高分、无脸、完整扫描都不能触发当前身份结论。
-参考图采用明确主脸选择，贴边检测框仍须关键点等质量门禁；视频按 0.5 秒采样、最多 1200
-采样帧、每帧最多 5 候选。视频人脸 64 像素下限是未标定可用性策略，不是身份阈值。
-候选预算/扫描预算不足分别披露 `CANDIDATE_LIMIT_REACHED/VIDEO_SCAN_LIMIT_REACHED`。
-`liveness_evaluated=false`：无活体或反翻拍保证，也不证明真人在场。
+2.2.0 presence 服务端显式 `configured` 时返回 `CONFIGURED_UNVALIDATED`，完整成功扫描、
+有比对且分数达到阈值可为 `FOUND/true`；全部低于阈值且没有候选截断或局部失败才为
+`NOT_FOUND_IN_SCAN/false`。其余为 `INCONCLUSIVE/null`，尤其扫描不完整时即便已有高分也不能
+给出肯定/否定结论。普通解码/推理失败的算法 DTO 可保留 partial 数字证据，并为
+`comparison_status=FAILED`；硬截止/执行器超时仍返回 HTTP 504 `ApiErrorResponse`，不保证部分证据。
+无可比脸不等于未出现；有限扫描未匹配也不证明全片绝对不存在。默认 `uncalibrated` 仍提取
+1024 维特征并比对，返回 `THRESHOLD_NOT_CONFIGURED` 和证据，不要求签名校准或活体后才比较。
+`suggestion` 保留 REVIEW（参考目标无效可 RECAPTURE），不允许业务 PASS。
+
+参考照仍须目标明确；亮暗、模糊、姿态、小脸、贴边仅为软质量提示，参考 112px/视频 64px
+不是硬拒绝门槛。技术上可对齐且特征有效的候选继续比较；候选级关键点/对齐/非有限或零特征
+失败会记录并跳过，不中断其他候选；模型会话/维度/版本错误与未知异常仍为全局故障。
+默认基础间隔 0.5 秒，每窗口最多补采 2 帧；无可比脸、质量提示、局部失败或候选截断会触发补采。
+首尾、基础、补采去重后合计默认最多 1200 帧，长视频必要时增大实际基础间隔以覆盖全时域；
+每帧最多 5 候选，不能只比最大脸，最多五条展示证据不等于只比较五个候选。
+候选/扫描预算限制分别披露 `CANDIDATE_LIMIT_REACHED/VIDEO_SCAN_LIMIT_REACHED`，输入资源超限
+仍按 400/413/504 映射，不因尽力扫描而取消安全限制。
+`liveness_evaluated=false`：未执行且本接口不要求，不是失败门禁；无活体/反翻拍或真人在场保证。
 
 ## 4. 兼容路由与安全
 
@@ -115,7 +130,7 @@ FOUND/NOT_FOUND_IN_SCAN 只是未来保留状态；高分、无脸、完整扫�
 
 | HTTP | 典型原因码 | 处理 |
 |---:|---|---|
-| 200 | `NO_FACE`, `MULTIPLE_FACES`, `THRESHOLD_UNCALIBRATED`、预算限制原因 | presence 读取 decision/found，其余读取 suggestion |
+| 200 | `NO_FACE`, `MULTIPLE_FACES`、旧接口 `THRESHOLD_UNCALIBRATED`、presence `THRESHOLD_NOT_CONFIGURED`、预算/局部失败原因 | presence 读取 decision/found，其余读取 suggestion |
 | 400 | `INVALID_IMAGE`, `UNSUPPORTED_FORMAT`, `INVALID_VIDEO` | 修正上传 |
 | 403 | `ACCESS_DENIED` | 检查 legacy 网关、令牌和代理链 |
 | 413 | `IMAGE_TOO_LARGE`, `VIDEO_TOO_LARGE`, `VIDEO_TOO_LONG`, `VIDEO_SCAN_LIMIT_REACHED` | presence 输入解码预算超限或上传资源超限，按采集规格重传 |
@@ -132,13 +147,12 @@ presence 的 `VideoInputError` 映射为 400（无效视频等）或 413（大�
 deadline 映射 504。18002 忙时排队等到请求 deadline；不是立即返回 503，503 用于模型或
 服务停止等不可用情况。18003 测试台另有并发槽即时 429，不能混用两者契约。
 
-## 6. 阈值校准
+## 6. 阈值校准与 presence 试用阈值（独立规则）
 
-交付配置保持 `calibrated: false`（当前 YAML 的等价状态是 `mode: uncalibrated`）。在没有
+旧 images/quick/full 交付配置保持 `calibrated: false`（当前 YAML 的等价状态是 `mode: uncalibrated`）。在没有
 客户授权且按身份隔离的正负样本、ROC、FAR/FRR 和签名校准制品前，即使相似度很高，
-图像与视频也必须返回 `REVIEW + THRESHOLD_UNCALIBRATED`，绝不能返回 PASS。
-presence 独立于旧 quick/full 标定：即使旧视频发布有效校准，也不会自动开放 presence 身份
-判定。首版 presence 只有 null 身份结果；将空值转换为 false 会制造错误的排除结论。
+这些图像与视频接口也必须返回 `REVIEW + THRESHOLD_UNCALIBRATED`，绝不能返回 PASS。
+以下签名制品和 artifact 信任源要求仅适用于旧图片/quick/full，不是 presence 的配置前提。
 
 业务方提供的样本要按人员隔离训练/标定/测试集。算法方产出阈值和签名制品；业务方
 负责发布审批、版本绑定、回滚以及把校准版本与合同审计记录关联。不可直接沿用历史
@@ -149,6 +163,20 @@ artifact 模式必须由业务组合工厂从独立信任源构造只读 `Truste
 公钥信任根不能塞回算法 YAML。默认 app factory 故意不猜测信任源：artifact 配置未注入
 store、签名无效或模型/策略绑定不符时，启动阶段预建对应 image/video runtime 失败，
 readiness 返回 503；请求侧统一为安全的 `CALIBRATION_REQUIRED`，不泄露路径或签名细节。
+
+presence 使用独立服务端 `video_presence.mode`：默认 `uncalibrated` 的 `threshold/threshold_id`
+必须为 null；`configured` 必须显式配置有限 `-1 < threshold < 1` 和非空 `threshold_id`，
+HTTP 请求不接受调用方阈值。返回 `CONFIGURED_UNVALIDATED`、阈值/ID 和运行时生成的
+`policy_fingerprint`，不能自称 ACTIVE 或生产精度已验证，也不新增签名证书系统。
+默认工厂在启动时加载 `config/algorithm.yaml`（源码运行），可用 `FACE_ALGO_CONFIG` 指向
+受控完整配置；变更后重启候选服务，不支持热更新。相对模型路径按该 YAML 所在目录解析。
+没有推荐的默认身份阈值；文档里的数值阈值仅为 synthetic-only，不能用于真实上线。
+
+视频最高分是 L2 归一化 1024 维特征点积，不是出现概率、真值或准确率。先按人员划分
+tuning/evaluation，再由业务独立看完整视频标注 present/absent/uncertain/unknown；同名只代表
+关联，不保证出现，不同组视频也不能自动当负例。试用点只能用 tuning 标签选择，evaluation
+留出集不能反向调参；无标签只能报告覆盖率，生产精度仍未验证。格式、工具与泄漏检查见
+[匿名出现标签与阈值验证](PRESENCE_LABEL_VALIDATION.md)。
 
 ## 7. 上传、隐私与日志
 
@@ -206,7 +234,9 @@ readiness 会在启动期预建。内存不能按单个 ONNX 文件简单相加�
 - `/health/ready` 符合本次启用能力，未把 degraded 误当全部能力正常；
 - 阈值仍未校准时，验收用例均不产生身份 PASS；
 - full/presence 只从业务异步队列调用，可信参考和合同有效性在业务侧锁定；
-- presence 高分和无可用脸都保持 INCONCLUSIVE/null，证据只有数字；不误用旧持续一致性规则；
+- presence 验证 configured 三态与默认 uncalibrated 证据返回；无可比脸/扫描不完整仍为 INCONCLUSIVE/null，低于阈值但候选截断/局部失败不出 false；
+- presence 证据只有数字和受限提示，质量软提示与补采不改变旧五接口、签名 calibration 或业务审核责任；
+- 分清代码功能验收、人工标签阈值/精度验收和受控上线，未部署/未验证部分如实记录；
 - 网关关闭请求体日志，配置媒体大小、超时、TLS、认证和限流；
 - legacy extract 若非必要保持 404；必要时完成令牌、CIDR、可信代理与下线日期审核；
 - 客户数据不进入代码仓库、镜像、自动化测试 fixture 或普通运维日志。

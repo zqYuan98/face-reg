@@ -1,24 +1,32 @@
 # TASK-2026-001 新算法 API 联调文档
 
 本文供业务后端、APP、测试和实施人员在公司内网联调人脸算法服务。
-2026-09-28 已部署算法提交 `1e6b57b5b1dd32693497c21a0ce0039b4f77fc1b`，新增独立 presence 接口。
-完整测试、镜像、端口和回滚证据见 [发布验收记录](reports/2026-09-28-presence-release-validation.md)。
+本文已更新到 API `2.2.0` 开发契约：presence 支持低质量候选尽力比对和明确配置的试用阈值三态判定，尚未部署。
+2026-09-28 服务器 37 的 `18002/18003` 仍运行 API `2.1.0`，算法提交
+`1e6b57b5b1dd32693497c21a0ce0039b4f77fc1b`。该旧版测试、镜像、端口和回滚证据见
+[历史发布验收记录](reports/2026-09-28-presence-release-validation.md)，不能作为 2.2.0 已上线或精度已验证的证据。
+本轮本地测试、匿名现场功能/覆盖及未完成的精度/上线边界见
+[2.2.0 尽力比对验证记录](reports/2026-09-28-presence-best-effort-validation.md)。
 
 | 项目 | 值 |
 |---|---|
-| API 版本 | `2.1.0` |
+| 文档 / 源码 API 版本 | `2.2.0`（开发联调，未部署） |
+| 服务器 37 已部署 API 版本 | `2.1.0`（`1e6b57b`） |
 | 配置版本 | `2026-08-24-v1` |
-| 文档更新时间 | `2026-09-28`（presence 已部署，身份阈值仍未标定） |
+| 文档更新时间 | `2026-09-28`（区分开发契约、历史部署与未完成的现场精度验证） |
 | 特征契约 | `recognizer_v1_1024`，固定 `1024` 维 |
 | 测试环境 Base URL | `http://<server-37>:18002` |
 | 可视化测试台 | `http://<server-37>:18003` |
 | OpenAPI JSON | `http://<server-37>:18002/openapi.json` |
 | 网络范围 | 公司局域网；测试环境为 HTTP，不得暴露到公网 |
 
-> 当前身份阈值仍处于 `UNCALIBRATED`。图片和视频即使相似度很高，也会安全返回
+> 旧图片、quick/full 身份阈值仍处于 `UNCALIBRATED`。即使相似度很高，也会安全返回
 > `REVIEW + THRESHOLD_UNCALIBRATED`，不能将它解释为人员不一致，也不能自行写死
-> `0.6`、`0.7` 等阈值。视频接口当前还会同时返回 `CALIBRATION_REQUIRED`。
-> 新 presence 进一步固定 `decision=INCONCLUSIVE`、`found=null`，包括高分或无可用脸的情况。
+> `0.6`、`0.7` 等阈值；旧视频还会返回 `CALIBRATION_REQUIRED`，签名 calibration 规则不变。
+> 2.2.0 presence 独立使用服务端 `configured` / `uncalibrated` 配置：前者返回
+> `CONFIGURED_UNVALIDATED` 并可产生三态结果，后者仍计算证据但返回
+> `THRESHOLD_NOT_CONFIGURED + INCONCLUSIVE/null`。本接口不要求签名校准包或活体门禁，
+> 试用结果也不能自动放行业务。服务器上仍为旧版响应，联调新契约请指向自己的 2.2.0 候选服务。
 
 ## 1. 五分钟开始联调
 
@@ -80,7 +88,8 @@ http://<server-37>:18002/openapi.json
 ```
 
 服务关闭了 Swagger UI 和 ReDoc 页面，因此 `/docs`、`/redoc` 不可用是正常现象。
-线上 OpenAPI 已同时描述 multipart 请求和类型化响应；请重新导入并核对六条 v2 路由。
+线上 OpenAPI 描述旧 2.1.0 契约。联调本文新增字段时须导入 2.2.0 候选服务的 OpenAPI，
+核对 `info.version` 与六条 v2 路由；仅路由存在不足以确认已升级。
 应用字段校验的实际契约是 `400 + INVALID_IMAGE`，不是框架默认的 `422`。
 
 Postman/Apifox 中所有文件字段都选择 `form-data` 的 **File** 类型，不要把文件路径、
@@ -153,7 +162,7 @@ HTTP `200` 表示服务已正常给出算法结果，不等于身份通过。业
 1. 先判断 HTTP 状态码；
 2. HTTP 200 时，presence 读取 decision/found；其他五个 v2 读取 suggestion；
 3. RECAPTURE/REVIEW 时读取 reason_codes；
-4. 未标定不得自动通过；presence 首版始终转人工，不把 success/suggestion 当身份结果；
+4. 旧身份接口未标定不得自动通过；presence 试用结果仍需业务审核，不把 success/suggestion 当匹配结论；
 5. 保存 trace_id、config_version、model_versions 和业务请求号用于审计。
 ```
 
@@ -557,7 +566,7 @@ full 是同步算法接口，但最长截止时间为 600 秒。APP/网页不要
 业务后端异步任务调用，并实现幂等、任务状态、结果回写和超时补偿。算法服务本身不保存
 任务状态。
 
-## 8A. 视频目标出现（presence，已部署）
+## 8A. 视频目标出现（presence，2.2.0 开发契约，未部署）
 
 ### 8A.1 请求与边界
 
@@ -575,67 +584,222 @@ Content-Type: multipart/form-data
 curl -sS --max-time 660 -X POST \
   -F "reference_image=@./reference.jpg;filename=reference.jpg;type=image/jpeg" \
   -F "video=@./capture.mp4;filename=capture.mp4;type=video/mp4" \
-  http://<server-37>:18002/api/v2/verify/video/presence
+  http://127.0.0.1:8000/api/v2/verify/video/presence
 ```
 
-参考图允许一个明确主脸，背景较小的脸不必直接拒绝；大小相近的多人歧义仍拒绝。
-仅检测框贴边不直接失败，但关键点、姿态、模糊度、亮度和对齐质量仍须通过。
-参考图的人脸最低尺寸策略为 112 像素，视频候选为 64 像素；这些是未标定的可用性策略，
-不是身份阈值、不是识别准确率保证。多人视频逐候选评分，不把人数>1直接当作整帧失败。
+上例指向本地 2.2.0 候选；不能用仍运行旧版的 `18002` 核验新增行为。请求只声明两个文件字段，
+不接受调用方提供判定阈值；测试台也不得自行按分数重算结果。
 
-默认按 0.5 秒间隔顺序扫描，最多 1200 个采样帧，每帧最多评估 5 个候选，保留最多 5 个
-不同帧的最佳证据。其他人在场不等于目标不存在，也不要求目标全程持续出现。
-短于采样间隔的出现、遮挡、模糊、过小人脸或候选预算触顶可能遗漏目标。
-最大时长与采样预算同时生效：补采实际末帧也计入 1200 帧预算，接近 600 秒的视频可能
-需要 1201 帧并返回 HTTP 413 / `VIDEO_SCAN_LIMIT_REACHED`；600 秒并非所有编码的可扫描保证。
+参考图允许一个明确主脸，小背景脸不必直接拒绝；无法消歧的多个主体仍为参考目标无效。
+暗、亮、糊、侧脸、小脸、贴边只形成 `quality_warnings`。参考 112px、视频 64px 是软提示
+界限，不是 presence 的硬拒绝下限；只要技术上能对齐并形成有效特征就继续比对。
+仍须满足非空可见区域、有限且不退化的关键点/对齐以及有限、非零的 1024 维特征协议。
+单个候选不可比较时记局部失败并继续其他候选；模型会话异常、维度/版本错误、未知异常、
+全局解码故障仍按全局失败处理，不伪装为低质量。旧图片与 quick/full 的质量门禁不变。
+
+默认请求基础间隔 0.5 秒；基础帧无可比脸、有质量提示、有局部失败或候选截断时，
+每窗口最多分析 2 个邻近补采帧。顺序解码并保留真实首尾，按真实帧号去重。
+总分析预算默认 1200 帧，包含基础、补采与首尾，且受 `resources.max_full_video_frames` 限制。
+长视频预先按最坏补采额度规划全时域基础窗口，必要时增大有效基础间隔；
+`sampling_interval_seconds` 不一定仍为 0.5，须与 `requested_sampling_interval_seconds` 区分。
+不能因前半段补采用尽预算而宣称后半段已扫描。输入资源超限仍可能返回 400/413，deadline 为 504。
+
+每帧最多尝试 5 个候选，每个有效候选均评分，不只比较最大脸；最多展示 5 个不同帧的最佳候选。
+每条证据按分数降序、质量提示数量升序、时间升序、帧号升序稳定排序，不会隐藏低质量的最高分。
+短暂出现、遮挡及有限采样/候选预算仍可能漏掉目标，不要求持续露脸，也不承诺绝不漏检。
 
 ### 8A.2 身份语义（必须保留 null）
 
-| `decision` | `found` | 含义与本版可达性 |
+| 判定条件（按顺序） | `decision / found` | 含义 |
 |---|---|---|
-| `INCONCLUSIVE` | `null` | 无法给出已标定身份结论；首版所有结果只能是这一组合 |
-| `FOUND` | `true` | 保留状态，未来经独立标定后表示扫描中发现目标；本版不会产出 |
-| `NOT_FOUND_IN_SCAN` | `false` | 保留状态，未来表示已扫描范围未找到；本版不会产出，也不是整段绝对不存在 |
+| 算法结果为全局失败、扫描未完成、参考无效或无成功比对 | `INCONCLUSIVE / null` | 不能判断；普通故障可保留已有数字证据，不能因局部高分提前命中；HTTP 504 不保证返回证据 |
+| 未配置阈值 | `INCONCLUSIVE / null` | 已有证据仍返回；附 `THRESHOLD_NOT_CONFIGURED` |
+| 完整成功扫描且最佳分数 `>= threshold` | `FOUND / true` | 本次扫描检测到匹配；其他质量提示、候选截断/局部失败不撤销已有命中 |
+| 完整成功扫描，有比对且全部低于阈值，无候选截断和局部失败 | `NOT_FOUND_IN_SCAN / false` | 本次实际扫描的可比候选未匹配，不证明整段视频绝对未出现 |
+| 全部低于阈值，但存在候选截断或局部失败 | `INCONCLUSIVE / null` | 否定证据不足 |
 
-`success=true` 只表示本次算法流程正常给出观察结果；`suggestion` 只控制重拍/人工处理，
-不能替代 `decision/found`。首版固定 `calibration_status=UNCALIBRATED`，即便最佳分数接近 1、
-没有可用脸或完整扫描完毕，也必须是 `INCONCLUSIVE + found=null`，不能转成 false 或 PASS。
-无可评分候选时两个 `best_*` 同时为 null，`evidence_frames=[]`；这不是“没有此人”的证明。
-参考图质量失败通常建议 RECAPTURE；系统处理失败 `success=false + REVIEW`。
-所有算法 presence 结果均带 `CALIBRATION_REQUIRED`、`THRESHOLD_UNCALIBRATED`。
+`success=true` 只表示流程正常形成观测；无可比脸、参考目标不明确也可能为 true。
+无可评分候选时两个 `best_*` 同时为 null，`evidence_frames=[]`，不能将 null 转为 false。
+普通无脸帧和软质量提示不是扫描失败。参考目标无效可为 `RECAPTURE`；全局失败为
+`success=false + comparison_status=FAILED + REVIEW`。正常试用判定保持 `suggestion=REVIEW`，
+不输出业务 `PASS`；UI 主标题应显示 `decision`，不能让 REVIEW 遮盖 FOUND。
 
-下面是完整、符合本版 DTO 的未标定结构示例，数值仅供说明，并非线上实测/识别率证据：
+服务端 `video_presence.mode=configured` 要求显式、有限的 `-1 < threshold < 1` 和非空
+`threshold_id`（最长 128 字符），返回 `CONFIGURED_UNVALIDATED`；运行时生成并返回绑定
+模型、匹配器、采样/质量配置的 `policy_fingerprint`。它不是签名校准证书，不能写成 ACTIVE。
+默认 `uncalibrated` 的 threshold/threshold_id 均为 null，仍提特征、比对并返回证据，
+不伪造任何默认身份阈值。仅当 `success=true`、`scan_complete=true` 且
+`comparison_status=COMPARED` 时，未配置阈值的主标题才是“比对已完成，尚未配置判定阈值”。
+失败、参考无效、扫描未完成、无可比脸有更高显示优先级，必须显示对应原因；不能无条件宣称已完成，
+也不能把未配置阈值渲染为“缺少有效签名”或“活体失败”。
+这里不改变旧 images/quick/full 的签名 calibration 规则。
+
+默认应用工厂在启动时调用 `load_config()`；源码运行默认读取项目的 `config/algorithm.yaml`，
+可用环境变量 `FACE_ALGO_CONFIG` 指向受控的完整 YAML 配置。修改配置后须重启候选服务，
+不是热更新，也不是请求参数。下面仅是完整配置中的片段，不能单独充当完整配置文件；
+模型等相对路径按 YAML 所在目录解析，另存配置时须保留正确路径与其他能力的既有设置。
+
+默认服务端配置片段：
+
+```yaml
+video_presence:
+  mode: uncalibrated
+  threshold: null
+  threshold_id: null
+  sample_interval_seconds: 0.5
+  max_supplemental_frames: 2
+  max_analyzed_frames: 1200
+  max_face_candidates: 5
+  max_evidence_frames: 5
+  reference_min_face_size: 112  # 软质量提示界限
+  video_min_face_size: 64      # 软质量提示界限
+```
+
+仅在合成联调环境中验证 configured 路径时，可以将上面三项改为
+`mode: configured`、`threshold: 0.35`、`threshold_id: synthetic-only-example`；这是
+synthetic-only 测试配置，不是现场推荐或可直接上线的阈值。实际试用点必须由独立人工标签和
+业务风险目标确定，并保留版本/策略指纹。默认配置没有 `0.7` 或其他隐含身份阈值。
+
+以下三份完整 DTO 均为 synthetic-only 结构示例；模型版本、指纹、分数、耗时均为合成值，
+不是线上实测、真实阈值推荐或生产精度证据。示例配置阈值 `0.35` 仅验证三态，禁止直接部署到现场。
+
+未配置阈值，但完成了数值比对：
 
 ```json
 {
   "success": true,
   "suggestion": "REVIEW",
-  "reason_codes": ["CALIBRATION_REQUIRED", "THRESHOLD_UNCALIBRATED"],
-  "model_versions": {"face_detector": "legacy-v1", "face_recognizer": "legacy-v1"},
+  "reason_codes": ["THRESHOLD_NOT_CONFIGURED"],
+  "model_versions": {"face_detector": "synthetic-only", "face_recognizer": "synthetic-only"},
   "feature_version": "recognizer_v1_1024",
   "config_version": "2026-08-24-v1",
   "processing_time_ms": 800.0,
-  "trace_id": "presence-example-uncalibrated",
+  "trace_id": "synthetic-only-presence-uncalibrated",
   "mode": "presence",
   "decision": "INCONCLUSIVE",
   "found": null,
   "best_score": 0.9234,
   "best_timestamp_seconds": 0.5,
   "evidence_frames": [
-    {"frame_index": 15, "timestamp_seconds": 0.5, "score": 0.9234},
-    {"frame_index": 0, "timestamp_seconds": 0.0, "score": 0.8123},
-    {"frame_index": 29, "timestamp_seconds": 0.9666666667, "score": 0.7000}
+    {"frame_index": 15, "timestamp_seconds": 0.5, "score": 0.9234, "candidate_index": 1, "quality_warnings": []},
+    {"frame_index": 0, "timestamp_seconds": 0.0, "score": 0.8123, "candidate_index": 0, "quality_warnings": []},
+    {"frame_index": 29, "timestamp_seconds": 0.9666666667, "score": 0.6000, "candidate_index": 0, "quality_warnings": []}
   ],
   "scan_complete": true,
   "sampling_interval_seconds": 0.5,
   "sampled_frames": 3,
   "decoded_frames": 30,
   "valid_face_frames": 3,
-  "candidate_count": 3,
+  "candidate_count": 4,
   "candidate_limit_hit": false,
   "duration_seconds": 1.0,
   "timestamp_source": "pts",
+  "comparison_status": "COMPARED",
   "calibration_status": "UNCALIBRATED",
+  "threshold": null,
+  "threshold_id": null,
+  "policy_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sampling_strategy": "presence_adaptive_v1",
+  "requested_sampling_interval_seconds": 0.5,
+  "base_frames": 3,
+  "supplemental_frames": 0,
+  "compared_candidates": 4,
+  "failed_candidates": 0,
+  "quality_warnings": [],
+  "feature_dimension": 1024,
+  "matcher_version": "l2_dot_v1",
+  "liveness_evaluated": false
+}
+```
+
+明确配置的 synthetic-only 命中，带软质量提示和补采；REVIEW 不改变 FOUND：
+
+```json
+{
+  "success": true,
+  "suggestion": "REVIEW",
+  "reason_codes": [],
+  "model_versions": {"face_detector": "synthetic-only", "face_recognizer": "synthetic-only"},
+  "feature_version": "recognizer_v1_1024",
+  "config_version": "2026-08-24-v1",
+  "processing_time_ms": 800.0,
+  "trace_id": "synthetic-only-presence-found",
+  "mode": "presence",
+  "decision": "FOUND",
+  "found": true,
+  "best_score": 0.62,
+  "best_timestamp_seconds": 0.2,
+  "evidence_frames": [
+    {"frame_index": 6, "timestamp_seconds": 0.2, "score": 0.62, "candidate_index": 1, "quality_warnings": ["TOO_BLURRY"]}
+  ],
+  "scan_complete": true,
+  "sampling_interval_seconds": 0.5,
+  "sampled_frames": 4,
+  "decoded_frames": 30,
+  "valid_face_frames": 1,
+  "candidate_count": 2,
+  "candidate_limit_hit": false,
+  "duration_seconds": 1.0,
+  "timestamp_source": "pts",
+  "comparison_status": "COMPARED",
+  "calibration_status": "CONFIGURED_UNVALIDATED",
+  "threshold": 0.35,
+  "threshold_id": "synthetic-only-example",
+  "policy_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "sampling_strategy": "presence_adaptive_v1",
+  "requested_sampling_interval_seconds": 0.5,
+  "base_frames": 3,
+  "supplemental_frames": 1,
+  "compared_candidates": 2,
+  "failed_candidates": 0,
+  "quality_warnings": ["TOO_BLURRY"],
+  "feature_dimension": 1024,
+  "matcher_version": "l2_dot_v1",
+  "liveness_evaluated": false
+}
+```
+
+同一 synthetic-only 配置下，完整扫描且无候选截断/局部失败，分数均低于阈值：
+
+```json
+{
+  "success": true,
+  "suggestion": "REVIEW",
+  "reason_codes": [],
+  "model_versions": {"face_detector": "synthetic-only", "face_recognizer": "synthetic-only"},
+  "feature_version": "recognizer_v1_1024",
+  "config_version": "2026-08-24-v1",
+  "processing_time_ms": 800.0,
+  "trace_id": "synthetic-only-presence-not-found",
+  "mode": "presence",
+  "decision": "NOT_FOUND_IN_SCAN",
+  "found": false,
+  "best_score": 0.12,
+  "best_timestamp_seconds": 0.5,
+  "evidence_frames": [
+    {"frame_index": 15, "timestamp_seconds": 0.5, "score": 0.12, "candidate_index": 0, "quality_warnings": []}
+  ],
+  "scan_complete": true,
+  "sampling_interval_seconds": 0.5,
+  "sampled_frames": 3,
+  "decoded_frames": 30,
+  "valid_face_frames": 1,
+  "candidate_count": 1,
+  "candidate_limit_hit": false,
+  "duration_seconds": 1.0,
+  "timestamp_source": "pts",
+  "comparison_status": "COMPARED",
+  "calibration_status": "CONFIGURED_UNVALIDATED",
+  "threshold": 0.35,
+  "threshold_id": "synthetic-only-example",
+  "policy_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "sampling_strategy": "presence_adaptive_v1",
+  "requested_sampling_interval_seconds": 0.5,
+  "base_frames": 3,
+  "supplemental_frames": 0,
+  "compared_candidates": 1,
+  "failed_candidates": 0,
+  "quality_warnings": [],
   "feature_dimension": 1024,
   "matcher_version": "l2_dot_v1",
   "liveness_evaluated": false
@@ -645,6 +809,10 @@ curl -sS --max-time 660 -X POST \
 `scan_complete=true` 仅表示采样扫描计划正常完成，不表示逐帧穷尽人脸或已完成身份标定。
 `candidate_limit_hit=true`/`CANDIDATE_LIMIT_REACHED` 表示部分候选未评估；
 `VIDEO_SCAN_LIMIT_REACHED` 表示扫描预算受限，应结合 `scan_complete` 与计数人工处理。
+不完整扫描即便已有超过阈值的证据也必须为 INCONCLUSIVE/null；普通解码/推理失败的算法
+DTO 可保留先前证据，但 `comparison_status=FAILED`。硬截止/执行器超时保持 HTTP `504`
+和原有 `ApiErrorResponse`，不保证返回部分证据；输入超限的 400/413 也不是算法结果 DTO。
+分数是 1024 维 L2 归一化特征的点积，范围 [-1,1]；视频最高分不是概率、出现真值或准确率。
 PTS 可用时优先采用；无法可靠获得时可能使用 FPS 推算，`timestamp_source` 会披露
 `pts/estimated/mixed/unknown`。不要把 estimated 的小数位当作精确帧时间。
 
@@ -655,7 +823,7 @@ PTS 可用时优先采用；无法可靠获得时可能使用 FPS 推算，`time
 ```python
 import requests
 
-url = "http://<server-37>:18002/api/v2/verify/video/presence"
+url = "http://127.0.0.1:8000/api/v2/verify/video/presence"  # 已启动的 2.2.0 候选
 with open("reference.jpg", "rb") as reference, open("capture.mp4", "rb") as video:
     response = requests.post(
         url,
@@ -667,12 +835,20 @@ with open("reference.jpg", "rb") as reference, open("capture.mp4", "rb") as vide
     )
 response.raise_for_status()  # 400/413/500/503/504 先按 HTTP 错误处理
 result = response.json()
+# 生产客户端应使用完整 DTO 校验器；下面只展示经校验后的业务分支。
+expected = {"FOUND": True, "NOT_FOUND_IN_SCAN": False, "INCONCLUSIVE": None}
+decision = result.get("decision")
+if decision not in expected or result.get("found", "missing") is not expected[decision]:
+    raise ValueError("invalid presence decision contract")
 if result.get("calibration_status") == "UNCALIBRATED":
-    assert result.get("decision") == "INCONCLUSIVE" and result.get("found") is None
-    action = "manual_review"  # 首版只能复核；保留证据定位信息，禁止裸分数阈值
-elif result.get("decision") == "FOUND" and result.get("found") is True:
-    action = "review_version_and_calibration"  # 保留状态，本版不支持；不可直接自动放行
-elif result.get("decision") == "NOT_FOUND_IN_SCAN" and result.get("found") is False:
+    if decision != "INCONCLUSIVE" or result.get("threshold") is not None:
+        raise ValueError("invalid unconfigured presence result")
+    action = "review_evidence_threshold_not_configured"
+elif result.get("calibration_status") != "CONFIGURED_UNVALIDATED":
+    raise ValueError("unsupported presence contract")
+elif decision == "FOUND":
+    action = "review_detected_match"  # 试用命中，不是业务自动 PASS
+elif decision == "NOT_FOUND_IN_SCAN":
     action = "review_scan_scope"  # 不声称整段视频绝对不存在目标
 else:
     action = "manual_review"
@@ -681,7 +857,9 @@ print(action, result.get("decision"), result.get("best_timestamp_seconds"))
 
 `requests` 的 read timeout 不是完整业务任务的绝对时限；队列仍需配置幂等、整体超时、
 重试退避、结果回写和人工兜底。presence 与 full 一样是同步算法接口，不保存任务状态。
-没有活体、反翻拍或“真人确实在场”保证，也不能替代签署全程持续一致性验证。
+`liveness_evaluated=false` 表示未执行且本接口不要求活体，不是失败原因；没有活体、反翻拍
+或“真人确实在场”保证，也不能替代签署全程持续一致性验证。独立人工标签、人员分集及
+离线评估格式见 [匿名出现标签与阈值验证](PRESENCE_LABEL_VALIDATION.md)。
 
 ## 9. 媒体规格
 
@@ -762,9 +940,12 @@ multipart spool 和私有解码文件两份占用，按 500 MiB 上限需预留�
 | `INSUFFICIENT_VALID_FRAMES` | 视频有效帧不足 | 延长稳定正脸时长后重拍 |
 | `MULTIPLE_SUBJECTS` | 视频存在多个主体 | 只保留本次签署人 |
 | `SUBJECT_SWITCH` / `SUBJECT_SWITCHED` | 视频主体发生切换 | 重新录制完整连续视频 |
-| `THRESHOLD_UNCALIBRATED` | 身份阈值尚未标定 | 只能 REVIEW，不得自动判定 |
+| `THRESHOLD_UNCALIBRATED` | 旧 images/quick/full 身份阈值尚未标定 | 只能 REVIEW，不得自动判定 |
 | `IDENTITY_UNCERTAIN` | 已标定但相似度未达通过条件 | 转人工复核 |
-| `CALIBRATION_REQUIRED` | 缺少可信标定结果 | 检查标定发布状态 |
+| `CALIBRATION_REQUIRED` | 旧身份接口缺少可信标定结果 | 检查旧接口签名标定发布状态，不用于 presence 缺阈值提示 |
+| `THRESHOLD_NOT_CONFIGURED` | presence 未配置试用阈值 | 保留数值证据，INCONCLUSIVE/null；不是缺签名或活体失败 |
+| `CANDIDATE_LANDMARK_INVALID` / `CANDIDATE_ALIGNMENT_INVALID` / `CANDIDATE_FEATURE_INVALID` | presence 单个候选关键点、对齐或特征技术无效 | 记录局部失败，继续其他候选；不能伪造分数 |
+| `CANDIDATE_COMPARISON_INCOMPLETE` | presence 存在局部失败候选 | 已有命中可保留；未命中时不能作 false 结论 |
 | `CANDIDATE_LIMIT_REACHED` | presence 单帧候选评估预算触顶 | 未评估候选可能含目标，不能推断不存在 |
 | `VIDEO_SCAN_LIMIT_REACHED` | presence 扫描预算触顶 | 检查扫描完整度与计数，转人工 |
 | `FEATURE_VERSION_MISMATCH` | 特征模型契约不一致 | 禁止比较，核对模型版本 |
@@ -774,6 +955,10 @@ multipart spool 和私有解码文件两份占用，按 500 MiB 上限需预留�
 
 人证虚化中的证卡识别是可选增强：`CARD_NOT_FOUND`、`CARD_TOO_SMALL`、
 `CARD_CROPPED`、`CARD_DETECTION_UNCERTAIN` 不应成为人物虚化成功的业务门禁。
+
+在 2.2.0 presence 中，`TOO_DARK/TOO_BRIGHT/TOO_BLURRY/BAD_POSE/FACE_TOO_SMALL/FACE_CROPPED`
+放在独立的 `quality_warnings` 中，仅为软提示、补采触发和风险解释，不要求重拍后才能评分。
+上表关于旧图片/quick/full 的质量处理建议不能直接用作 presence 的拒绝规则。
 
 旧 quick/full 的媒体元数据或解码问题可能以 HTTP `200 + REVIEW` 返回。presence 对抛出的
 解码输入错误作安全 HTTP 映射：视频大小/时长/扫描输入预算超限为 413，INVALID_VIDEO 等为
@@ -813,7 +998,7 @@ const previewUrl = URL.createObjectURL(blob);
 4. 先验证白底照和人证虚化，确认能够解码 `image_base64`；
 5. 图片/quick/full 按已标定的 `suggestion` 判定；presence 按 `decision/found`，不按 `success` 或裸分数；
 6. 确认 `feature_dimension=1024`、`feature_version=recognizer_v1_1024`；
-7. 当前未标定环境应得到 `REVIEW + THRESHOLD_UNCALIBRATED`，不得得到身份 `PASS`；
+7. 旧未标定 images/quick/full 应为 `REVIEW + THRESHOLD_UNCALIBRATED`；presence 按配置核验三态，不能输出业务 `PASS`；
 8. quick 可同步调试；full/presence 由业务异步 worker 调用；
 9. 记录 `trace_id`、配置/模型版本和业务请求号，但不记录媒体及 Base64；
 10. 出现 HTTP 500/503/504 时附上发生时间、接口、HTTP 状态和安全的结构化响应联系算法人员。
@@ -827,7 +1012,7 @@ const previewUrl = URL.createObjectURL(blob);
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `success` | `boolean` | 流水线是否正常给出结果；不能代替建议或 presence 身份结论 |
-| `suggestion` | `"PASS" / "RECAPTURE" / "REVIEW"` | 处理建议；presence 首版禁止 PASS，身份只看 decision/found |
+| `suggestion` | `"PASS" / "RECAPTURE" / "REVIEW"` | 处理建议；presence 试用结果禁止 PASS，匹配结论只看 decision/found |
 | `reason_codes` | `string[]` | 结构化原因；成功通常为空数组 |
 | `model_versions` | `Record<string,string>` | 本次实际使用的模型版本 |
 | `config_version` | `string` | 算法配置版本 |
@@ -932,28 +1117,42 @@ presence 包含第 13.1 节全部公共字段，额外字段如下；不复用 q
 | 字段 | 类型 / 含义 |
 |---|---|
 | `mode` | 固定 `"presence"` |
-| `decision` | `"FOUND" / "NOT_FOUND_IN_SCAN" / "INCONCLUSIVE"`；本版仅 INCONCLUSIVE |
-| `found` | `boolean | null`；本版仅 null，必须原样保留 |
-| `best_score` | `number | null`，范围 [-1,1]，不是概率；与最佳时间同时可空 |
-| `best_timestamp_seconds` | 非负 `number | null`，与 best_score 同时为空或非空 |
-| `evidence_frames` | 0–5 个 `{frame_index:integer>=0,timestamp_seconds:number>=0,score:number[-1,1]}`；各帧序号唯一 |
+| `decision` | `"FOUND" / "NOT_FOUND_IN_SCAN" / "INCONCLUSIVE"`；按第 8A.2 节状态表 |
+| `found` | `boolean 或 null`；依次严格对应 true / false / null，不能把 null 转为 false |
+| `best_score` | `number 或 null`，范围 [-1,1]，不是概率；与最佳时间同时可空 |
+| `best_timestamp_seconds` | 非负 `number 或 null`，与 best_score 同时为空或非空 |
+| `evidence_frames` | 0–5 个 `{frame_index:integer>=0,timestamp_seconds:number>=0,score:number[-1,1],candidate_index:integer[0,4],quality_warnings:string[]}`；每帧最佳候选，帧号唯一 |
 | `scan_complete` | `boolean`，仅表示扫描计划完成，不等于逐帧穷尽或身份可信 |
-| `sampling_interval_seconds` | 正 `number`，默认 0.5 |
-| `sampled_frames` | 非负 `integer`，实际选取的采样帧 |
+| `sampling_strategy` | 固定 `"presence_adaptive_v1"` |
+| `requested_sampling_interval_seconds` | 正 `number`，请求的服务端基础间隔，默认 0.5；不是 HTTP 调用方参数 |
+| `sampling_interval_seconds` | 正 `number`，实际有效基础间隔，不小于请求间隔；长视频可能增大 |
+| `sampled_frames` | 非负 `integer`，实际分析帧数，包含首尾及补采去重后的帧 |
+| `base_frames`, `supplemental_frames` | 非负 `integer`，实际分析的基础/补采帧；和等于 sampled_frames |
 | `decoded_frames` | 非负 `integer`，顺序解码总帧数，含未采样帧 |
 | `valid_face_frames` | 非负 `integer`，至少有一个可评分候选的采样帧 |
 | `candidate_count` | 非负 `integer`，实际评估候选总数，不是视频里总人数 |
+| `compared_candidates`, `failed_candidates` | 非负 `integer`，成功比对候选数 / 局部失败候选数 |
 | `candidate_limit_hit` | `boolean`，是否曾超出每帧最多 5 候选的预算 |
-| `duration_seconds` | 正 `number | null`，无法可靠获得时为 null |
+| `duration_seconds` | 正 `number 或 null`，无法可靠获得时为 null |
 | `timestamp_source` | `"pts" / "estimated" / "mixed" / "unknown"` |
-| `calibration_status` | 本版固定 `"UNCALIBRATED"`，独立于 quick/full 校准包 |
+| `comparison_status` | `"COMPARED"` 至少一次成功比对；`"NO_COMPARABLE_FACE"` 未获视频可比脸；`"INVALID_REFERENCE"` 参考目标无效；`"FAILED"` 全局失败优先，普通算法失败可保留已有证据 |
+| `calibration_status` | `"UNCALIBRATED" / "CONFIGURED_UNVALIDATED"`；独立于 quick/full 签名校准包，不是 ACTIVE |
+| `threshold` | 有限 `number 或 null`，配置模式为 (-1,1) 内的显式服务端试用阈值，未配置为 null |
+| `threshold_id` | `string 或 null`；配置模式为 1–128 字符的非空白配置 ID，未配置为 null |
+| `policy_fingerprint` | 64 位小写十六进制字符串；运行时生成的模型/匹配/采样/质量策略绑定摘要，不是签名证书 |
+| `quality_warnings` | 去重的软提示数组，仅 TOO_DARK、TOO_BRIGHT、TOO_BLURRY、BAD_POSE、FACE_TOO_SMALL、FACE_CROPPED；最多 6 项，包含证据中的提示 |
 | `feature_dimension` | 固定 `1024` |
 | `matcher_version` | 固定 `"l2_dot_v1"` |
-| `liveness_evaluated` | 固定 `false` |
+| `liveness_evaluated` | 固定 `false`，未执行且本接口不要求，不作为失败门禁 |
 
-计数应满足 `valid_face_frames <= sampled_frames <= decoded_frames`，
-`valid_face_frames <= candidate_count <= sampled_frames * 5`。候选证据不泄露路径、帧像素、
-embedding 或原始文件名；其排序/最佳值用于人工定位，不能充当未标定身份阈值。
+计数应满足 `base_frames + supplemental_frames == sampled_frames`、
+`valid_face_frames <= sampled_frames <= decoded_frames`、
+`valid_face_frames <= compared_candidates <= candidate_count <= sampled_frames * 5`、
+`compared_candidates + failed_candidates <= candidate_count`；当 `success=true` 时后一个关系
+必须为等式。`RECAPTURE` 仅允许用于 `comparison_status=INVALID_REFERENCE`。有成功比对才有有效帧与证据；
+证据数不超过有效帧数，best 字段须等于排序第一条证据，不能只改 decision/found 而留下不一致字段。
+`candidate_limit_hit` 与 `CANDIDATE_LIMIT_REACHED` 必须一致。证据不泄露路径、帧像素、
+embedding 或原始文件名；最高分不是人工出现标签或概率。
 
 ## 14. 能力与业务模块对应
 
@@ -964,7 +1163,7 @@ embedding 或原始文件名；其排序/最佳值用于人工定位，不能充
 | 入场人员身份比对 | `/api/v2/verify/images` | 锁定可信参考照、人员/入场状态和审计 |
 | 签署人脸一致性快速检查 | `/api/v2/verify/video/quick` | APP 采集交互和重拍提示 |
 | 签署人脸一致性完整核验 | `/api/v2/verify/video/full` | 异步任务、合同状态、幂等、补偿和人工复核 |
-| 视频中目标是否曾出现 | `/api/v2/verify/video/presence` | 锁定参考目标、异步扫描、证据复核；首版不作自动身份结论 |
+| 视频中目标是否曾出现 | `/api/v2/verify/video/presence` | 锁定参考目标、异步扫描、三态证据复核；试用判定不作业务自动放行 |
 
 算法服务不访问业务数据库，不判断合同是否有效，不创建人工任务，也不负责保存原始证据。
 

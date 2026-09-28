@@ -9,13 +9,16 @@ from face_algorithm.schemas import FeatureVersion, ReasonCode, Suggestion
 def result_values(**overrides):
     values = dict(
         success=True, suggestion=Suggestion.REVIEW,
-        reason_codes=(ReasonCode.CALIBRATION_REQUIRED, ReasonCode.THRESHOLD_UNCALIBRATED),
+        reason_codes=(ReasonCode.THRESHOLD_NOT_CONFIGURED,),
         model_versions={"face_recognizer": "v1"},
         feature_version=FeatureVersion.RECOGNIZER_V1_1024,
         config_version="test", processing_time_ms=0.0, trace_id="trace",
         scan_complete=True, sampling_interval_seconds=0.5,
         sampled_frames=1, decoded_frames=1, valid_face_frames=0, candidate_count=0,
         candidate_limit_hit=False, duration_seconds=0.5, timestamp_source="pts",
+        comparison_status="NO_COMPARABLE_FACE", policy_fingerprint="a" * 64,
+        base_frames=1, supplemental_frames=0, compared_candidates=0, failed_candidates=0,
+        requested_sampling_interval_seconds=0.5,
     )
     values.update(overrides)
     return values
@@ -28,6 +31,7 @@ def test_policy_defaults_are_strict_frozen_and_uncalibrated():
         mode="uncalibrated", sample_interval_seconds=0.5, max_analyzed_frames=1200,
         max_face_candidates=5, max_evidence_frames=5,
         reference_min_face_size=112, video_min_face_size=64,
+        threshold=None, threshold_id=None, max_supplemental_frames=2,
     )
     with pytest.raises(ValidationError):
         policy.mode = "artifact"
@@ -82,6 +86,7 @@ def test_evidence_is_typed_unique_bounded_and_consistent():
     from face_algorithm.presence.contracts import PresenceDecision, PresenceEvidenceFrame, VideoPresenceResult
     evidence = PresenceEvidenceFrame(frame_index=0, timestamp_seconds=0.0, score=1.0)
     values = result_values(valid_face_frames=1, candidate_count=1,
+                           comparison_status="COMPARED", compared_candidates=1,
                            evidence_frames=(evidence,), best_score=1.0, best_timestamp_seconds=0.0)
     result = VideoPresenceResult(**values)
     assert result.suggestion is Suggestion.REVIEW
@@ -110,3 +115,42 @@ def test_result_discriminants_and_limit_reason_are_strict(changes):
     from face_algorithm.presence.contracts import VideoPresenceResult
     with pytest.raises(ValidationError):
         VideoPresenceResult(**result_values(**changes))
+
+
+def configured_values():
+    from face_algorithm.presence.contracts import PresenceDecision, PresenceEvidenceFrame
+    return result_values(reason_codes=(), calibration_status="CONFIGURED_UNVALIDATED",
+        threshold=0.8, threshold_id="synthetic-only", decision=PresenceDecision.FOUND, found=True,
+        comparison_status="COMPARED", valid_face_frames=1, candidate_count=1,
+        compared_candidates=1, best_score=0.9, best_timestamp_seconds=0.0,
+        evidence_frames=(PresenceEvidenceFrame(frame_index=0, timestamp_seconds=0.0, score=0.9),))
+
+
+def test_configured_result_accepts_real_decision_and_roundtrips():
+    from face_algorithm.presence.contracts import VideoPresenceResult
+    result = VideoPresenceResult(**configured_values())
+    assert result.found is True and result.suggestion is Suggestion.REVIEW
+    assert VideoPresenceResult.model_validate_json(result.model_dump_json()) == result
+
+
+@pytest.mark.parametrize("changes", [
+    {"found": False}, {"scan_complete": False}, {"threshold": 0.95},
+    {"threshold_id": " "}, {"threshold": None}, {"policy_fingerprint": "bad"},
+    {"base_frames": 0}, {"supplemental_frames": 1}, {"compared_candidates": 0},
+    {"failed_candidates": 1}, {"comparison_status": "NO_COMPARABLE_FACE"},
+    {"comparison_status": "FAILED"}, {"quality_warnings": (ReasonCode.INFERENCE_ERROR,)},
+    {"requested_sampling_interval_seconds": 1.0},
+    {"candidate_count": 2}, {"suggestion": Suggestion.RECAPTURE},
+])
+def test_configured_result_rejects_inconsistent_claims(changes):
+    from face_algorithm.presence.contracts import VideoPresenceResult
+    with pytest.raises(ValidationError):
+        VideoPresenceResult(**(configured_values() | changes))
+
+
+def test_failed_result_can_retain_prior_evidence_without_claiming_identity():
+    from face_algorithm.presence.contracts import PresenceDecision, VideoPresenceResult
+    result = VideoPresenceResult(**(configured_values() | dict(success=False,
+        scan_complete=False, comparison_status="FAILED", decision=PresenceDecision.INCONCLUSIVE,
+        found=None, reason_codes=(ReasonCode.INFERENCE_ERROR,))))
+    assert result.best_score == 0.9 and result.found is None

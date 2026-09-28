@@ -7,6 +7,18 @@ from api.services import DefaultAlgorithmServices
 from .conftest import config_with
 
 
+def test_presence_revision_version_and_trial_contract(algorithm_config):
+    schema = create_app(config=algorithm_config, services=DefaultAlgorithmServices(
+        config=algorithm_config, registry=object())).openapi()
+    assert schema["info"]["version"] == "2.2.0"
+    props = schema["components"]["schemas"]["VideoPresenceResult"]["properties"]
+    assert props["calibration_status"]["enum"] == ["UNCALIBRATED", "CONFIGURED_UNVALIDATED"]
+    assert {"threshold", "comparison_status", "compared_candidates", "base_frames"} <= set(props)
+    description = schema["paths"]["/api/v2/verify/video/presence"]["post"]["description"]
+    assert "NOT_FOUND_IN_SCAN" in description
+    assert "仅返回 INCONCLUSIVE" not in description
+
+
 @pytest.mark.parametrize("path", [
     "/api/v2/portrait/generate", "/api/v2/witness/blur-background",
     "/api/v2/verify/images", "/api/v2/verify/video/quick",

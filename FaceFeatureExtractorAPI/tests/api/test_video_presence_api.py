@@ -25,13 +25,13 @@ class PresenceServices(FakeServices):
         return presence_result()
 
 
-def presence_result():
+def presence_result(**overrides):
     from face_algorithm.presence.contracts import PresenceEvidenceFrame, VideoPresenceResult
     from face_algorithm.schemas import FeatureVersion, Suggestion
 
-    return VideoPresenceResult(
+    values = dict(
         success=True, suggestion=Suggestion.REVIEW,
-        reason_codes=(ReasonCode.CALIBRATION_REQUIRED, ReasonCode.THRESHOLD_UNCALIBRATED),
+        reason_codes=(ReasonCode.THRESHOLD_NOT_CONFIGURED,),
         model_versions={"face_recognizer": "test-v1"},
         feature_version=FeatureVersion.RECOGNIZER_V1_1024,
         config_version="test-config-v1", processing_time_ms=1.0, trace_id="presence-test",
@@ -40,7 +40,11 @@ def presence_result():
         scan_complete=True, sampling_interval_seconds=0.5, sampled_frames=3,
         decoded_frames=31, valid_face_frames=1, candidate_count=2,
         candidate_limit_hit=False, duration_seconds=1.0, timestamp_source="pts",
+        comparison_status="COMPARED", compared_candidates=2, failed_candidates=0,
+        base_frames=3, supplemental_frames=0, requested_sampling_interval_seconds=0.5,
+        policy_fingerprint="a" * 64,
     )
+    return VideoPresenceResult(**(values | overrides))
 
 
 def presence_files():
@@ -100,6 +104,19 @@ def test_presence_result_is_json_safe_and_upload_is_cleaned(algorithm_config):
     assert body["best_score"] == 0.8 and body["evidence_frames"][0]["frame_index"] == 15
     assert "embedding" not in response.text.lower()
     assert services.video_paths and all(not p.exists() for p in services.video_paths)
+
+
+@pytest.mark.parametrize("threshold,decision,found", [(0.7, "FOUND", True), (0.9, "NOT_FOUND_IN_SCAN", False)])
+def test_presence_api_serializes_configured_decisions(algorithm_config, threshold, decision, found):
+    from face_algorithm.presence.contracts import PresenceDecision
+    class ConfiguredService(PresenceServices):
+        def verify_video_presence(self, *args, **kwargs):
+            return presence_result(reason_codes=(), threshold=threshold, threshold_id="synthetic-only",
+                calibration_status="CONFIGURED_UNVALIDATED", decision=PresenceDecision(decision), found=found)
+    with TestClient(create_app(config=algorithm_config, services=ConfiguredService())) as client:
+        response = client.post(PRESENCE_PATH, files=presence_files())
+    assert response.status_code == 200
+    assert response.json()["decision"] == decision and response.json()["found"] is found
 
 
 @pytest.mark.parametrize("missing", ["reference_image", "video"])

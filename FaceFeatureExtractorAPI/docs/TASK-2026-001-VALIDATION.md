@@ -1,7 +1,11 @@
 # TASK-2026-001 验证手册
 
-2026-09-28 presence 已部署，代码测试和线上证据分开记录。
-确切 commit、镜像、现场回归及回滚见 [发布验收记录](reports/2026-09-28-presence-release-validation.md)。
+本手册对应 API `2.2.0` 本地实现，本轮低质量尽力比对、补采和试用阈值三态尚未部署。
+2026-09-28 服务器 37 的 `18002/18003` 仍为旧 API `2.1.0`（算法提交 `1e6b57b`）。
+旧 commit、镜像、现场回归及回滚见 [历史发布验收记录](reports/2026-09-28-presence-release-validation.md)，
+不是本轮功能或生产识别精度已验收的证明。代码测试、现场覆盖、人工阈值验证和上线须分别记录。
+本轮实际执行结果及仍未完成的验收项见
+[2.2.0 尽力比对验证记录](reports/2026-09-28-presence-best-effort-validation.md)，不替代人工标签/生产精度验证。
 
 ## 1. 入口
 
@@ -42,39 +46,65 @@
 
 - 旧图片身份比对、quick/full 合同参考照和视频帧继续严格单脸；presence 使用独立主脸/
   多候选策略，不得反向放宽旧接口。
-- 未发布签名标定包时，图片和视频身份结论应为 `REVIEW + THRESHOLD_UNCALIBRATED`，
+- 未发布签名标定包时，旧 images/quick/full 身份结论应为 `REVIEW + THRESHOLD_UNCALIBRATED`，
   不能显示为身份通过。
 - 所有特征维度字段均为 `1024`；公共响应不得出现 embedding 或特征数组。
 - quick 视频用于持续一致性交互检查，full 用于持续一致性异步任务；full/presence 最长 600 秒。
 
-## 4A. 目标出现候选验收（新接口）
+## 4A. 目标出现候选验收（2.2.0 未部署契约）
 
-先确认 OpenAPI 出现第六条 v2：`/api/v2/verify/video/presence`，readiness 的
-`video_presence=ready`，测试台出现“视频目标出现”，旧五入口仍可使用。
+请对本地/受控候选服务执行，先确认 OpenAPI `info.version=2.2.0` 及
+`/api/v2/verify/video/presence` 的新增字段、readiness `video_presence=ready`；仅看到第六条
+路由不足以证明已升级。测试台须出现“视频目标出现”，旧五入口仍可使用。
+配置阈值的测试用 synthetic-only 夹具，不要将测试阈值作为现场默认配置。
 
 | 场景 | 预期 |
 |---|---|
 | 清晰目标仅出现在后半段或多人画面 | 保留最佳候选时刻/数字证据，不因“非全程一致”拒绝整段 |
-| 极高相似度、完整扫描 | 仍 `UNCALIBRATED + INCONCLUSIVE + found=null`，不能显示 PASS |
+| configured、完整成功扫描、有候选达到显式阈值 | `CONFIGURED_UNVALIDATED + FOUND + found=true`；REVIEW 不覆盖主标题，也不变成业务 PASS |
+| configured、完整成功扫描、有比对且均低于阈值，无截断/局部失败 | `NOT_FOUND_IN_SCAN + found=false`，仅针对本次扫描 |
+| 默认 uncalibrated、高分且完整成功扫描、comparison_status=COMPARED | 仍返回数值证据与 `THRESHOLD_NOT_CONFIGURED + INCONCLUSIVE/null`，主标题才可显示比对已完成；失败/未完成/无可比脸标题优先，不显示缺签名/活体失败 |
 | 全程无可用脸 | 两个 best 字段均 null、空证据；found 仍 null，不能伪装 false |
-| 参考照明确主脸且检测框贴边 | 仍检查关键点/质量；不只因 bbox 贴边拒绝 |
+| 暗、糊、侧脸、小于旧 112/64px 界限、关键点近边缘但技术有效 | 质量仅软提示，实际调用特征提取并比较，不因质量独自否决 |
+| 参考照明确主脸且检测框贴边 | 非空可见区域与可用对齐仍能比较；不只因 bbox 贴边拒绝 |
 | 参考照两个近似大小的人脸 | 主脸歧义，建议重拍；无身份结论 |
-| 单帧候选超过 5 | `candidate_limit_hit=true` 与 `CANDIDATE_LIMIT_REACHED`；不声称穷尽 |
-| 扫描到预算或无法完整解码 | 检查 `scan_complete`、原因和实际计数，不能产生排除结论 |
+| 多人且目标不是最大脸；一个候选无效、其他有效 | 逐候选比对；记录局部失败，保留其他证据与后续帧 |
+| 单帧候选超过 5 / 局部候选失败 | 触发补采并记录计数/原因；完整扫描命中可 FOUND，全部低于阈值只能 INCONCLUSIVE/null |
+| 模型会话/维度/版本/未知异常 | 全局失败，不吞成普通低质量；普通算法失败可保留已有 partial 数字证据 |
+| 基础帧差而邻近帧可用、短暂出现、低帧率 | 按需补采，真实首尾与帧号去重，不虚构重复证据 |
+| 长视频/极低预算 | 首尾、基础和补采合计不超预算；必要时增大实际基础间隔，基础覆盖全时域 |
+| 扫描计划未完成或无法完整解码 | 检查 scan_complete/原因/实际计数；即使已有高分也只能 INCONCLUSIVE/null，保留已有证据 |
 | PTS 不可用或混合时间戳 | `timestamp_source` 如实为 estimated/mixed/unknown，不假装精确 |
 | 上游证据包含恶意字符串 | 测试台不执行 HTML，仅允许有界数字单元格 |
 | HTTP 非 2xx / 模型未就绪 / 超时 | 先按 HTTP 错误处理，不根据 suggestion/success 判身份 |
 
-最多 5 条证据，只能包含 `frame_index,timestamp_seconds,score`，不得输出视频帧、特征数组、
-本地路径或原始文件名。64 像素视频人脸下限是未标定可用性策略，不是身份阈值。
-所有视频均 `liveness_evaluated=false`，不提供活体/反翻拍保证。
+最多 5 条证据，字段为 `frame_index,timestamp_seconds,score,candidate_index,quality_warnings`，
+按分数降序、提示数量升序、时间升序、帧号升序稳定排序；不得输出视频帧、特征数组、路径或原始文件名。
+请求不接受调用方阈值，`configured` 必须显式阈值/ID 与指纹，默认无阈值不能伪造数字。
+`base_frames + supplemental_frames == sampled_frames`；成功观测中
+`compared_candidates + failed_candidates == candidate_count`，完整计数不变量见 API 文档第 13.6 节。
+亮暗/模糊/姿态/尺寸/贴边只放 `quality_warnings`，112px/64px 不再是 presence 硬下限。
+`liveness_evaluated=false` 表示未执行且接口不要求，不是失败门禁，亦不提供活体/反翻拍保证。
+资源输入超限仍核验 400/413，deadline 504，以及子进程/临时文件回收；不能为尽力比对绕过限制。
+硬截止/执行器超时保持 HTTP 504 `ApiErrorResponse`，不保证返回部分证据；不要把普通算法失败
+DTO 可保留证据误写成所有失败都能返回证据。
 
-候选测试台验证（本地，不等于线上证据）：
+本轮自动化验证命令（以后重跑须以实际输出更新，不沿用旧版测试数）：
 
-- `node --test tools/visual-console/tests/core.test.mjs`：20 项通过；
-- `python -m pytest tools/visual-console/tests -q`：28 项通过；
-- TDD 首轮确认新增入口/decision/证据/代理测试先失败，再实现转绿；旧功能用例全部保留。
-- 目标镜像六接口、MP4/AVI/MOV 编码验证与发布 commit：见发布验收记录。
+- `node --test tools/visual-console/tests/core.test.mjs`；
+- `python -m pytest tools/visual-console/tests -q`；
+- `python -m pytest tests/unit/presence tests/unit/video/test_presence_decoder.py tests/api/test_video_presence_api.py tests/unit/test_evaluate_presence_labels.py -q`；
+- 完整旧接口单元/API/集成回归、目标镜像六接口与实际 MP4/AVI/MOV 编码验证；
+- 记录运行环境、配置/模型版本与实际通过/跳过/失败数量；以上列表本身不代表已经运行或通过。
+
+2026-09-28 本轮主流程提供的本地验证记录：完整 Python 回归 `1264 passed, 1 skipped`
+（Windows 跳过项、2 条既有 warning），测试台 Node `31 passed`。这些是本地代码验证数量，
+不是现场准确率、目标镜像验证或上线证据；现场 100 组结果由独立验证报告记录，不在此推算。
+
+100 组现场素材只有人员关联，初始出现标签均为 unknown；同名不等于出现、跨组视频也不能
+自动作为负例。人工标签未齐时仅运行并记录匿名功能/覆盖/耗时，不发布准确率或阈值验收结论。
+先按人员/视频隔离 tuning/evaluation，再由人工看完整视频独立标注；工具要求已审核标签有
+明确 video_id，阻止同视频换 pair_id 跨集。格式与命令见 [匿名标签验证](PRESENCE_LABEL_VALIDATION.md)。
 
 ## 5. 现场图片随机抽检
 
@@ -105,7 +135,11 @@ python scripts/random_field_smoke.py `
 ## 6. 发布通过条件
 
 - 单元、API、集成和测试台测试全部通过；
+- 本轮 presence 的三态、低质量有效特征、补采/首尾/预算与局部失败隔离逐项核验；
+- 现场功能/覆盖回归与人工阈值/留出评估分开，标签或风险目标缺失时明确“生产精度未验证”；
 - 30 张固定随机样本完成匿名汇总；
 - 18002/18003 健康且只绑定 `<server-37>`；
 - 18001 容器 ID、启动时间、重启次数和端口保持不变；
 - 无明显人物泄漏、多人误放行、派生图超限或资源异常。
+
+本轮仍未执行受控上线；不能依据文档更新或旧版 18002/18003 健康将 2.2.0 标为已发布。

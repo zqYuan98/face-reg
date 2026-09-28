@@ -86,7 +86,7 @@ def test_brief_appearance_among_no_face_frames_is_retained(pipeline_factory, con
     assert result.decision.value == "INCONCLUSIVE" and result.found is None
     assert result.suggestion is Suggestion.REVIEW
     assert stream.closed
-    assert decoder.requests[0]["request"].mode == "full"
+    assert decoder.requests[0]["request"].sample_interval_seconds == 0.5
     assert decoder.requests[0]["limits"].max_analyzed_frames == 1200
 
 
@@ -114,7 +114,8 @@ def test_evidence_is_top_five_unique_frames_not_candidate_copies(pipeline_factor
     assert [frame.frame_index for frame in result.evidence_frames] == [0, 5, 10, 15, 20]
     assert result.valid_face_frames == 8 and result.candidate_count == 16
     payload = json.loads(result.model_dump_json())
-    assert all(set(frame) == {"frame_index", "timestamp_seconds", "score"} for frame in payload["evidence_frames"])
+    assert all(set(frame) == {"frame_index", "timestamp_seconds", "score", "candidate_index", "quality_warnings"}
+               for frame in payload["evidence_frames"])
     assert "embedding" not in json.dumps(payload).lower()
 
 
@@ -284,3 +285,80 @@ def test_public_builder_binds_owned_pipeline_and_real_sequential_decoder(pipelin
     assert result.timestamp_source in ("pts", "estimated", "mixed")
     assert result.valid_face_frames == 3
     assert result.found is None and result.suggestion is Suggestion.REVIEW
+
+
+@pytest.mark.parametrize("marker,expected", [(0, "FOUND"), (1, "NOT_FOUND_IN_SCAN"), (2, "INCONCLUSIVE")])
+def test_configured_runtime_applies_trial_threshold(pipeline_factory, config, marker, expected):
+    runtime, _ = bind(pipeline_factory({2: ()}), config, Stream(frames([marker])),
+                      mode="configured", threshold=0.8, threshold_id="synthetic-only")
+    result = run(runtime)
+    assert result.decision.value == expected
+    assert result.calibration_status == "CONFIGURED_UNVALIDATED"
+    assert len(result.policy_fingerprint) == 64
+    assert result.base_frames == result.sampled_frames == 1 and result.supplemental_frames == 0
+    assert ReasonCode.CALIBRATION_REQUIRED not in result.reason_codes
+
+
+def test_no_threshold_still_compares_without_signature_reason(pipeline_factory, config):
+    runtime, _ = bind(pipeline_factory(), config, Stream(frames([0])))
+    result = run(runtime)
+    assert result.comparison_status == "COMPARED"
+    assert result.compared_candidates == 1
+    assert result.threshold is None
+    assert ReasonCode.THRESHOLD_NOT_CONFIGURED in result.reason_codes
+    assert ReasonCode.CALIBRATION_REQUIRED not in result.reason_codes
+
+
+def test_low_quality_is_warning_not_rejection(pipeline_factory, config):
+    from .conftest import PoseEstimator
+    runtime, _ = bind(pipeline_factory(pose=PoseEstimator(80)), config, Stream(frames([0])),
+                      mode="configured", threshold=0.8, threshold_id="synthetic-only")
+    result = run(runtime)
+    assert result.found is True
+    assert ReasonCode.BAD_POSE in result.quality_warnings
+    assert ReasonCode.BAD_POSE not in result.reason_codes
+
+
+@pytest.mark.parametrize("poor,analyzed,extra", [(False, 2, 0), (True, 4, 2)])
+def test_window_supplements_are_compared_only_when_base_needs_more_evidence(pipeline_factory, config, poor, analyzed, extra):
+    from face_algorithm.presence.sampling import PresenceSampleFrame
+    from .conftest import PoseEstimator
+    samples = [PresenceSampleFrame(index=i, timestamp_seconds=t, image=textured(), window_index=w, kind=k)
+               for i, t, w, k in [(0, 0.0, 0, "base"), (2, 0.2, 0, "supplemental"),
+                                 (4, 0.4, 0, "supplemental"), (5, 0.5, 1, "base")]]
+    runtime, _ = bind(pipeline_factory(pose=PoseEstimator(80 if poor else 0)), config, Stream(samples),
+                      mode="configured", threshold=0.8, threshold_id="synthetic-only")
+    result = run(runtime)
+    assert result.success and result.scan_complete and result.found is True
+    assert result.base_frames == 2 and result.supplemental_frames == extra
+    assert result.sampled_frames == analyzed and result.compared_candidates == analyzed
+    assert result.decoded_frames == 6
+
+
+def test_incomplete_scan_never_makes_positive_or_negative_trial_claim(pipeline_factory, config):
+    runtime, _ = bind(pipeline_factory(), config, Stream(frames([0]), complete=False),
+                      mode="configured", threshold=0.8, threshold_id="synthetic-only")
+    result = run(runtime)
+    assert result.best_score == 1.0 and result.found is None
+
+
+def test_policy_fingerprint_changes_with_trial_threshold(pipeline_factory, config):
+    a, _ = bind(pipeline_factory(), config, Stream(frames([0])),
+                mode="configured", threshold=0.7, threshold_id="synthetic-a")
+    b, _ = bind(pipeline_factory(), config, Stream(frames([0])),
+                mode="configured", threshold=0.8, threshold_id="synthetic-b")
+    assert run(a).policy_fingerprint != run(b).policy_fingerprint
+
+
+def test_unanalyzed_supplemental_tail_cannot_claim_complete(pipeline_factory, config):
+    from face_algorithm.presence.sampling import PresenceSampleFrame
+    samples = [PresenceSampleFrame(index=i, timestamp_seconds=t, image=textured(1),
+                window_index=0, kind=k) for i, t, k in
+               [(0, 0.0, "base"), (2, 0.2, "supplemental")]]
+    runtime, _ = bind(pipeline_factory(), config, Stream(samples),
+                      mode="configured", threshold=0.8, threshold_id="synthetic-only")
+    result = run(runtime)
+    assert result.success and not result.scan_complete
+    assert result.sampled_frames == 1 and result.best_score is not None
+    assert result.found is None
+    assert ReasonCode.VIDEO_SCAN_LIMIT_REACHED in result.reason_codes

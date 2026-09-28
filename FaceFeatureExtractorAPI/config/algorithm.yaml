@@ -236,7 +236,10 @@ video_verification:
 
 video_presence:
   mode: uncalibrated
+  threshold: null
+  threshold_id: null
   sample_interval_seconds: 0.5
+  max_supplemental_frames: 2
   max_analyzed_frames: 1200
   max_face_candidates: 5
   max_evidence_frames: 5

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import * as core from "../core.js";
 import { readFile } from "node:fs/promises";
+import { runInNewContext } from "node:vm";
 
 import {
   CAPABILITIES,
@@ -66,29 +67,252 @@ test("CAPABILITIES freezes the exact six v2 contracts", () => {
   assert.equal(Object.isFrozen(CAPABILITIES[0].fields[0]), true);
 });
 
-test("presence keeps nullable identity and uses decision rather than suggestion or high score", () => {
-  const result = { mode: "presence", success: true, suggestion: "PASS", decision: "INCONCLUSIVE", found: null,
-    best_score: 0.9999, calibration_status: "UNCALIBRATED", feature_dimension: 1024, liveness_evaluated: false };
+function presenceResult(overrides = {}) {
+  return { mode: "presence", success: true, suggestion: "REVIEW", decision: "FOUND", found: true,
+    comparison_status: "COMPARED", calibration_status: "CONFIGURED_UNVALIDATED", threshold: 0.7,
+    threshold_id: "synthetic-only", policy_fingerprint: "a".repeat(64), feature_dimension: 1024,
+    feature_version: "recognizer_v1_1024", matcher_version: "l2_dot_v1", liveness_evaluated: false,
+    reason_codes: [], quality_warnings: ["TOO_DARK"], model_versions: {}, config_version: "test-v2",
+    processing_time_ms: 12, trace_id: "synthetic", best_score: 0.9, best_timestamp_seconds: 0.5,
+    evidence_frames: [{ frame_index: 15, timestamp_seconds: 0.5, score: 0.9, candidate_index: 1, quality_warnings: ["TOO_DARK"] }],
+    scan_complete: true, sampling_strategy: "presence_adaptive_v1", requested_sampling_interval_seconds: 0.5,
+    sampling_interval_seconds: 0.5, base_frames: 2, supplemental_frames: 1, sampled_frames: 3, decoded_frames: 31,
+    valid_face_frames: 1, candidate_count: 2, compared_candidates: 2, failed_candidates: 0,
+    candidate_limit_hit: false, duration_seconds: 1, timestamp_source: "pts", ...overrides };
+}
+
+test("presence displays the backend decision above REVIEW and never grants business pass", () => {
+  for (const [result, decision, label] of [
+    [presenceResult(), "FOUND", /本次扫描检测到匹配/],
+    [presenceResult({ threshold: 0.95, decision: "NOT_FOUND_IN_SCAN", found: false }), "NOT_FOUND_IN_SCAN", /本次扫描未检测到匹配/],
+    [presenceResult({ threshold: null, threshold_id: null, calibration_status: "UNCALIBRATED",
+      reason_codes: ["THRESHOLD_NOT_CONFIGURED"], decision: "INCONCLUSIVE", found: null }), "INCONCLUSIVE", /比对已完成，尚未配置判定阈值/],
+  ]) {
+    const view = getSuggestionView(result);
+    assert.equal(view.decision, decision);
+    assert.equal(view.validContract, true);
+    assert.match(view.label, label);
+    assert.equal(view.canTreatAsPass, false);
+    assert.doesNotMatch(view.notices.join(" "), /签名|活体.*失败|未标定.*任何/);
+  }
+});
+
+test("presence keeps nullable identity and shows actual score, threshold, quality and sampling statistics", () => {
+  const result = presenceResult({ threshold: null, threshold_id: null, calibration_status: "UNCALIBRATED",
+    reason_codes: ["THRESHOLD_NOT_CONFIGURED"], decision: "INCONCLUSIVE", found: null });
   const view = getSuggestionView(result);
   assert.equal(view.key, "inconclusive");
   assert.equal(view.canTreatAsPass, false);
-  assert.ok(view.notices.some((notice) => notice.includes("未标定")));
   assert.equal(getSuggestionView({ ...result, decision: "FOUND", found: true }).key, "inconclusive");
   assert.equal(getSuggestionView({ ...result, decision: "FOUND", found: true, calibration_status: undefined }).key, "inconclusive");
   assert.equal(getSuggestionView({ ...result, best_score: null, best_timestamp_seconds: null, reason_codes: ["NO_FACE"] }).key, "inconclusive");
-  const details = buildResultDetails("presence", { ...result, best_timestamp_seconds: 1.5, scan_complete: false,
-    sampling_interval_seconds: 0.5, sampled_frames: 3, decoded_frames: 45, valid_face_frames: 2,
-    candidate_count: 4, candidate_limit_hit: true, timestamp_source: "pts" });
+  const details = buildResultDetails("presence", result);
   const values = Object.fromEntries(details.map(({ key, value }) => [key, value]));
   assert.equal(values.found, "未确定（null）");
-  assert.equal(values["best-score"], "0.9999");
-  assert.equal(values["best-timestamp"], "1.500 秒");
-  assert.equal(values["scan-complete"], "否（扫描未完整覆盖）");
-  assert.equal(values["candidate-count"], "4");
+  assert.equal(values["best-score"], "0.9000");
+  assert.equal(values["best-timestamp"], "0.500 秒");
+  assert.equal(values["scan-complete"], "是（仅指采样计划）");
+  assert.equal(values["candidate-count"], "2");
   assert.equal(values["sampling-interval"], "0.500 秒");
+  assert.equal(values["requested-sampling-interval"], "0.500 秒");
+  assert.equal(values["base-frames"], "2");
+  assert.equal(values["supplemental-frames"], "1");
+  assert.equal(values["compared-candidates"], "2");
+  assert.equal(values["failed-candidates"], "0");
+  assert.equal(values.threshold, "未配置");
+  assert.match(values["quality-warnings"], /画面过暗/);
   assert.equal(values["timestamp-source"], "pts");
+  const configured = Object.fromEntries(buildResultDetails("presence", presenceResult()).map(({ key, value }) => [key, value]));
+  assert.equal(configured.decision, "FOUND");
+  assert.equal(configured.found, "是（true）");
+  assert.equal(configured.threshold, "0.7000");
+  assert.match(configured.calibration, /试用.*未验证/);
   assert.equal(getCapability("video_presence")?.timeoutMs, getCapability("full").timeoutMs);
   assert.deepEqual(getCapability("presence").fields.map(({ name }) => name), ["reference_image", "video"]);
+});
+
+test("presence rejects contradictory configured and unknown responses without deriving a decision", () => {
+  const invalid = [
+    { decision: "SOMETHING_NEW" }, { found: false }, { success: false }, { scan_complete: false },
+    { best_score: 0.6 }, { threshold: 0.9 + Number.EPSILON }, { threshold: 1 }, { threshold: -1 },
+    { threshold: "0.7" }, { threshold_id: " " }, { policy_fingerprint: "bad" }, { suggestion: "PASS" },
+    { comparison_status: "UNKNOWN" }, { comparison_status: "NO_COMPARABLE_FACE" },
+    { comparison_status: undefined }, { sampling_strategy: "unknown" },
+    { requested_sampling_interval_seconds: 0 }, { base_frames: 1 }, { supplemental_frames: -1 },
+    { sampled_frames: 32 }, { valid_face_frames: 4 }, { candidate_count: 99 }, { compared_candidates: 0 },
+    { failed_candidates: 1 }, { candidate_count: 1 }, { decoded_frames: 15 },
+    { quality_warnings: "TOO_DARK" }, { quality_warnings: [123] },
+    { quality_warnings: [] }, { evidence_frames: [] }, { best_timestamp_seconds: 0.6 },
+    { evidence_frames: [...presenceResult().evidence_frames, ...presenceResult().evidence_frames] },
+    { evidence_frames: [{ ...presenceResult().evidence_frames[0], candidate_index: 5 }] },
+    { evidence_frames: [{ ...presenceResult().evidence_frames[0], quality_warnings: [false] }] },
+    { decision: "NOT_FOUND_IN_SCAN", found: false },
+    { calibration_status: "ACTIVE" }, { liveness_evaluated: true },
+    { decision: "INCONCLUSIVE", found: null },
+    { threshold: 0.95, decision: "INCONCLUSIVE", found: null },
+    { requested_sampling_interval_seconds: 1 }, { policy_fingerprint: "A".repeat(64) },
+    { threshold_id: "x".repeat(129) }, { reason_codes: ["THRESHOLD_NOT_CONFIGURED"] },
+    { candidate_count: 3 }, { suggestion: "RECAPTURE" },
+  ];
+  for (const overrides of invalid) {
+    const result = presenceResult(overrides);
+    const view = getSuggestionView(result);
+    assert.equal(view.validContract, false, JSON.stringify(overrides));
+    assert.match(view.label, /不可用/, JSON.stringify(overrides));
+    assert.equal(view.canTreatAsPass, false);
+    assert.notEqual(view.decision, "FOUND");
+  }
+  const ambiguous = presenceResult({ decision: "INCONCLUSIVE", found: null, scan_complete: false });
+  assert.equal(getSuggestionView(ambiguous).decision, "INCONCLUSIVE");
+  assert.equal(getSuggestionView(ambiguous).validContract, true);
+  // Even a valid high score does not authorize changing an explicit backend INCONCLUSIVE.
+  assert.notEqual(getSuggestionView(ambiguous).decision, "FOUND");
+});
+
+test("presence allows hits despite local failures but excludes unsupported negative conclusions", () => {
+  for (const overrides of [{ candidate_limit_hit: true, reason_codes: ["CANDIDATE_LIMIT_REACHED"] },
+    { failed_candidates: 1, candidate_count: 3 }]) {
+    assert.equal(getSuggestionView(presenceResult(overrides)).decision, "FOUND");
+    const negative = presenceResult({ ...overrides, threshold: 0.95, decision: "NOT_FOUND_IN_SCAN", found: false });
+    assert.equal(getSuggestionView(negative).validContract, false);
+    assert.equal(getSuggestionView({ ...negative, decision: "INCONCLUSIVE", found: null }).validContract, true);
+  }
+});
+
+test("presence distinguishes no comparable face, invalid reference and global failure", () => {
+  const empty = { best_score: null, best_timestamp_seconds: null, evidence_frames: [], compared_candidates: 0,
+    valid_face_frames: 0, candidate_count: 0, quality_warnings: [], decision: "INCONCLUSIVE", found: null };
+  for (const [status, overrides, label] of [
+    ["NO_COMPARABLE_FACE", {}, /未获得可比人脸/],
+    ["INVALID_REFERENCE", { scan_complete: false, sampled_frames: 0, base_frames: 0, supplemental_frames: 0, decoded_frames: 0 }, /参考.*不可用/],
+    ["FAILED", { success: false, scan_complete: false }, /处理失败/],
+  ]) {
+    const view = getSuggestionView(presenceResult({ ...empty, ...overrides, comparison_status: status }));
+    assert.equal(view.validContract, true, status);
+    assert.match(view.label, label);
+    assert.equal(view.decision, "INCONCLUSIVE");
+  }
+  const failedWithEvidence = getSuggestionView(presenceResult({ success: false, scan_complete: false,
+    comparison_status: "FAILED", decision: "INCONCLUSIVE", found: null }));
+  assert.equal(failedWithEvidence.validContract, true);
+});
+
+test("presence aligns unconfigured failure, fingerprint and warning constraints with the DTO", () => {
+  const result = presenceResult({ success: false, scan_complete: false, comparison_status: "FAILED",
+    threshold: null, threshold_id: null, calibration_status: "UNCALIBRATED",
+    reason_codes: ["THRESHOLD_NOT_CONFIGURED"], decision: "INCONCLUSIVE", found: null });
+  assert.equal(getSuggestionView(result).validContract, true);
+  for (const overrides of [{ suggestion: "RECAPTURE" }, { policy_fingerprint: null },
+    { quality_warnings: ["TOO_DARK", "TOO_DARK"] }, { quality_warnings: ["INFERENCE_ERROR"] }]) {
+    assert.equal(getSuggestionView({ ...result, ...overrides }).validContract, false, JSON.stringify(overrides));
+  }
+});
+
+test("unfinished unconfigured comparisons never claim the scan is complete", () => {
+  const result = presenceResult({ scan_complete: false, threshold: null, threshold_id: null,
+    calibration_status: "UNCALIBRATED", reason_codes: ["THRESHOLD_NOT_CONFIGURED"], decision: "INCONCLUSIVE", found: null });
+  const view = getSuggestionView(result);
+  assert.equal(view.validContract, true);
+  assert.match(view.label, /扫描未完成/);
+  assert.doesNotMatch(view.label, /比对已完成/);
+  const details = Object.fromEntries(buildResultDetails("presence", result).map(({ key, value }) => [key, value]));
+  assert.equal(details["best-score"], "0.9000");
+  assert.equal(details["scan-complete"], "否（扫描未完整覆盖）");
+});
+
+test("presence contract verifies the original mode for modern and legacy responses", () => {
+  const legacy = { ...presenceResult(), calibration_status: "UNCALIBRATED", decision: "INCONCLUSIVE", found: null,
+    reason_codes: ["CALIBRATION_REQUIRED", "THRESHOLD_UNCALIBRATED"] };
+  for (const field of ["comparison_status", "threshold", "threshold_id", "policy_fingerprint", "compared_candidates",
+    "quality_warnings", "sampling_strategy", "base_frames", "supplemental_frames", "failed_candidates",
+    "requested_sampling_interval_seconds"]) delete legacy[field];
+  assert.equal(getSuggestionView(legacy).validContract, true);
+  for (const original of [presenceResult(), legacy]) {
+    for (const mode of ["quick", "full", "images", undefined, null]) {
+      const result = { ...original, mode };
+      const view = getSuggestionView(result, "presence");
+      assert.equal(view.validContract, false, String(mode));
+      assert.match(view.label, /不可用/);
+      const details = Object.fromEntries(buildResultDetails("presence", result).map(({ key, value }) => [key, value]));
+      assert.equal(details.decision, "不可用");
+      assert.equal(details.found, "不可用");
+    }
+  }
+});
+
+async function consoleApp(fetch) {
+  const source = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  const nodes = new Map([
+    ["#result-content", { hidden: true }], ["#result-empty", { hidden: false }],
+    ["#result-suggestion", { textContent: "" }], ["#result-status", { textContent: "", dataset: {} }],
+    ["#evidence-frames-body", evidenceBody()],
+  ]);
+  const document = { body: { dataset: {} }, querySelector: (selector) => nodes.get(selector) ?? null,
+    querySelectorAll: () => [], createElement(tag) {
+      assert.equal(tag, "video");
+      return { duration: 1, videoWidth: 100, videoHeight: 100, removeAttribute() {}, load() {},
+        set src(value) { queueMicrotask(() => this.onloadedmetadata()); } };
+    } };
+  const context = { ...core, document, fetch, URL, FormData, AbortSignal, performance, CSS: { escape: (value) => value },
+    window: { clearTimeout() {}, setTimeout() {} } };
+  // Run the real app functions in a small DOM environment; omit only page startup/polling.
+  runInNewContext(source.slice(0, source.lastIndexOf("\nbindEvents();"))
+    .replace(/^import\s*\{[\s\S]*?\}\s*from\s*"\.\/core\.js";/, "")
+    + "\nglobalThis.app = { state, nodes, runCurrentTest, handleSelectedFile, clearField, renderResult };", context);
+  const app = context.app;
+  app.state.capabilityId = "verify-video-presence";
+  app.state.capabilities = { video_presence: "ready" };
+  app.state.csrfToken = "t".repeat(32);
+  app.state.csrfExpiresAt = Date.now() + 900_000;
+  app.state.files.set("reference_image", new File(["image"], "reference.png", { type: "image/png" }));
+  app.state.files.set("video", new File(["video-a"], "a.mp4", { type: "video/mp4" }));
+  app.state.metadata.set("reference_image", { width: 100, height: 100 });
+  app.state.metadata.set("video", { durationSeconds: 1, fps: 30 });
+  return app;
+}
+
+test("delayed presence responses cannot attach old evidence to replacement media", async () => {
+  for (const rejectResponse of [false, true]) {
+    let release;
+    let reached;
+    let uploadedVideo;
+    const started = new Promise((resolve) => { reached = resolve; });
+    const response = new Promise((resolve, reject) => { release = rejectResponse ? reject : resolve; });
+    const app = await consoleApp((url, request) => {
+      uploadedVideo = request.body.get("video");
+      reached();
+      return response;
+    });
+    const pending = app.runCurrentTest({ preventDefault() {} });
+    await started;
+    assert.equal(app.state.running, true);
+    await app.handleSelectedFile(getCapability("presence").fields[1], new File(["video-b"], "b.mp4", { type: "video/mp4" }));
+    assert.equal(await uploadedVideo.text(), "video-a");
+    release(rejectResponse ? new Error("old request failed") : { status: 200, ok: true, text: async () => JSON.stringify(presenceResult()) });
+    await pending;
+    assert.equal(app.state.running, false);
+    assert.equal(app.nodes.resultContent.hidden, true, "stale response must not render against replacement media");
+    assert.equal(app.nodes.evidenceBody.children.length, 0);
+    assert.equal(await app.state.files.get("video").text(), "video-b");
+  }
+});
+
+test("presence endpoint renders only original presence mode and accepts a current request", async () => {
+  for (const mode of ["presence", "quick", "full", undefined]) {
+    const app = await consoleApp(async () => ({ status: 200, ok: true,
+      text: async () => JSON.stringify(presenceResult({ mode })) }));
+    await app.runCurrentTest({ preventDefault() {} });
+    assert.equal(app.state.running, false);
+    assert.equal(app.nodes.resultContent.hidden, false);
+    if (mode === "presence") {
+      assert.equal(app.nodes.resultStatus.textContent, "FOUND");
+      assert.equal(app.nodes.evidenceBody.children.length, 1);
+    } else {
+      assert.equal(app.nodes.resultStatus.textContent, "UNAVAILABLE");
+      assert.match(app.nodes.resultSuggestion.textContent, /不可用/);
+      assert.equal(app.nodes.evidenceBody.children.length, 0);
+    }
+  }
 });
 
 test("presence evidence is bounded numeric text rendered without HTML interpolation", () => {
@@ -102,10 +326,59 @@ test("presence evidence is bounded numeric text rendered without HTML interpolat
     ...Array.from({ length: 9 }, (_, i) => ({ frame_index: i + 20, timestamp_seconds: i + 1, score: 0.7 }))];
   core.renderEvidenceFrames(body, { evidence_frames: evidence });
   assert.equal(body.children.length, 5);
-  assert.deepEqual(body.children[0].children.map((cell) => cell.textContent), ["12", "0.500", "0.9990"]);
+  assert.deepEqual(body.children[0].children.map((cell) => cell.textContent), ["12", "0.500", "0.9990", "—", "旧响应未提供"]);
   assert.ok(body.children.every((row) => row.children.every((cell) => !String(cell.textContent).includes("<"))));
   core.renderEvidenceFrames(body, { evidence_frames: [] });
   assert.equal(body.children.length, 0);
+});
+
+function evidenceBody() {
+  const makeNode = (tag) => ({ tag, children: [], textContent: "", handlers: {},
+    append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; },
+    addEventListener(name, listener) { this.handlers[name] = listener; },
+    setAttribute(name, value) { this[name] = value; } });
+  const body = makeNode("tbody");
+  body.ownerDocument = { createElement: makeNode };
+  return body;
+}
+
+test("presence evidence uses accessible seek buttons and clears stale interactions on reset", () => {
+  const body = evidenceBody();
+  const sought = [];
+  core.renderEvidenceFrames(body, presenceResult(), { onSeek: (seconds) => sought.push(seconds) });
+  const cells = body.children[0].children;
+  const button = cells[1].children[0];
+  assert.equal(button?.tag, "button");
+  assert.equal(button.type, "button");
+  assert.equal(button.textContent, "0.500 秒");
+  assert.match(button["aria-label"], /本地.*0\.500/);
+  assert.equal(cells[3].textContent, "1");
+  assert.match(cells[4].textContent, /画面过暗/);
+  button.handlers.click();
+  assert.deepEqual(sought, [0.5]);
+  core.renderEvidenceFrames(body, {});
+  assert.equal(body.children.length, 0);
+  button.handlers.click();
+  assert.deepEqual(sought, [0.5]);
+  core.renderEvidenceFrames(body, presenceResult());
+  assert.equal(body.children[0].children[1].children.length, 0);
+});
+
+test("evidence seek only changes the currently uploaded local preview and never fetches media", () => {
+  assert.equal(typeof core.seekEvidencePreview, "function");
+  const preview = { src: "blob:synthetic-local", duration: 2, currentTime: 0,
+    pause() { this.paused = true; }, focus() { this.focused = true; }, scrollIntoView() { this.scrolled = true; } };
+  assert.equal(core.seekEvidencePreview(preview, "blob:synthetic-local", 1.25), true);
+  assert.equal(preview.currentTime, 1.25);
+  assert.equal(preview.src, "blob:synthetic-local");
+  assert.equal(preview.paused, true);
+  assert.equal(preview.focused, true);
+  for (const [video, url, time] of [[preview, "https://example.test/video.mp4", 1],
+    [preview, "blob:stale", 1], [preview, "blob:synthetic-local", 9], [preview, "blob:synthetic-local", -1],
+    [preview, "blob:synthetic-local", NaN], [null, "blob:synthetic-local", 1]]) {
+    assert.equal(core.seekEvidencePreview(video, url, time), false);
+  }
+  assert.equal(preview.currentTime, 1.25);
 });
 
 test("presence v1 rejects forged active decisions and never labels them calibrated or found", () => {
@@ -146,6 +419,15 @@ test("presence UI wires readiness, evidence and a bounded browser deadline", asy
   assert.match(html, /id="evidence-frames-body"/);
   assert.doesNotMatch(app, /innerHTML|insertAdjacentHTML/);
   assert.doesNotMatch(app, /found: "FOUND"|"not-found": "NOT_FOUND_IN_SCAN"/);
+  assert.match(app, /presence \? view\.decision/);
+  assert.doesNotMatch(app, /presence \? "INCONCLUSIVE"/);
+  assert.match(app, /onSeek: seekLocalEvidence/);
+  assert.match(app, /seekEvidencePreview\(preview, state\.previewUrls\.get\("video"\), timestamp\)/);
+  assert.match(app, /view\.validContract \? payload : \{\}/);
+  assert.match(app, /if \(!presence\) renderDerivedImage\(payload\)/);
+  assert.doesNotMatch(app, /首版未标定|所有身份结论均为 INCONCLUSIVE/);
+  assert.match(html, /候选序号/);
+  assert.match(html, /质量提示/);
 });
 
 test("capability readiness is independent from the global core state", () => {

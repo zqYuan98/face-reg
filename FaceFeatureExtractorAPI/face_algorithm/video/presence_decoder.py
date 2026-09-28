@@ -20,6 +20,12 @@ from typing import Any, Callable, Iterator, Literal
 
 import numpy as np
 
+from face_algorithm.presence.sampling import (
+    PresenceDecodeRequest,
+    PresenceSampleFrame,
+    PresenceSamplingPlan,
+    build_presence_sampling_plan,
+)
 from face_algorithm.schemas import ReasonCode
 from face_algorithm.video.decoder import (
     DecodeRequest,
@@ -44,6 +50,8 @@ _TIME_EPSILON = 1e-7
 
 @dataclass(frozen=True, slots=True)
 class PresenceDecodeSummary:
+    """Confirmed decode progress; sampled_frames counts transported candidates."""
+
     decoded_frames: int = 0
     sampled_frames: int = 0
     scan_complete: bool = False
@@ -186,10 +194,75 @@ class _Timeline:
         return "estimated"
 
 
+class _PresenceCandidates:
+    """One pending candidate lets the actual EOF frame become a base frame.
+
+    No image windows or outbound queue accumulate here: each candidate is sent
+    synchronously once a later real frame proves it is not the terminal frame.
+    """
+
+    def __init__(self, plan: PresenceSamplingPlan, connection: Any, deadline: float) -> None:
+        self.plan = plan
+        self.connection = connection
+        self.deadline = deadline
+        self.sampled = 0
+        self.window = -1
+        self.next_supplemental = 1
+        self.pending: tuple[int, float, np.ndarray, int, str] | None = None
+
+    def _send(self, candidate: tuple[int, float, np.ndarray, int, str]) -> None:
+        if self.sampled >= self.plan.frame_budget:
+            raise VideoInputError(ReasonCode.VIDEO_SCAN_LIMIT_REACHED, "video candidate budget exceeded")
+        _check_deadline(self.deadline)
+        self.connection.send(("frame", *candidate))
+        self.sampled += 1
+
+    def observe(self, index: int, timestamp: float, frame: np.ndarray) -> None:
+        if self.pending is not None:
+            self._send(self.pending)
+            self.pending = None
+        if self.plan.frame_budget == 1 and index != 0:
+            return
+        # The final allocated window is fully budgeted even when container
+        # duration stops partway through it. Do not drop its later targets.
+        horizon = self.plan.window_count * self.plan.sampling_interval_seconds
+        if timestamp >= horizon and index != 0:
+            return
+        interval = self.plan.sampling_interval_seconds
+        window = min(self.plan.window_count - 1, math.floor(math.nextafter(timestamp / interval, math.inf)))
+        if window > self.window:
+            self.window = window
+            self.next_supplemental = 1
+            kind = "base"
+        else:
+            target = (window + self.next_supplemental / (1 + self.plan.max_supplemental_frames)) * interval
+            if self.next_supplemental > self.plan.max_supplemental_frames or timestamp < math.nextafter(target, -math.inf):
+                return
+            kind = "supplemental"
+        # A low-FPS frame may satisfy several targets. Consume all of them, but
+        # publish that real frame only once; a newly crossed base has priority.
+        while self.next_supplemental <= self.plan.max_supplemental_frames:
+            target = (window + self.next_supplemental / (1 + self.plan.max_supplemental_frames)) * interval
+            if timestamp < math.nextafter(target, -math.inf):
+                break
+            self.next_supplemental += 1
+        self.pending = (index, timestamp, np.ascontiguousarray(frame).copy(), window, kind)
+
+    def finish(self, index: int, timestamp: float, frame: np.ndarray) -> None:
+        if self.pending is not None:
+            candidate = self.pending
+            if candidate[4] == "supplemental":
+                candidate = (*candidate[:3], candidate[3] + 1, "base")
+            self._send(candidate)
+            self.pending = None
+        elif self.plan.frame_budget > 1:
+            self._send((index, timestamp, np.ascontiguousarray(frame), self.window + 1, "base"))
+
+
 def _opencv_presence_worker(
     connection: Any,
     video_path: str,
-    request: DecodeRequest,
+    request: DecodeRequest | PresenceDecodeRequest,
     limits: VideoResourceLimits,
     expected_size: int,
     deadline_monotonic: float,
@@ -218,6 +291,10 @@ def _opencv_presence_worker(
                                  path.suffix.casefold().lstrip(".") or "unknown")
         _validate_metadata(metadata, limits)
         connection.send(("metadata", metadata))
+        candidates = None
+        if isinstance(request, PresenceDecodeRequest):
+            plan = build_presence_sampling_plan(request, metadata.duration_seconds, limits.max_analyzed_frames)
+            candidates = _PresenceCandidates(plan, connection, deadline_monotonic)
         timeline = _Timeline(fps)
         budget = _frame_budget(limits, fps)
         decoded = sampled = 0
@@ -250,7 +327,9 @@ def _opencv_presence_worker(
             duration = timestamp + 1.0 / fps
             if duration > limits.max_duration_seconds + _TIME_EPSILON:
                 raise VideoInputError(ReasonCode.VIDEO_TOO_LONG, "decoded timeline exceeds the duration limit")
-            if timestamp + _TIME_EPSILON >= next_sample:
+            if candidates is not None:
+                candidates.observe(decoded, timestamp, frame)
+            elif timestamp + _TIME_EPSILON >= next_sample:
                 send_frame(decoded, timestamp, frame)
                 next_sample = (math.floor((timestamp + _TIME_EPSILON) / request.full_interval_seconds) + 1) * request.full_interval_seconds
             last_frame = frame
@@ -258,10 +337,20 @@ def _opencv_presence_worker(
         _check_eof(decoded, metadata.total_frames)
         if path.stat().st_size != expected_size:
             raise _failure("video changed during decoding")
-        if last_sample_index != decoded - 1:
+        complete = True
+        if candidates is not None:
+            candidates.finish(decoded - 1, timeline.last, last_frame)
+            sampled = candidates.sampled
+            # Coverage concerns real frame PTS, not an invented trailing frame
+            # duration derived from average FPS. A VFR tail can differ from
+            # that average while remaining inside all preallocated windows.
+            horizon = candidates.plan.window_count * candidates.plan.sampling_interval_seconds
+            complete = (timeline.last <= horizon + _TIME_EPSILON
+                        and (candidates.plan.frame_budget > 1 or decoded == 1))
+        elif last_sample_index != decoded - 1:
             send_frame(decoded - 1, timeline.last, last_frame)
         _check_deadline(deadline_monotonic)
-        connection.send(("done", PresenceDecodeSummary(decoded, sampled, True, duration, timeline.source)))
+        connection.send(("done", PresenceDecodeSummary(decoded, sampled, complete, duration, timeline.source)))
     except VideoDecodeError as error:
         _send_error(connection, error.reason_code, str(error))
     except Exception:
@@ -290,7 +379,8 @@ def _worker_error(message: tuple[Any, ...]) -> VideoDecodeError:
 
 class _PresenceStream:
     def __init__(self, process: Any, connection: Any, metadata: VideoMetadata,
-                 limits: VideoResourceLimits, deadline: float) -> None:
+                 limits: VideoResourceLimits, deadline: float,
+                 request: DecodeRequest | PresenceDecodeRequest | None = None) -> None:
         self.metadata = metadata
         self.summary = PresenceDecodeSummary()
         self._process = process
@@ -302,6 +392,13 @@ class _PresenceStream:
         self._index = -1
         self._timestamp = -1.0
         self._received = 0
+        self._plan = (build_presence_sampling_plan(request, metadata.duration_seconds, limits.max_analyzed_frames)
+                      if isinstance(request, PresenceDecodeRequest) else None)
+        self.sampling_interval_seconds = (self._plan.sampling_interval_seconds if self._plan is not None
+                                          else request.full_interval_seconds if request is not None else None)
+        self._window = -1
+        self._kind: str | None = None
+        self._supplemental = 0
 
     def __enter__(self) -> _PresenceStream:
         return self
@@ -309,7 +406,7 @@ class _PresenceStream:
     def __exit__(self, *_args: object) -> None:
         self.close()
 
-    def __iter__(self) -> Iterator[DecodedFrame]:
+    def __iter__(self) -> Iterator[DecodedFrame | PresenceSampleFrame]:
         while not self._done and not self._closed:
             try:
                 message = _receive_presence_message(self._process, self._connection, self._deadline)
@@ -319,9 +416,9 @@ class _PresenceStream:
                     self._finish(message)
                     self.close()
                     return
-                if message[0] != "frame" or len(message) != 4:
+                if message[0] != "frame" or len(message) != (6 if self._plan is not None else 4):
                     raise _failure("decoder worker returned an invalid frame message")
-                index, timestamp, frame = message[1:]
+                index, timestamp, frame = message[1:4]
                 if (type(index) is not int or index <= self._index
                     or index >= _frame_budget(self._limits, self.metadata.fps)
                     or (self._received == 0 and index != 0)
@@ -334,6 +431,17 @@ class _PresenceStream:
                     raise VideoInputError(ReasonCode.VIDEO_TOO_LONG, "decoded timeline exceeds the duration limit")
                 if self._received >= self._limits.max_analyzed_frames:
                     raise VideoInputError(ReasonCode.VIDEO_SCAN_LIMIT_REACHED, "video sample budget exceeded")
+                if self._plan is not None:
+                    window, kind = message[4:]
+                    if (type(window) is not int or window < 0 or window > self._plan.window_count
+                        or kind not in ("base", "supplemental")
+                        or (self._received == 0 and (window != 0 or kind != "base"))
+                        or (kind == "base" and window <= self._window)
+                        or (kind == "supplemental" and (window != self._window
+                            or self._supplemental >= self._plan.max_supplemental_frames))):
+                        raise _failure("decoder worker violated the sampling window contract")
+                    self._supplemental = 0 if kind == "base" else self._supplemental + 1
+                    self._window, self._kind = window, kind
                 self._index = index
                 self._timestamp = float(timestamp)
                 self._received += 1
@@ -344,21 +452,36 @@ class _PresenceStream:
             except BaseException:
                 self.close()
                 raise
-            yield DecodedFrame(index, float(timestamp), owned)
+            if self._plan is not None:
+                yield PresenceSampleFrame(index, float(timestamp), owned, self._window, self._kind)
+            else:
+                yield DecodedFrame(index, float(timestamp), owned)
 
     def _finish(self, message: tuple[Any, ...]) -> None:
         if len(message) != 2 or not isinstance(message[1], PresenceDecodeSummary):
             raise _failure("decoder worker returned an invalid completion summary")
         summary = message[1]
-        if (summary.scan_complete is not True
-            or type(summary.decoded_frames) is not int or summary.decoded_frames != self._index + 1
+        incomplete_allowed = self._plan is not None and summary.scan_complete is False
+        missing_last_allowed = incomplete_allowed and self._plan.frame_budget == 1
+        if (type(summary.scan_complete) is not bool or (not summary.scan_complete and not incomplete_allowed)
+            or type(summary.decoded_frames) is not int or summary.decoded_frames < self._index + 1
+            or (not missing_last_allowed and summary.decoded_frames != self._index + 1)
+            or summary.decoded_frames > _frame_budget(self._limits, self.metadata.fps)
             or type(summary.sampled_frames) is not int or summary.sampled_frames != self._received
             or self._received <= 0 or summary.decoded_frames < summary.sampled_frames
             or isinstance(summary.duration_seconds, bool) or not isinstance(summary.duration_seconds, (int, float))
             or not math.isfinite(summary.duration_seconds)
-            or not math.isclose(summary.duration_seconds, self._timestamp + 1 / self.metadata.fps, rel_tol=1e-9)
+            or summary.duration_seconds > self._limits.max_duration_seconds + _TIME_EPSILON
+            or summary.duration_seconds + _TIME_EPSILON < self._timestamp + 1 / self.metadata.fps
+            or (not missing_last_allowed and not math.isclose(
+                summary.duration_seconds, self._timestamp + 1 / self.metadata.fps, rel_tol=1e-9))
             or summary.timestamp_source not in ("pts", "estimated", "mixed")):
             raise _failure("decoder worker returned an inconsistent completion summary")
+        if self._plan is not None:
+            if self._kind != "base" or (summary.scan_complete and (
+                self._timestamp > self._plan.window_count * self._plan.sampling_interval_seconds + _TIME_EPSILON
+                or (self._plan.frame_budget == 1 and summary.decoded_frames != 1))):
+                raise _failure("decoder worker claimed an incomplete sampling plan was complete")
         _check_eof(summary.decoded_frames, self.metadata.total_frames)
         self.summary = summary
         self._done = True
@@ -375,11 +498,11 @@ class OpenCvPresenceDecoder:
     def __init__(self, *, worker_target: Callable[..., None] | None = None) -> None:
         self._worker_target = worker_target or _opencv_presence_worker
 
-    def open(self, video_path: str | os.PathLike[str], *, request: DecodeRequest,
+    def open(self, video_path: str | os.PathLike[str], *, request: DecodeRequest | PresenceDecodeRequest,
              limits: VideoResourceLimits, deadline_monotonic: float) -> _PresenceStream:
-        if not isinstance(request, DecodeRequest) or not isinstance(limits, VideoResourceLimits):
+        if not isinstance(request, (DecodeRequest, PresenceDecodeRequest)) or not isinstance(limits, VideoResourceLimits):
             raise _failure("decoder request and limits must be validated contracts")
-        if request.mode != "full" or request.include_first_last is not True:
+        if isinstance(request, DecodeRequest) and (request.mode != "full" or request.include_first_last is not True):
             raise _failure("presence decoding requires full mode with first and last frames")
         if (isinstance(deadline_monotonic, bool) or not isinstance(deadline_monotonic, (int, float))
             or not math.isfinite(deadline_monotonic)):
@@ -413,7 +536,7 @@ class OpenCvPresenceDecoder:
             if message[0] != "metadata" or len(message) != 2:
                 raise _failure("decoder worker did not return valid metadata")
             _validate_metadata(message[1], limits)
-            return _PresenceStream(process, receiving, message[1], limits, deadline_monotonic)
+            return _PresenceStream(process, receiving, message[1], limits, deadline_monotonic, request)
         except BaseException:
             _stop_process(process, receiving)
             raise

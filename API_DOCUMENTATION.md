@@ -185,8 +185,9 @@
 
 ## 2. 当前算法服务（模块化 v2）
 
-2026-09-28 已部署 API 2.1.0（算法提交 `1e6b57b5b1dd32693497c21a0ce0039b4f77fc1b`）。
-发布测试和回滚见 [验收记录](FaceFeatureExtractorAPI/docs/reports/2026-09-28-presence-release-validation.md)。
+本节对应 API 2.2.0 本地开发契约，尚未部署。2026-09-28 服务器 37 的 `18002/18003` 仍为
+API 2.1.0（算法提交 `1e6b57b5b1dd32693497c21a0ce0039b4f77fc1b`）。
+旧版发布测试和回滚见 [历史验收记录](FaceFeatureExtractorAPI/docs/reports/2026-09-28-presence-release-validation.md)，不证明本轮功能已上线。
 内网 Base URL：`http://<server-37>:18002`；人工测试台：`http://<server-37>:18003`。
 新开发不要调用历史服务 `18001`，本次未改动该服务。算法不访问业务库、不保存合同状态或持久化客户媒体。
 
@@ -210,9 +211,20 @@
 ### 2.2 结果、资源与安全边界
 
 先检查 HTTP；200 不等于身份通过。旧图片/quick/full 看标定后的 suggestion；presence 的
-身份结论只读 `decision/found`，不把 `success` 或分数当同一人结论。首版 presence 必定是
-`calibration_status=UNCALIBRATED,decision=INCONCLUSIVE,found=null`，没有可用脸也不能转成 false。
-FOUND/NOT_FOUND_IN_SCAN 为保留状态，本版不产出；所有视频均无活体/反翻拍保证。
+匹配结论只读 `decision/found`，不把 `success` 或分数当同一人结论。2.2.0 presence 服务端显式
+`configured` 阈值与 ID 返回 `CONFIGURED_UNVALIDATED`，可产生 `FOUND/true`、
+`NOT_FOUND_IN_SCAN/false`、`INCONCLUSIVE/null`；默认无阈值仍计算证据，附
+`THRESHOLD_NOT_CONFIGURED`，判定为 INCONCLUSIVE/null。没有默认身份阈值，请求不接受调用方阈值。
+扫描不完整、参考无效、无可比脸或全局失败都不给肯定/否定结果；低于阈值但有候选截断/局部失败
+也为 null。试用 `suggestion=REVIEW` 不能遮盖 FOUND，更不能转成业务自动 PASS。
+
+暗/糊/侧脸/小脸/贴边为软提示；能形成有效 1024 维特征就比对，视频 64px 不是硬下限。
+默认 0.5 秒基础采样、每窗口最多 2 帧按需补采，总 1200 分析帧预算包含首尾和补采；长视频
+必要时增大实际基础间隔。响应区分比较状态、请求/实际间隔、基础/补采/成功与失败候选计数、
+阈值/ID/指纹及每帧 candidate_index/quality_warnings。输入资源超限仍为 400/413/504。
+presence 不要求活体或签名校准门禁，不改变旧五接口；所有视频均无活体/反翻拍保证。
+最高分不是概率或出现真值，NOT_FOUND_IN_SCAN 不是整片绝对不存在。人工完整视频标签及
+人员隔离的 tuning/evaluation 见 [标签说明](FaceFeatureExtractorAPI/docs/PRESENCE_LABEL_VALIDATION.md)；无标签只报告覆盖，生产精度未验证。
 
 图片仅 JPEG/PNG，每张≤15 MiB、25 MP（witness≤16 MP）；视频≤500 MiB、600 秒、120 FPS。
 MP4/AVI/MOV 等经现有上传路径处理，但实际编码须在目标镜像验证。整个 multipart body
