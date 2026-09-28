@@ -1,19 +1,19 @@
 # TASK-2026-001 新算法 API 联调文档
 
 本文供业务后端、APP、测试和实施人员在公司内网联调人脸算法服务。
-本文已更新到 API `2.2.0` 开发契约：presence 支持低质量候选尽力比对和明确配置的试用阈值三态判定，尚未部署。
-2026-09-28 服务器 37 的 `18002/18003` 仍运行 API `2.1.0`，算法提交
-`1e6b57b5b1dd32693497c21a0ce0039b4f77fc1b`。该旧版测试、镜像、端口和回滚证据见
-[历史发布验收记录](reports/2026-09-28-presence-release-validation.md)，不能作为 2.2.0 已上线或精度已验证的证据。
-本轮本地测试、匿名现场功能/覆盖及未完成的精度/上线边界见
-[2.2.0 尽力比对验证记录](reports/2026-09-28-presence-best-effort-validation.md)。
+本文对应已部署 API `2.2.0`：presence 支持低质量候选尽力比对和明确配置的试用阈值三态判定。
+2026-09-28 服务器 37 的 `18002/18003` 已更新且均 healthy，发布代码提交为
+`d78e723b8fb8737b09e12859e57aa9856a640db6`。本轮镜像、端口、发布验证和回滚证据见
+[发布验收记录](reports/2026-09-28-presence-best-effort-release.md)；历史 `18001` 完全未改动。
+当前 presence 仍默认未配置阈值；上线不等于生产精度已验证。本轮本地测试及人工标签/阈值边界另见
+[2.2.0 尽力比对本地验证记录](reports/2026-09-28-presence-best-effort-validation.md)。
 
 | 项目 | 值 |
 |---|---|
-| 文档 / 源码 API 版本 | `2.2.0`（开发联调，未部署） |
-| 服务器 37 已部署 API 版本 | `2.1.0`（`1e6b57b`） |
+| 文档 / 源码 API 版本 | `2.2.0`（已部署） |
+| 服务器 37 已部署 API 版本 | `2.2.0`（发布代码 `d78e723`） |
 | 配置版本 | `2026-08-24-v1` |
-| 文档更新时间 | `2026-09-28`（区分开发契约、历史部署与未完成的现场精度验证） |
+| 文档更新时间 | `2026-09-28`（区分功能上线与未完成的现场精度验证） |
 | 特征契约 | `recognizer_v1_1024`，固定 `1024` 维 |
 | 测试环境 Base URL | `http://<server-37>:18002` |
 | 可视化测试台 | `http://<server-37>:18003` |
@@ -26,7 +26,7 @@
 > 2.2.0 presence 独立使用服务端 `configured` / `uncalibrated` 配置：前者返回
 > `CONFIGURED_UNVALIDATED` 并可产生三态结果，后者仍计算证据但返回
 > `THRESHOLD_NOT_CONFIGURED + INCONCLUSIVE/null`。本接口不要求签名校准包或活体门禁，
-> 试用结果也不能自动放行业务。服务器上仍为旧版响应，联调新契约请指向自己的 2.2.0 候选服务。
+> 试用结果也不能自动放行业务。服务器 37 已支持新契约，当前部署仍使用 `uncalibrated`，不提供生产判定阈值。
 
 ## 1. 五分钟开始联调
 
@@ -88,8 +88,8 @@ http://<server-37>:18002/openapi.json
 ```
 
 服务关闭了 Swagger UI 和 ReDoc 页面，因此 `/docs`、`/redoc` 不可用是正常现象。
-线上 OpenAPI 描述旧 2.1.0 契约。联调本文新增字段时须导入 2.2.0 候选服务的 OpenAPI，
-核对 `info.version` 与六条 v2 路由；仅路由存在不足以确认已升级。
+线上 OpenAPI 已描述 2.2.0 契约。联调本文新增字段时须重新导入以上 OpenAPI，
+核对 `info.version=2.2.0` 与六条 v2 路由；仅路由存在不足以确认已升级。
 应用字段校验的实际契约是 `400 + INVALID_IMAGE`，不是框架默认的 `422`。
 
 Postman/Apifox 中所有文件字段都选择 `form-data` 的 **File** 类型，不要把文件路径、
@@ -566,7 +566,7 @@ full 是同步算法接口，但最长截止时间为 600 秒。APP/网页不要
 业务后端异步任务调用，并实现幂等、任务状态、结果回写和超时补偿。算法服务本身不保存
 任务状态。
 
-## 8A. 视频目标出现（presence，2.2.0 开发契约，未部署）
+## 8A. 视频目标出现（presence，2.2.0 已部署契约）
 
 ### 8A.1 请求与边界
 
@@ -584,10 +584,10 @@ Content-Type: multipart/form-data
 curl -sS --max-time 660 -X POST \
   -F "reference_image=@./reference.jpg;filename=reference.jpg;type=image/jpeg" \
   -F "video=@./capture.mp4;filename=capture.mp4;type=video/mp4" \
-  http://127.0.0.1:8000/api/v2/verify/video/presence
+  http://<server-37>:18002/api/v2/verify/video/presence
 ```
 
-上例指向本地 2.2.0 候选；不能用仍运行旧版的 `18002` 核验新增行为。请求只声明两个文件字段，
+上例指向服务器 37 已部署的 2.2.0 服务。请求只声明两个文件字段，
 不接受调用方提供判定阈值；测试台也不得自行按分数重算结果。
 
 参考图允许一个明确主脸，小背景脸不必直接拒绝；无法消歧的多个主体仍为参考目标无效。
@@ -823,7 +823,7 @@ PTS 可用时优先采用；无法可靠获得时可能使用 FPS 推算，`time
 ```python
 import requests
 
-url = "http://127.0.0.1:8000/api/v2/verify/video/presence"  # 已启动的 2.2.0 候选
+url = "http://<server-37>:18002/api/v2/verify/video/presence"  # 已部署的 2.2.0 服务
 with open("reference.jpg", "rb") as reference, open("capture.mp4", "rb") as video:
     response = requests.post(
         url,

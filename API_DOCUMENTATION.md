@@ -185,9 +185,10 @@
 
 ## 2. 当前算法服务（模块化 v2）
 
-本节对应 API 2.2.0 本地开发契约，尚未部署。2026-09-28 服务器 37 的 `18002/18003` 仍为
-API 2.1.0（算法提交 `1e6b57b5b1dd32693497c21a0ce0039b4f77fc1b`）。
-旧版发布测试和回滚见 [历史验收记录](FaceFeatureExtractorAPI/docs/reports/2026-09-28-presence-release-validation.md)，不证明本轮功能已上线。
+本节对应已部署的 API 2.2.0。2026-09-28 服务器 37 的 `18002/18003` 已更新且均 healthy，
+发布代码提交为 `d78e723b8fb8737b09e12859e57aa9856a640db6`。
+本轮发布测试和回滚见 [发布验收记录](FaceFeatureExtractorAPI/docs/reports/2026-09-28-presence-best-effort-release.md)；
+上线不代表现场阈值或生产识别精度已验证，presence 仍使用默认无阈值配置。
 内网 Base URL：`http://<server-37>:18002`；人工测试台：`http://<server-37>:18003`。
 新开发不要调用历史服务 `18001`，本次未改动该服务。算法不访问业务库、不保存合同状态或持久化客户媒体。
 

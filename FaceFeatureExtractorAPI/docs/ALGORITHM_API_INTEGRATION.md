@@ -4,11 +4,11 @@
 [TASK-2026-001 新算法 API 联调文档](TASK-2026-001-API-DEBUGGING.md)。本文侧重安全边界、
 部署约束和生产接入责任。
 
-版本状态（2026-09-28）：本文描述 API `2.2.0` 本地开发契约，尚未部署。
-服务器 37 的 `http://<server-37>:18002` 与测试台 `http://<server-37>:18003` 仍为旧 API
-`2.1.0`，算法提交 `1e6b57b5b1dd32693497c21a0ce0039b4f77fc1b`。
-[历史发布验收记录](reports/2026-09-28-presence-release-validation.md) 只证明旧版发布与回滚，
-不证明本轮低质量比对、补采和试用阈值三态已上线或生产精度已验证。
+版本状态（2026-09-28）：本文描述已部署 API `2.2.0` 契约。
+服务器 37 的 `http://<server-37>:18002` 与测试台 `http://<server-37>:18003` 已更新且均 healthy，
+发布代码提交为 `d78e723b8fb8737b09e12859e57aa9856a640db6`，历史 `18001` 未改动。
+部署证据和当前回滚入口见 [本轮发布验收记录](reports/2026-09-28-presence-best-effort-release.md)。
+presence 仍默认未配置阈值；功能上线不表示人工标签、生产阈值或识别精度已验收。
 
 ## 1. 边界与责任
 
@@ -33,7 +33,7 @@ HTTP 长连接。算法建议不等于合同审批结果。
 | `GET /health/live` | 进程事件循环可响应，不代表模型可用 | 200 |
 | `GET /health/ready` | 必需模型完成哈希、契约及 Provider 检查；artifact 模式还完成签名校准绑定 | ready 时 200，否则 503 |
 | `GET /health` | 兼容别名，语义同 ready | 200/503 |
-| `GET /openapi.json` | 类型化请求/响应与错误契约；新行为须导入 2.2.0 候选服务并核对 info.version，线上仍是 2.1.0 | 200 |
+| `GET /openapi.json` | 类型化请求/响应与错误契约；线上已为 2.2.0，接入须重新导入并核对 info.version | 200 |
 
 `degraded + ready=true` 表示核心人脸能力可用、某个可选能力（例如 MODNet）不可用；
 调用不可用能力仍返回 503，不能只看 liveness 接流量。
