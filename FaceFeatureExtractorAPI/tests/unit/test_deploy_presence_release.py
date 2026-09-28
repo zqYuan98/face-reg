@@ -5,7 +5,10 @@ import copy
 import io
 import json
 from pathlib import Path
+import socket
+import sys
 import tarfile
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -34,6 +37,123 @@ def test_commit_must_be_full_unambiguous_lowercase_sha() -> None:
     for invalid in ('a' * 12, '../escape', 'A' * 40, 'a' * 39 + 'x'):
         with pytest.raises(argparse.ArgumentTypeError):
             release.full_commit(invalid)
+
+
+def test_port_probe_reuses_time_wait_without_enabling_reuseport(monkeypatch) -> None:
+    options = []
+
+    class Probe:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def setsockopt(self, level, option, value):
+            options.append((level, option, value))
+
+        def bind(self, address):
+            if (socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) not in options:
+                raise OSError('TIME_WAIT')
+
+    monkeypatch.setattr(release, 'sys', SimpleNamespace(platform='linux'), raising=False)
+    monkeypatch.setattr(release.socket, 'socket', lambda *args: Probe())
+    release.port_free('127.0.0.1', 18002)
+    assert options == [(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)]
+
+
+def test_port_probe_still_rejects_active_listener() -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(('127.0.0.1', 0))
+        listener.listen()
+        with pytest.raises(release.ReleaseError, match='occupied'):
+            release.port_free('127.0.0.1', listener.getsockname()[1])
+
+
+@pytest.mark.skipif(sys.platform != 'linux', reason='Linux TCP TIME_WAIT semantics')
+def test_linux_time_wait_does_not_block_port_probe() -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(('127.0.0.1', 0))
+        address = listener.getsockname()
+        listener.listen()
+        with socket.create_connection(address, timeout=2) as client:
+            connection, _ = listener.accept()
+            with connection:
+                connection.settimeout(2)
+                connection.shutdown(socket.SHUT_WR)
+                assert client.recv(1) == b''
+                client.shutdown(socket.SHUT_WR)
+                assert connection.recv(1) == b''
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as naive_probe:
+        with pytest.raises(OSError):
+            naive_probe.bind(address)
+    release.port_free(*address)
+
+
+def test_port_wait_retries_transient_release_but_never_ignores_active_listener(monkeypatch) -> None:
+    attempts = []
+    ticks = iter((0, 0, 10))
+    monkeypatch.setattr(release.time, 'monotonic', lambda: next(ticks))
+    monkeypatch.setattr(release.time, 'sleep', lambda _: None)
+
+    def busy(host, port):
+        attempts.append((host, port))
+        raise release.ReleaseError('occupied')
+
+    monkeypatch.setattr(release, 'port_free', busy)
+    with pytest.raises(release.ReleaseError, match='occupied'):
+        release.wait_port_free('127.0.0.1', 18002, timeout=10)
+    assert len(attempts) == 2
+
+
+def test_port_wait_accepts_only_after_probe_succeeds(monkeypatch) -> None:
+    attempts = []
+    monkeypatch.setattr(release.time, 'monotonic', lambda: 0)
+    monkeypatch.setattr(release.time, 'sleep', lambda _: None)
+
+    def transient(host, port):
+        attempts.append((host, port))
+        if len(attempts) == 1:
+            raise release.ReleaseError('occupied')
+
+    monkeypatch.setattr(release, 'port_free', transient)
+    release.wait_port_free('127.0.0.1', 18002)
+    assert len(attempts) == 2
+
+
+def test_rolled_back_release_can_recreate_candidate_with_original_ids(deploy, monkeypatch) -> None:
+    deploy.state = {'stage': 'rolled-back', 'config_sha256': 'config-hash',
+                    'originals': {release.API: 'original-api', release.CONSOLE: 'original-console'}}
+    containers = {release.API: item('original-api'), release.CONSOLE: item('original-console')}
+    monkeypatch.setattr(release, 'inspect', containers.get)
+    monkeypatch.setattr(release, 'sha256', lambda _: 'config-hash')
+    monkeypatch.setattr(release, 'port_free', lambda *args: None)
+    monkeypatch.setattr(release, 'wait_http', lambda *args, **kwargs: None)
+    monkeypatch.setattr(deploy, 'verify_images', lambda: None)
+    starts = []
+    monkeypatch.setattr(deploy, 'run_container', lambda *args, **kwargs: starts.append((args, kwargs)))
+    deploy.candidate_start()
+    assert deploy.state['stage'] == 'candidate'
+    assert starts[0][0] == (deploy.candidate,)
+    assert starts[0][1]['old_api']['Id'] == 'original-api'
+
+
+@pytest.mark.parametrize('target', [release.API, release.CONSOLE])
+def test_retry_after_rollback_rejects_changed_original_id_before_any_start(deploy, monkeypatch, target) -> None:
+    deploy.state = {'stage': 'rolled-back', 'config_sha256': 'config-hash',
+                    'originals': {release.API: 'original-api', release.CONSOLE: 'original-console'}}
+    containers = {release.API: item('original-api'), release.CONSOLE: item('original-console')}
+    containers[target]['Id'] = 'unrelated'
+    monkeypatch.setattr(release, 'inspect', containers.get)
+    monkeypatch.setattr(release, 'sha256', lambda _: 'config-hash')
+    monkeypatch.setattr(deploy, 'verify_images', lambda: None)
+    starts = []
+    monkeypatch.setattr(deploy, 'run_container', lambda *args, **kwargs: starts.append(args))
+    with pytest.raises(release.ReleaseError, match='Original container identity'):
+        deploy.candidate_start()
+    assert starts == []
 
 
 @pytest.mark.parametrize('ready,expected', [

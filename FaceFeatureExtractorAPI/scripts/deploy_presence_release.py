@@ -17,6 +17,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tarfile
 import time
 import urllib.request
@@ -128,9 +129,27 @@ def merged_config(old: str) -> str:
 def port_free(host: str, port: int) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         try:
+            # Linux permits reusing TIME_WAIT here, but still refuses an active
+            # listener. Never use SO_REUSEPORT, which would weaken that guard.
+            if sys.platform == 'linux':
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind((host, port))
         except OSError as error:
             raise ReleaseError(f'Required port {host}:{port} is occupied') from error
+
+
+def wait_port_free(host: str, port: int, *, timeout: float = 10) -> None:
+    """Bounded promotion-only wait for Docker's stopped proxy to release its port."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            port_free(host, port)
+            return
+        except ReleaseError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(0.25, remaining))
 
 
 def wait_http(base: str, *, presence: bool, timeout: float = 180) -> None:
@@ -273,8 +292,16 @@ class Release:
 
     def candidate_start(self) -> None:
         self.verify_images()
-        require(self.state.get('stage') in ('built', 'candidate'), 'Build must complete before candidate')
+        require(self.state.get('stage') in ('built', 'candidate', 'rolled-back'),
+                'Build must complete before candidate')
         require(sha256(self.config) == self.state['config_sha256'], 'Release config changed')
+        if self.state.get('stage') == 'rolled-back':
+            originals = self.state.get('originals', {})
+            require(set(originals) == {API, CONSOLE}, 'Original container identity records missing')
+            for name, original_id in originals.items():
+                current = inspect(name)
+                require(bool(current) and current['Id'] == original_id and current['State']['Running'],
+                        'Original container identity differs or is not restored and running')
         existing = inspect(self.candidate)
         if existing:
             require(self.owned(existing), 'Candidate name belongs to another release')
@@ -342,8 +369,8 @@ class Release:
             for name in (CONSOLE, API):
                 docker('stop', '--time', '30', originals[name])
                 docker('rename', originals[name], name + '-prev-' + OLD_REVISION)
-            port_free('<server-37>', 18002)
-            port_free('<server-37>', 18003)
+            wait_port_free('<server-37>', 18002)
+            wait_port_free('<server-37>', 18003)
             self.run_container(API, console=False, old_api=current_api)
             wait_http('http://<server-37>:18002', presence=True)
             self.run_container(CONSOLE, console=True)
