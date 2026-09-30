@@ -269,9 +269,9 @@
                                     <el-table-column prop="id" label="ID" width="80"></el-table-column>
                                     <el-table-column label="头像" width="100">
                                         <template #default="scope">
-                                            <img v-if="scope.row.photoUrl" :src="'/uploads/' + encodeURIComponent(scope.row.photoUrl)"
-                                                class="small-avatar" loading="lazy" width="40" height="40" alt="用户头像"
-                                                onerror="this.style.display='none'">
+                                            <img v-if="scope.row.photoUrl" :key="scope.row.photoUrl"
+                                                :src="'/uploads/' + encodeURIComponent(scope.row.photoUrl)"
+                                                class="small-avatar" loading="lazy" width="40" height="40" alt="用户照片暂不可用">
                                             <el-tag v-else type="info" size="small">无</el-tag>
                                         </template>
                                     </el-table-column>

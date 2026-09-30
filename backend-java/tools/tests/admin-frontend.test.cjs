@@ -4,7 +4,9 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 
-// Executes the actual inline setup code. Every request is stubbed; no business server is contacted.
+// Executes the actual inline setup code. Business requests are stubbed; no business server is contacted.
+// Set ADMIN_FRONTEND_VUE_RUNTIME to a local Vue 3.5.43 global runtime to enable the renderer regression.
+// Without that explicit fixture it is skipped; this suite never downloads dependencies.
 const source = path.resolve(__dirname, '../../src/main/resources/static/index.html');
 const html = fs.readFileSync(source, 'utf8');
 const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
@@ -70,6 +72,67 @@ function harness(customFetch, login = false) {
     flushTimers() { const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach(callback => callback()); }
   };
 }
+
+test('a failed avatar stays visible and changing its photo URL creates a fresh image with real Vue', {
+  skip: process.env.ADMIN_FRONTEND_VUE_RUNTIME ? false : 'Set ADMIN_FRONTEND_VUE_RUNTIME to a local Vue 3.5.43 global runtime'
+}, async () => {
+  const runtimePath = process.env.ADMIN_FRONTEND_VUE_RUNTIME;
+  const runtime = fs.readFileSync(runtimePath, 'utf8');
+  const context = { console, setTimeout, clearTimeout };
+  vm.runInNewContext(runtime, context, { filename: runtimePath });
+  assert.equal(context.Vue.version, '3.5.43', 'use the pinned Vue regression fixture');
+  const { createRenderer, compile, reactive, nextTick } = context.Vue;
+
+  // Vue compiles the production template and performs the real vnode reconciliation.
+  // This small host adapter preserves image style/event state just as a reused DOM node does.
+  // No photo is fetched: error/load events are injected so the case is deterministic.
+  const renderer = createRenderer({
+    createElement: tag => ({ tag, props: {}, style: {}, children: [], parent: null }),
+    patchProp: (element, name, previous, value) => {
+      element.props[name] = value;
+      if (name === 'style') element.style = { ...(value || {}) };
+    },
+    insert: (element, parent, anchor = null) => {
+      if (element.parent) element.parent.children = element.parent.children.filter(child => child !== element);
+      element.parent = parent;
+      const index = anchor ? parent.children.indexOf(anchor) : -1;
+      if (index < 0) parent.children.push(element);
+      else parent.children.splice(index, 0, element);
+    },
+    remove: element => {
+      element.parent.children = element.parent.children.filter(child => child !== element);
+      element.parent = null;
+    },
+    setElementText: (element, text) => { element.text = text; },
+    createText: text => ({ text }), createComment: text => ({ text }),
+    setText: (element, text) => { element.text = text; },
+    setComment: (element, text) => { element.text = text; },
+    parentNode: element => element.parent,
+    nextSibling: element => element.parent?.children[element.parent.children.indexOf(element) + 1] || null
+  });
+  const trigger = (element, type) => {
+    const handler = element.props[`on${type}`] || element.props[`on${type[0].toUpperCase()}${type.slice(1)}`];
+    if (typeof handler === 'function') handler({ target: element });
+    else if (typeof handler === 'string') new Function('event', handler).call(element, { target: element });
+  };
+  const avatarTemplate = html.match(/<img\b(?=[^>]*\bclass="small-avatar")[^>]*>/)[0];
+  const scope = reactive({ row: { id: 7, photoUrl: 'failed.jpg' } });
+  const root = { children: [] };
+  const app = renderer.createApp({ setup: () => ({ scope }), render: compile(avatarTemplate) });
+  app.mount(root);
+  const failedImage = root.children[0];
+  trigger(failedImage, 'error');
+  scope.row.photoUrl = 'replacement + new.jpg';
+  await nextTick();
+  const replacement = root.children[0];
+  assert.notEqual(replacement, failedImage, 'replacing a photo must discard the failed image node');
+  assert.equal(replacement.props.src, '/uploads/replacement%20%2B%20new.jpg');
+  trigger(replacement, 'load');
+  assert.notEqual(replacement.style.display, 'none', 'the replacement must not inherit a hidden state');
+  assert.notEqual(failedImage.style.display, 'none', 'a load error must leave the native fallback visible');
+  assert.ok(failedImage.props.alt, 'the native error placeholder must have understandable alternate text');
+  app.unmount();
+});
 
 test('initial load requests only the active users page; group table and global counts are lazy', async () => {
   const h = harness();
