@@ -4,18 +4,20 @@
 [TASK-2026-001 新算法 API 联调文档](TASK-2026-001-API-DEBUGGING.md)。本文侧重安全边界、
 部署约束和生产接入责任。
 
-2026-09-30 服务器 37 的 `18002/18003` 已正式发布 API `2.3.0`（代码 `2557e17`），均 healthy。
+2026-09-30 服务器 37 的 `18002/18003` 已正式发布 API `2.3.1`（代码 `4e6a337`），均 healthy。
 portrait 已启用 `face_archive` 白底人脸照策略；
-请求和响应字段不变，仅新增两种原因枚举；成功有图可带 REVIEW 提醒。
-发布实时状态及回滚入口见 [白底人脸照发布记录](reports/2026-09-30-attendance-face-portrait-release.md)。
+请求和响应字段不变，2.3.0 已引入两种原因枚举；成功有图可带 REVIEW 提醒。
+发布状态、各项验收完成状态及回滚入口见 [检测框越界修正发布记录](reports/2026-09-30-portrait-box-overflow-release.md)。
+直接升级基线与回滚目标为 `2.3.0 / 2557e17`：保留的原 API/测试台容器与原 presence `0.5` 配置；
+本次配置字节哈希不变，不使用更早的 `d78 / 2.2.0` 作为本轮回滚目标。
 
-升级前基线（2026-09-28）：API `2.2.0`。
+更早历史（2026-09-28）：API `2.2.0`。
 服务器 37 的 `http://<server-37>:18002` 与测试台 `http://<server-37>:18003` 在该次发布后均 healthy，
 发布代码提交为 `d78e723b8fb8737b09e12859e57aa9856a640db6`，历史 `18001` 未改动。
 该次部署证据与历史回滚记录见 [2.2.0 历史发布记录](reports/2026-09-28-presence-best-effort-release.md)。
 37 在 2026-09-28 随后按用户指定仅将 presence 运行配置设为 `configured`、试用阈值 `0.5`，返回
 `CONFIGURED_UNVALIDATED`，业务仍需人工 REVIEW；源码默认无阈值、代码版本、images/quick/full、
-18001 和测试台在该次阈值调整中均不变。2.3.0 升级保留该阈值与 ID；配置依据见
+18001 和测试台在该次阈值调整中均不变。2.3.1 升级继续保留该阈值与 ID；配置依据见
 [0.5 试用阈值记录](reports/2026-09-28-presence-threshold-050.md)。
 功能上线或指定试用阈值不表示人工标签、生产阈值或识别精度已验收。
 
@@ -42,7 +44,7 @@ HTTP 长连接。算法建议不等于合同审批结果。
 | `GET /health/live` | 进程事件循环可响应，不代表模型可用 | 200 |
 | `GET /health/ready` | 必需模型完成哈希、契约及 Provider 检查；artifact 模式还完成签名校准绑定 | ready 时 200，否则 503 |
 | `GET /health` | 兼容别名，语义同 ready | 200/503 |
-| `GET /openapi.json` | 类型化请求/响应与错误契约；本次已部署 2.3.0，接入须重新导入并核对 info.version | 200 |
+| `GET /openapi.json` | 类型化请求/响应与错误契约；本次已部署 2.3.1，接入须重新导入并核对 info.version | 200 |
 
 `degraded + ready=true` 表示核心人脸能力可用、某个可选能力（例如 MODNet）不可用；
 调用不可用能力仍返回 503，不能只看 liveness 接流量。
@@ -118,12 +120,24 @@ processing_time_ms,trace_id`。新增 `mode=presence`、`decision`、可空 `fou
 
 ## 4. 兼容路由与安全
 
-2.3.0 portrait 保留原路由、multipart `image` 和全部响应字段，仅新增
+2.3.0 portrait 保留原路由、multipart `image` 和全部响应字段，已引入
 `PORTRAIT_SOURCE_LIMITED` / `PORTRAIT_UPSCALE_LIMITED` 两种提醒枚举。
 业务根据 `success=true && image_base64` 判断出图，不能只接受 PASS；REVIEW 可表示已出图但有质量提醒。
 `PASS` 仅表示图像处理完成，不是身份通过。归档由业务在考勤后触发，保存原始依据、选择目标、关联人员和幂等重试；
 生成失败不推翻已有考勤。仓库交付配置显式设为 `face_archive`，不强制头顶/颈部/肩部，保留真实像素和有效脸部校验；
 旧 YAML 缺 mode 则保持 `head_shoulders`，必须显式迁移。更多状态及示例见联调文档第 4 节。
+
+2.3.1 补丁仅在 `face_archive` 质量路径允许有限的检测框外扩，不修改共享目标选择规则。
+原框必须有限且宽高为正；左/右侧溢出各除以原框宽，上/下侧溢出各除以原框高，各值须不超过 5%，
+裁至图内面积/原框面积须至少 90%。同时须选择到明确目标、五点形状/有限性/几何有效，
+五点均在实际像素范围 `0 <= x < width, 0 <= y < height`，裁后宽高均至少 112px，后续抠图仍通过。
+满足时使用图内框计算可见分辨率、质量和构图，成功有图为 `REVIEW` 并含 `PORTRAIT_SOURCE_LIMITED`，
+可合并其他已有质量提醒；不是把 `FACE_CROPPED` 统一改成软码。
+严重溢出、无效/越界关键点、裁后尺寸不足、推理异常或坏蒙版仍失败且无派生图；检测框外扩本身
+不能证明真实脸部已缺失。只变换真实源像素，不补造缺失部位，portrait 不提取 embedding。
+原 18 个响应字段及枚举、480×640 JPEG、30 秒预算、模板/模型/运行配置均不变；
+严格 `head_shoulders` 和 witness/images/quick/full/presence 五个 v2 接口不变。
+实际验收证据与已知限制以上方本次发布记录为准；不以接口规则本身替代实测证据。
 
 - `POST /api/detect_face` 仅在 `legacy.detect_face_enabled=true` 时注册（候选默认 true），保持旧字段：`image`、可选 `expand_scale`；该值必须有限且位于
   `[0, 2]`，接口不返回特征。

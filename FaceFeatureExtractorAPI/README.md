@@ -3,34 +3,42 @@
 面向私有化 CPU 部署的模块化人脸算法包及薄 FastAPI 适配层。算法模块不访问数据库、
 不判断合同状态，也不创建业务工单。
 
-## 接口入口（API 2.3.0）
+## 接口入口（API 2.3.1）
 
-2026-09-30 服务器 37 的 `18002/18003` 已正式发布 API `2.3.0`（代码 `2557e17`），均 healthy，
+2026-09-30 服务器 37 的 `18002/18003` 已正式发布 API `2.3.1`（代码 `4e6a337`），均 healthy，
 8/8 模型就绪。白底人脸照已启用 `face_archive`，不强制完整头顶/颈部/肩部；
-保持原接口、`image` 上传字段和响应字段，仅新增 `PORTRAIT_SOURCE_LIMITED` / `PORTRAIT_UPSCALE_LIMITED` 原因枚举。
+保持原接口、`image` 上传字段和响应字段，2.3.0 已引入 `PORTRAIT_SOURCE_LIMITED` / `PORTRAIT_UPSCALE_LIMITED` 原因枚举。
 成功出图可为 `success=true + REVIEW`，提醒在 `reason_codes`；客户端按 `success=true && image_base64`
 判断出图，不能仅凭 REVIEW 判定失败。
-本次部署证据和回滚入口以 [白底人脸照发布记录](docs/reports/2026-09-30-attendance-face-portrait-release.md) 为准。
+本次部署证据、各项验收完成状态和回滚入口以 [检测框越界修正发布记录](docs/reports/2026-09-30-portrait-box-overflow-release.md) 为准。
 正式切换后复核 presence `0.5` 与原阈值 ID、MODNet 启用状态均保持不变，临时文件为 0；
-`18001` 身份、启动时间与重启数未变，旧 d78 API/测试台容器已保留用于回滚。
-下面 2026-09-28 记录是本次升级前基线，视频 0.5 配置本轮保留。
+配置字节哈希不变，`18001` 未改动，旧 `2557e17` API/测试台原容器已停止保留用于回滚。
+本次直接升级基线与回滚目标均为 `2.3.0 / 2557e17` 及原 presence `0.5` 配置，不是更早的 `d78 / 2.2.0`。
+
+2.3.1 补丁仅调整 `face_archive`：每侧检测框溢出不超过原框对应宽/高的 5%，
+图内可见面积至少为原框的 90%，目标选择和五点几何有效、五点均在源图内、裁后宽高均至少 112px，
+且抠图通过时，可生成 `REVIEW + PORTRAIT_SOURCE_LIMITED`。严重越界、坏关键点或坏抠图仍失败；
+检测框越界本身不证明真实脸部缺失。只使用源图真实像素，不补画、不提取 embedding。
+补丁不新增字段或原因枚举，原 480×640 JPEG/30 秒预算、严格 `head_shoulders` 及其余五个 v2 接口不变。
+授权原图在正式服务已返回 `success=true + REVIEW + PORTRAIT_SOURCE_LIMITED`、480×640 JPEG；
+该样本技术结果不是识别准确率或延迟保证，其余验收进度见本次发布记录。
 
 公司内网 API：`http://<server-37>:18002`；人工测试台：`http://<server-37>:18003`。
-2026-09-28 以上 `18002/18003` 已发布 `2.2.0` 且均 healthy，发布代码提交为
+更早历史：2026-09-28 以上 `18002/18003` 已发布 `2.2.0` 且均 healthy，发布代码提交为
 `d78e723b8fb8737b09e12859e57aa9856a640db6`；旧 `18001` 未改动，不属于新开发入口。
 该次镜像、回归与历史回滚记录见 [2.2.0 历史发布记录](docs/reports/2026-09-28-presence-best-effort-release.md)。
-2.2.0 引入的低质量尽力比对、补采和试用阈值三态能力在 2.3.0 保持不变。37 在 2026-09-28 随后按用户指定将 presence 运行配置
+2.2.0 引入的低质量尽力比对、补采和试用阈值三态能力在 2.3.1 保持不变。37 在 2026-09-28 随后按用户指定将 presence 运行配置
 设为试用阈值 `0.5`（`configured`），返回 `CONFIGURED_UNVALIDATED`，业务仍需人工 REVIEW。
 该次阈值调整仅改变 presence 运行配置，未改代码版本、源码默认无阈值配置、images/quick/full、18001 或测试台。
-本次 2.3.0 升级保留 `0.5` 及原阈值 ID，不用仓库默认 null 覆盖运行配置。
+本次 2.3.1 升级继续保留 `0.5` 及原阈值 ID，不用仓库默认 null 覆盖运行配置。
 配置 ID、验证与配置回退见 [0.5 试用阈值记录](docs/reports/2026-09-28-presence-threshold-050.md)，生产精度未验证。
 2026-09-28 历史本地/匿名现场功能验证及验收边界另见
-[2.2.0 本地验证记录](docs/reports/2026-09-28-presence-best-effort-validation.md)，不能充作 2.3.0 或人工标签和阈值验收证据。
+[2.2.0 本地验证记录](docs/reports/2026-09-28-presence-best-effort-validation.md)，不能充作 2.3.1 或人工标签和阈值验收证据。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/health/live`、`/health/ready`、`/health` | 存活、模型/能力就绪、ready 兼容别名 |
-| GET | `/openapi.json` | 接入契约；`/docs`、`/redoc` 关闭 |
+| GET | `/openapi.json` | 接入契约，当前 `info.version=2.3.1`；`/docs`、`/redoc` 关闭 |
 | POST | `/api/v2/portrait/generate` | 考勤归档白底人脸照，成功图片可附 REVIEW 提醒 |
 | POST | `/api/v2/witness/blur-background` | 人物优先背景虚化 |
 | POST | `/api/v2/verify/images` | 双图身份比对 |

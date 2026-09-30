@@ -185,16 +185,18 @@
 
 ## 2. 当前算法服务（模块化 v2）
 
-本节对应 2026-09-30 已正式部署的 API `2.3.0`（代码 `2557e17`）；
+本节对应 2026-09-30 已正式部署的 API `2.3.1`（代码 `4e6a337`）；
 服务器 37 的 `18002/18003` 均 healthy，8/8 模型就绪，portrait 使用 `face_archive`。
-本次部署状态、验收及回滚入口以 [白底人脸照发布记录](FaceFeatureExtractorAPI/docs/reports/2026-09-30-attendance-face-portrait-release.md) 为准。
-升级前基线：2026-09-28 服务器 37 的 `18002/18003` 发布 `2.2.0`，当时均 healthy，
+本次部署状态、各项验收完成状态及回滚入口以 [检测框越界修正发布记录](FaceFeatureExtractorAPI/docs/reports/2026-09-30-portrait-box-overflow-release.md) 为准。
+直接升级基线为 `2.3.0 / 2557e17`，原 API/测试台容器已停止保留；回滚恢复该版本与原 presence `0.5` 配置，
+不是更早的 `d78 / 2.2.0`。本次配置字节哈希不变。
+更早历史：2026-09-28 服务器 37 的 `18002/18003` 发布 `2.2.0`，当时均 healthy，
 发布代码为 `d78e723b8fb8737b09e12859e57aa9856a640db6`；
 该次证据见 [2.2.0 历史发布记录](FaceFeatureExtractorAPI/docs/reports/2026-09-28-presence-best-effort-release.md)。
 37 在同日后续按用户指定将 presence 运行配置设为试用阈值 `0.5`（`configured`），返回
 `CONFIGURED_UNVALIDATED`，业务仍需人工 REVIEW；不表示生产精度已验证。
 该次阈值调整只改 presence 运行配置，未改源码默认无阈值配置、images/quick/full、18001 或测试台；
-本次 2.3.0 升级保留视频 `0.5` 与原阈值 ID，
+本次 2.3.1 升级继续保留视频 `0.5` 与原阈值 ID，
 详见 [0.5 试用阈值记录](FaceFeatureExtractorAPI/docs/reports/2026-09-28-presence-threshold-050.md)。
 内网 Base URL：`http://<server-37>:18002`；人工测试台：`http://<server-37>:18003`。
 新开发不要调用历史服务 `18001`，本次未改动该服务。算法不访问业务库、不保存合同状态或持久化客户媒体。
@@ -206,7 +208,7 @@
 | `GET /health/live` | 无 | `{"status":"live"}`；仅进程存活 |
 | `GET /health/ready` | 无 | 200/503，模型与五个能力 readiness，需检查目标能力 |
 | `GET /health` | 无 | ready 的兼容别名，不是仅检查存活 |
-| `GET /openapi.json` | 无 | 类型化请求/响应契约；`/docs`、`/redoc` 关闭 |
+| `GET /openapi.json` | 无 | 类型化请求/响应契约，当前 `info.version=2.3.1`；`/docs`、`/redoc` 关闭 |
 | `POST /api/v2/portrait/generate` | multipart `image` | 白底人脸照，30 秒；成功图片可带 REVIEW 质量提醒 |
 | `POST /api/v2/witness/blur-background` | multipart `image` | 人物优先背景虚化，30 秒 |
 | `POST /api/v2/verify/images` | multipart `reference_image,probe_image` | 两图比对，30 秒 |
@@ -226,10 +228,18 @@
 扫描不完整、参考无效、无可比脸或全局失败都不给肯定/否定结果；低于阈值但有候选截断/局部失败
 也为 null。试用 `suggestion=REVIEW` 不能遮盖 FOUND，更不能转成业务自动 PASS。
 
-2.3.0 portrait 的请求 `image` 和全部响应字段保持不变，仅新增 `PORTRAIT_SOURCE_LIMITED` /
+2.3.0 portrait 的请求 `image` 和全部响应字段保持不变，已引入 `PORTRAIT_SOURCE_LIMITED` /
 `PORTRAIT_UPSCALE_LIMITED` 原因枚举。以 `success=true && image_base64` 判断出图；成功 `REVIEW`
 仍显示/下载图片并展示 `reason_codes`，不表示身份或考勤通过。仓库显式配置 `face_archive`，
 不强制完整头顶/颈部/肩部；旧 YAML 缺 mode 保持 `head_shoulders`，上线须显式迁移。
+
+2.3.1 补丁仅对 `face_archive` 容忍轻微检测框外扩：各侧溢出分别按原框宽/高归一化后
+均不超过 5%，裁至图内的可见面积至少为原框的 90%；目标选择、五点几何有效且五点全在源图内，
+裁后宽高均至少 112px，并通过后续抠图检查时，返回有图的 `REVIEW + PORTRAIT_SOURCE_LIMITED`。
+严重越界、无效/越界关键点、裁后脸过小、推理异常或坏蒙版仍失败，不返回派生图。
+检测框越界不能单独证明真实脸部缺失；仅使用源图真实像素，不补造像素、不提取 embedding。
+原 18 个响应字段、原因枚举、480×640 JPEG 和 30 秒预算不变；不改变严格 `head_shoulders`、
+witness、images、quick、full 或 presence。联调时须核对 OpenAPI `info.version=2.3.1`。
 
 presence 的暗/糊/侧脸/小脸/贴边为软提示；能形成有效 1024 维特征就比对，视频 64px 不是硬下限。
 默认 0.5 秒基础采样、每窗口最多 2 帧按需补采，总 1200 分析帧预算包含首尾和补采；长视频

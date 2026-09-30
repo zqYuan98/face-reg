@@ -1,6 +1,6 @@
 # Portrait Box Overflow Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkboxes for tracking.
 
 **Goal:** 修正白底归档对轻微检测框越界误拒绝，原图可用且接口不变，验证后上线37。
 
@@ -30,7 +30,7 @@ Files: 新 `face_algorithm/core/portrait_bounds.py`、改 `face_algorithm/core/p
 Files: `scripts/deploy_presence_release.py`、`tests/unit/test_deploy_presence_release.py`；主代理负责 `api/app.py`、`tests/api/test_openapi_complete.py`。
 
 - [x] 发布测试先RED：基线固定2557完整SHA、2.3.0旧版ready；新wait_http要求2.3.1。原配置拷贝字节/SHA不变，候选wrong-version拒绝，回滚校验旧2.3.0并保留资源/端口保护。
-- [x] 更新helper固定OLD_COMMIT/原容器IDs/配置SHA为fresh audit；配置原样拷贝而非重新序列化，完整校验相等、face_archive、MODET启用与presence .5/ID保留。legacy migration函数若保留供历史单测不得用于新build。
+- [x] 更新helper固定OLD_COMMIT/原容器IDs/配置SHA为fresh audit；配置原样拷贝而非重新序列化，完整校验相等、face_archive、MODNet启用与presence .5/ID保留。legacy migration函数若保留供历史单测不得用于新build。
 - [x] 回滚目标为2557旧API与console容器。保留18001和更早备份，不篡改旧服务器helper。运行 `python -m pytest tests/unit/test_deploy_presence_release.py -q`，需求/质量双审查。
 - [x] 先改OpenAPI版本测试为2.3.1并见RED，然后只改应用版本；不动字段/枚举/路由或console业务代码。
 
@@ -40,17 +40,21 @@ Files: 原图诊断与回归脚本仅工作区 `.analysis/portrait-crop-feedback
 
 - [x] 复用授权原图、当前模型和MODNet本地生成，检查REVIEW+SOURCE_LIMITED+480×640 JPEG；人工看输出，记录匿名数值，媒体不进Git。严重裁切/坏关键点拒绝由确定性测试证明，不用模型猜测作真值。
 - [x] 本地完整 `python -m pytest -q tests tools/visual-console/tests` 和 `D:/nodejs/node.exe --test tools/visual-console/tests/core.test.mjs`，git diffcheck/文件范围审查，独立最终代码审查。
-- [ ] 公司格式提交、push；git archive固定完整commit、SHA256；StrictHostKeyChecking=yes上传、离线构建，候选127.0.0.1:18012。确保基线IDs/config未变，不盲目覆盖。
-- [ ] 候选先原图（要求出图）和严重无脸负例；再同seed20随机+前版6针对输入、6路由/MP4 AVI MOV冒烟。OpenAPI深度对照应仅版本差异，presence .5不新增活体门禁。大图504记录并等待后台结束后有限复测，不扩大timeout或并发压测。
-- [ ] 验收通过后promote，旧2557原容器停止保留；LAN原图+六接口+3现场presence回归对，Playwright测试台预览/下载、重置；最终健康/临时文件0/18001身份不变。
-- [ ] 记录运行代码/配置/镜像/容器/测试/风险/回滚命令；8个当前文档入口更新2.3.1、差异规则及新报告链接，历史记录保留。文档独立复核、提交推送，关闭本次临时代理和隧道/浏览器，留分支worktree无PR/merge/tag。
+- [x] 公司格式提交、push；git archive固定完整commit、SHA256；StrictHostKeyChecking=yes上传、离线构建，候选127.0.0.1:18012。确保基线IDs/config未变，不盲目覆盖。
+- [x] 候选先原图（要求出图）和严重无脸负例；再同seed20随机+前版6针对输入、6路由/MP4 AVI MOV冒烟。OpenAPI深度对照应仅版本差异，presence .5不新增活体门禁。大图504记录并等待后台结束后有限复测，不扩大timeout或并发压测。
+- [x] 验收通过后promote，旧2557原容器停止保留；LAN原图+六接口+3现场presence回归对，Playwright测试台预览/下载、重置；最终健康/临时文件0/18001身份不变。
+- [x] 记录运行代码/配置/镜像/容器/测试/风险/回滚命令；8个当前文档入口更新2.3.1、差异规则及新报告链接，历史记录保留。文档独立复核、提交推送，关闭本次临时代理和隧道/浏览器，留分支worktree无PR/merge/tag。
 
 ## Gates
 
 - [x] 用户设计批准与独立spec审查。
 - [x] 独立plan审查及任务分工。
 - [x] 模块RED/GREEN、需求/质量双审查。
-- [ ] 本地完整回归与候选实测通过。
-- [ ] 正式发布新证据、文档/Git同步与回滚保留。
+- [x] 本地完整回归与候选实测通过。
+- [x] 正式发布新证据、文档/Git同步与回滚保留。
 
 本地阶段证据：原图生成成功REVIEW/SOURCE_LIMITED、480×640 JPEG（recognizer idle），人工检查完成；完整pytest 1749 passed / 1 skipped（127.64秒），Node33；独立需求与代码质量审查均Approved，无阻塞项。
+
+发布阶段证据：固定运行4e6a3372ddeb0a53d4f3e024e0e072f636ae9f1a，2026-09-30北京时间14:22上线2.3.1。
+候选26固定输入22出图/4无脸，另反馈原图成功，六接口与三视频容器通过；正式重复原图、六接口、3现场回归对和浏览器预览/下载通过。
+8个入口文档及新报告独立复核Approved，54个相对链接有效；详细证据、配置/镜像/容器身份、风险和回滚见[发布报告](../../reports/2026-09-30-portrait-box-overflow-release.md)。
