@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import Any
 
 import numpy as np
+from pydantic import BaseModel, TypeAdapter
 
 from face_algorithm.core.matcher import (
     MATCHER_VERSION,
@@ -26,7 +27,11 @@ from face_algorithm.runtime.calibration import (
     fingerprint_quality_profile,
     load_image_calibration,
 )
-from face_algorithm.runtime.config import AlgorithmConfig
+from face_algorithm.runtime.config import (
+    AlgorithmConfig,
+    ConfiguredImageVerification,
+    ImageVerificationConfig,
+)
 from face_algorithm.runtime.model_registry import ModelRegistry, VerifiedModelEvidence
 from face_algorithm.schemas import (
     FEATURE_DIMENSION,
@@ -39,9 +44,15 @@ from face_algorithm.schemas import (
     ReasonCode,
     Suggestion,
 )
-from face_algorithm.verification.policy import decide_image_verification
+from face_algorithm.verification.configured_threshold import (
+    ConfiguredThresholdState,
+    _is_issued_configured_threshold,
+    _issue_configured_threshold,
+)
+from face_algorithm.verification.policy import _valid_calibration, decide_image_verification
 
 __all__ = ["ImageVerificationRuntime", "build_image_verification_runtime"]
+
 
 def _has_hard_failure(reasons: tuple[ReasonCode, ...]) -> bool:
     return any(reason not in IMAGE_RECAPTURE_REASON_CODES for reason in reasons)
@@ -74,6 +85,14 @@ def _analysis_consistency_reason(
         return ReasonCode.INFERENCE_ERROR
     reasons = public.reason_codes
     if not all(isinstance(reason, ReasonCode) for reason in reasons):
+        return ReasonCode.INFERENCE_ERROR
+    if any(
+        reason in {
+            ReasonCode.IMAGE_TRIAL_THRESHOLD_MATCHED,
+            ReasonCode.IMAGE_TRIAL_THRESHOLD_NOT_MATCHED,
+        }
+        for reason in reasons
+    ):
         return ReasonCode.INFERENCE_ERROR
     if not reasons:
         if public.success is True and public.suggestion is Suggestion.PASS:
@@ -114,10 +133,29 @@ class _BoundImageVerifier:
     _analyze_trusted: Callable[[object, Any], TrustedFaceAnalysis]
     _reference_profile: Any
     _probe_profile: Any
-    _calibration: CalibrationState
+    _calibration: CalibrationState | ConfiguredThresholdState
+    _configured_owner: object | None
+    _pipeline_fingerprint: str
     _model_versions: Mapping[str, str]
     _config_version: str
     _matcher: Any
+
+    def _require_valid_threshold_state(self) -> None:
+        if self._configured_owner is not None:
+            valid = _is_issued_configured_threshold(
+                self._calibration,
+                owner=self._configured_owner,
+                pipeline_fingerprint=self._pipeline_fingerprint,
+            )
+        else:
+            valid = (
+                isinstance(self._calibration, CalibrationState)
+                and _valid_calibration(self._calibration)
+            )
+        if not valid:
+            # There is no truthful response summary for corrupt internal state.
+            # Propagate to the API's existing safe 500 handler, without a score.
+            raise ValueError("image verification threshold state is invalid")
 
     def _synthetic_failure(
         self,
@@ -201,6 +239,7 @@ class _BoundImageVerifier:
         probe_reasons: tuple[ReasonCode, ...],
         score: float | None,
     ) -> ImageVerificationResult:
+        self._require_valid_threshold_state()
         decision = decide_image_verification(
             reference_reason_codes=reference_reasons,
             probe_reason_codes=probe_reasons,
@@ -235,6 +274,7 @@ class _BoundImageVerifier:
         reference_image: object,
         probe_image: object,
     ) -> ImageVerificationResult:
+        self._require_valid_threshold_state()
         started = time.perf_counter()
         reference = self._analyze(reference_image, self._reference_profile)
         reference_reasons = reference.public.reason_codes
@@ -277,6 +317,14 @@ class _BoundImageVerifier:
                     probe_version=probe.public.feature_version,
                 )
                 score = match.score
+                if (
+                    isinstance(score, bool)
+                    or not isinstance(score, (int, float))
+                    or not math.isfinite(float(score))
+                    or not -1.0 <= float(score) <= 1.0
+                ):
+                    score = None
+                    probe_reasons = (ReasonCode.FEATURE_FAILED,)
             except EmbeddingMatchError as error:
                 probe_reasons = (error.reason_code,)
             except Exception:
@@ -303,7 +351,7 @@ class ImageVerificationRuntime:
     reference_profile_fingerprint: str
     probe_profile_fingerprint: str
     pipeline_fingerprint: str
-    calibration: CalibrationState
+    calibration: CalibrationState | ConfiguredThresholdState
     _model_evidence_snapshot: Mapping[str, VerifiedModelEvidence] = field(
         repr=False,
     )
@@ -323,7 +371,7 @@ class ImageVerificationRuntime:
         reference_profile_fingerprint: str,
         probe_profile_fingerprint: str,
         pipeline_fingerprint: str,
-        calibration: CalibrationState,
+        calibration: CalibrationState | ConfiguredThresholdState,
         model_evidence_snapshot: Mapping[str, VerifiedModelEvidence],
         verifier: _BoundImageVerifier,
     ) -> ImageVerificationRuntime:
@@ -362,13 +410,23 @@ def _bind_image_verification_runtime(
 ) -> ImageVerificationRuntime:
     """Bind an internally owned pipeline; exposed only for isolated unit tests."""
 
+    raw_image_config = config.image_verification
+    image_config = TypeAdapter(ImageVerificationConfig).validate_python(
+        raw_image_config.model_dump(warnings=False)
+        if isinstance(raw_image_config, BaseModel)
+        else raw_image_config
+    )
+    if isinstance(image_config, ConfiguredImageVerification):
+        # Validate model_copy overrides (including strict quality profiles and
+        # recognizer dimensions), while retaining the original frozen snapshots.
+        AlgorithmConfig.model_validate(config.model_dump(warnings=False))
     reference_profile = getattr(
         config.quality_profiles,
-        config.image_verification.reference_quality_profile,
+        image_config.reference_quality_profile,
     )
     probe_profile = getattr(
         config.quality_profiles,
-        config.image_verification.probe_quality_profile,
+        image_config.probe_quality_profile,
     )
     reference_fingerprint = fingerprint_quality_profile(
         reference_profile,
@@ -397,12 +455,22 @@ def _bind_image_verification_runtime(
         reference_profile_fingerprint=reference_fingerprint,
         probe_profile_fingerprint=probe_fingerprint,
     )
-    calibration = load_image_calibration(
-        config.image_verification,
-        key_store=key_store,
-        model_evidence=evidence_snapshot,
-        quality_profiles=config.quality_profiles,
-    )
+    configured_owner = None
+    calibration: CalibrationState | ConfiguredThresholdState
+    if isinstance(image_config, ConfiguredImageVerification):
+        configured_owner = object()
+        calibration = _issue_configured_threshold(
+            image_config,
+            owner=configured_owner,
+            pipeline_fingerprint=pipeline_fingerprint,
+        )
+    else:
+        calibration = load_image_calibration(
+            image_config,
+            key_store=key_store,
+            model_evidence=evidence_snapshot,
+            quality_profiles=config.quality_profiles,
+        )
     analyze_trusted = getattr(pipeline, "analyze_trusted", None)
     if not callable(analyze_trusted):
         raise TypeError("pipeline must provide a trusted analysis callable")
@@ -411,6 +479,8 @@ def _bind_image_verification_runtime(
         _reference_profile=reference_profile,
         _probe_profile=probe_profile,
         _calibration=calibration,
+        _configured_owner=configured_owner,
+        _pipeline_fingerprint=pipeline_fingerprint,
         _model_versions=model_versions_snapshot,
         _config_version=config_version,
         _matcher=match_embeddings,

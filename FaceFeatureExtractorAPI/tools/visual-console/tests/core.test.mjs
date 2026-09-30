@@ -274,11 +274,12 @@ async function consoleApp(fetch) {
   const nodes = new Map([
     ["#result-content", { hidden: true }], ["#result-empty", { hidden: false }],
     ["#result-suggestion", { textContent: "" }], ["#result-status", { textContent: "", dataset: {} }],
+    ["#result-metrics", evidenceBody()], ["#result-reasons", evidenceBody()],
     ["#evidence-frames-body", evidenceBody()],
   ]);
   const document = { body: { dataset: {} }, querySelector: (selector) => nodes.get(selector) ?? null,
     querySelectorAll: () => [], createElement(tag) {
-      assert.equal(tag, "video");
+      if (tag !== "video") return { tag, children: [], dataset: {}, append(...items) { this.children.push(...items); } };
       return { duration: 1, videoWidth: 100, videoHeight: 100, removeAttribute() {}, load() {},
         set src(value) { queueMicrotask(() => this.onloadedmetadata()); } };
     } };
@@ -287,7 +288,7 @@ async function consoleApp(fetch) {
   // Run the real app functions in a small DOM environment; omit only page startup/polling.
   runInNewContext(source.slice(0, source.lastIndexOf("\nbindEvents();"))
     .replace(/^import\s*\{[\s\S]*?\}\s*from\s*"\.\/core\.js";/, "")
-    + "\nglobalThis.app = { state, nodes, runCurrentTest, handleSelectedFile, clearField, renderResult };", context);
+    + "\nglobalThis.app = { state, nodes, runCurrentTest, handleSelectedFile, clearField, clearResult, renderResult };", context);
   const app = context.app;
   app.state.capabilityId = "verify-video-presence";
   app.state.capabilities = { video_presence: "ready" };
@@ -578,6 +579,154 @@ test("getSuggestionView fails closed for uncalibrated and wrong-dimension result
   });
   assert.equal(pass.key, "pass");
   assert.equal(pass.canTreatAsPass, true);
+});
+
+function imageTrialResult(overrides = {}) {
+  return {
+    success: true, suggestion: "REVIEW", reason_codes: ["IMAGE_TRIAL_THRESHOLD_MATCHED"],
+    similarity_score: 0.75, decision_threshold: 0.55, feature_dimension: 1024,
+    calibration: { status: "CONFIGURED_UNVALIDATED", calibration_id: null, artifact_sha256: null },
+    reference: { role: "reference", analyzed: true, usable: true, reason_codes: [] },
+    probe: { role: "probe", analyzed: true, usable: true, reason_codes: [] },
+    ...overrides,
+  };
+}
+
+test("image trial threshold uses backend reasons at equality and both score boundaries", () => {
+  for (const [value, threshold, matched] of [
+    [0.5499999, 0.55, false], [0.55, 0.55, true], [0.5500001, 0.55, true],
+    [-1, 0.55, false], [0, 0.55, false], [1, 0.55, true], [0, 0, true], [1, 1, true],
+  ]) {
+    const result = imageTrialResult({ similarity_score: value, decision_threshold: threshold,
+      reason_codes: [matched ? "IMAGE_TRIAL_THRESHOLD_MATCHED" : "IMAGE_TRIAL_THRESHOLD_NOT_MATCHED"] });
+    const view = getSuggestionView(result, "verify-images");
+    assert.equal(view.label, matched ? "达到试用匹配阈值" : "未达到试用匹配阈值");
+    assert.equal(view.key, "review");
+    assert.equal(view.validContract, true);
+    assert.equal(view.canTreatAsPass, false);
+    assert.match([view.message, ...view.notices].join(" "), /试用阈值.*精度未验证.*业务仍需人工复核/);
+    const details = Object.fromEntries(buildResultDetails("verify-images", result).map(({ key, value }) => [key, value]));
+    assert.equal(details["similarity-score"], value.toFixed(4));
+    assert.equal(details["decision-threshold"], threshold.toFixed(4));
+    assert.equal(details.calibration, "试用阈值（精度未验证）");
+    assert.doesNotMatch(JSON.stringify(details), /已标定|算法建议通过/);
+  }
+});
+
+test("image trial rejects forged, contradictory and incomplete threshold responses", () => {
+  const base = imageTrialResult();
+  for (const overrides of [
+    { suggestion: "PASS" }, { suggestion: "RECAPTURE" }, { success: false }, { success: "true" },
+    { reason_codes: [] }, { reason_codes: ["IMAGE_TRIAL_THRESHOLD_NOT_MATCHED"] },
+    { reason_codes: ["IMAGE_TRIAL_THRESHOLD_MATCHED", "IMAGE_TRIAL_THRESHOLD_NOT_MATCHED"] },
+    { reason_codes: ["IMAGE_TRIAL_THRESHOLD_MATCHED", "IMAGE_TRIAL_THRESHOLD_MATCHED"] },
+    { reason_codes: ["IMAGE_TRIAL_THRESHOLD_MATCHED", "NO_FACE"] },
+    { reason_codes: "IMAGE_TRIAL_THRESHOLD_MATCHED" },
+    { reason_codes: ["image_trial_threshold_matched"] },
+    ...[null, undefined, NaN, Infinity, -Infinity, true, "0.75", -1.0001, 1.0001]
+      .map(value => ({ similarity_score: value })),
+    ...[null, undefined, NaN, Infinity, -Infinity, true, "0.55", -0.0001, 1.0001]
+      .map(value => ({ decision_threshold: value })),
+    { feature_dimension: 512 }, { feature_dimension: "1024" }, { feature_dimension: undefined },
+    { reference: { ...base.reference, usable: false } },
+    { reference: { ...base.reference, analyzed: false } },
+    { probe: { ...base.probe, usable: "true" } },
+    { probe: { ...base.probe, reason_codes: ["NO_FACE"] } },
+    { probe: { ...base.probe, reason_codes: ["IMAGE_TRIAL_THRESHOLD_MATCHED"] } },
+    { probe: { ...base.probe, quality: { reason_codes: ["IMAGE_TRIAL_THRESHOLD_MATCHED"] } } },
+    { probe: { ...base.probe, role: "reference" } },
+    { calibration: { ...base.calibration, calibration_id: "fake" } },
+    { calibration: { ...base.calibration, artifact_sha256: "a".repeat(64) } },
+    { calibration: { status: "CONFIGURED_UNVALIDATED" } },
+    ...["ACTIVE", "UNCALIBRATED", "CONFIGURED", "UNKNOWN", "configured_unvalidated", undefined, null]
+      .map(status => ({ calibration: { ...base.calibration, status } })),
+    { calibration: null },
+  ]) {
+    const result = imageTrialResult(overrides);
+    const view = getSuggestionView(result, "verify-images");
+    assert.equal(view.label, "结果不可用", JSON.stringify(overrides));
+    assert.equal(view.validContract, false, JSON.stringify(overrides));
+    assert.equal(view.canTreatAsPass, false);
+    const details = Object.fromEntries(buildResultDetails("verify-images", result).map(({ key, value }) => [key, value]));
+    assert.equal(details.calibration, "不可用");
+    assert.equal(details["decision-threshold"], "不可用");
+    assert.equal(details["similarity-score"], "不可用");
+  }
+  const below = imageTrialResult({ similarity_score: 0.5499999 });
+  assert.equal(getSuggestionView(below, "verify-images").validContract, false);
+});
+
+test("image trial quality and system failures retain their original advice without a match decision", () => {
+  for (const [success, suggestion, reason, expected] of [
+    [true, "RECAPTURE", "NO_FACE", "建议重新采集"],
+    [true, "RECAPTURE", "FACE_TOO_SMALL", "建议重新采集"],
+    [true, "RECAPTURE", "FACE_CROPPED", "建议重新采集"],
+    [false, "REVIEW", "FEATURE_FAILED", "需要人工复核"],
+    [false, "REVIEW", "INFERENCE_ERROR", "需要人工复核"],
+  ]) {
+    const result = imageTrialResult({ success, suggestion, similarity_score: null, reason_codes: [reason],
+      probe: { role: "probe", analyzed: true, usable: false, reason_codes: [reason] } });
+    const view = getSuggestionView(result, "verify-images");
+    assert.equal(view.label, expected);
+    assert.equal(view.validContract, true);
+    assert.equal(view.canTreatAsPass, false);
+    assert.ok(view.notices.some(notice => notice.includes(REASON_LABELS[reason])));
+    assert.doesNotMatch(JSON.stringify(view), /未达到试用匹配阈值/);
+    const details = Object.fromEntries(buildResultDetails("verify-images", result).map(({ key, value }) => [key, value]));
+    assert.equal(details["similarity-score"], undefined);
+    assert.equal(details["decision-threshold"], "0.5500");
+    for (const trialCode of ["IMAGE_TRIAL_THRESHOLD_MATCHED", "IMAGE_TRIAL_THRESHOLD_NOT_MATCHED"]) {
+      assert.equal(getSuggestionView({ ...result, reason_codes: [reason, trialCode] }, "verify-images").validContract, false);
+      assert.equal(getSuggestionView({ ...result, probe: { ...result.probe, reason_codes: [trialCode] } }, "verify-images").validContract, false);
+    }
+  }
+});
+
+test("image trial does not alter signed, uncalibrated, generated-image or video interpretation", () => {
+  const signed = imageTrialResult({ suggestion: "PASS", reason_codes: [],
+    calibration: { status: "ACTIVE", calibration_id: "signed", artifact_sha256: "a".repeat(64) } });
+  assert.equal(getSuggestionView(signed, "verify-images").canTreatAsPass, true);
+  assert.equal(getSuggestionView({ ...signed, similarity_score: 0.2, suggestion: "REVIEW",
+    reason_codes: ["IDENTITY_UNCERTAIN"] }, "verify-images").label, "需要人工复核");
+  const uncalibrated = imageTrialResult({ decision_threshold: null,
+    reason_codes: ["THRESHOLD_UNCALIBRATED"], calibration: { status: "UNCALIBRATED" } });
+  assert.equal(getSuggestionView(uncalibrated, "verify-images").label, "需要人工复核");
+  assert.equal(buildResultDetails("verify-images", uncalibrated).find(item => item.key === "decision-threshold").value, "未标定");
+  for (const capability of ["verify-video-quick", "verify-video-full", "witness"]) {
+    assert.equal(getSuggestionView(signed, capability).label, "算法建议通过");
+    assert.equal(getSuggestionView(imageTrialResult(), capability).label, "需要人工复核");
+    assert.doesNotMatch(JSON.stringify(buildResultDetails(capability, imageTrialResult())), /试用阈值（精度未验证）/);
+  }
+  assert.equal(getSuggestionView(imageTrialResult(), "images").label, "达到试用匹配阈值");
+  for (const status of ["UNKNOWN", "CONFIGURED", "configured_unvalidated", undefined, null]) {
+    const result = { ...signed, calibration: { status } };
+    assert.equal(getSuggestionView(result, "verify-images").label, "结果不可用");
+    assert.equal(getSuggestionView(result, "verify-images").canTreatAsPass, false);
+  }
+  assert.equal(getSuggestionView({ ...signed, probe: { ...signed.probe,
+    reason_codes: ["IMAGE_TRIAL_THRESHOLD_MATCHED"] } }, "verify-images").validContract, false);
+  assert.equal(getSuggestionView({ ...signed, calibration: undefined }, "verify-images").validContract, false);
+});
+
+test("image trial app preserves REVIEW badge and rejects success-shaped HTTP errors consistently", async () => {
+  const app = await consoleApp(async () => { throw new Error("no request expected"); });
+  app.state.capabilityId = "verify-images";
+  app.renderResult(imageTrialResult(), 200, 5);
+  assert.equal(app.nodes.resultStatus.textContent, "REVIEW");
+  assert.equal(app.nodes.resultSuggestion.textContent, "达到试用匹配阈值");
+  const metrics = () => Object.fromEntries(app.nodes.resultMetrics.children.map(item => [item.dataset.metric, item.children[1].textContent]));
+  assert.equal(metrics()["decision-threshold"], "0.5500");
+  app.renderResult(imageTrialResult(), 500, 5);
+  assert.equal(app.nodes.resultStatus.textContent, "REVIEW");
+  assert.equal(app.nodes.resultSuggestion.textContent, "结果不可用");
+  assert.equal(metrics().suggestion, "结果不可用");
+  assert.equal(metrics()["decision-threshold"], "不可用");
+  assert.equal(app.nodes.resultReasons.children.some(item => /达到试用匹配阈值/.test(item.textContent)), false);
+  assert.doesNotMatch(metrics().reasons, /达到试用匹配阈值/);
+  app.clearResult();
+  assert.equal(app.nodes.resultContent.hidden, true);
+  assert.equal(app.nodes.resultMetrics.children.length, 0);
+  assert.equal(app.nodes.resultReasons.children.length, 0);
 });
 
 test("liveness=false is shown as an explicit non-liveness notice", () => {

@@ -24,7 +24,7 @@ class ApiErrorResponse(BaseModel):
 
 
 class ImageVerificationResponse(ImageVerificationResult):
-    """照片一对一核验结果；未标定分数不构成身份判定。"""
+    """照片一对一核验结果；未标定和配置试用阈值均不构成业务通过。"""
 
 
 class VideoVerificationResponse(VideoVerificationResult):
@@ -93,6 +93,7 @@ def install_public_openapi(app: FastAPI) -> None:
             title=app.title, version=app.version,
             description=(
                 "内网算法服务。业务后端调用API，测试台不是业务接口。"
+                "图片支持服务端配置的独立试用阈值，CONFIGURED_UNVALIDATED结果始终需要人工复核。"
                 "presence比较视频关键帧，支持显式试用阈值三态判定；quick/full仍检查持续主体一致性。"
                 "presence不要求活体，试用阈值不代表生产精度验证；不得将分数或success解释为业务审核通过。"
             ),

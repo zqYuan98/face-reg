@@ -544,6 +544,7 @@ function renderResult(payload, httpStatus, elapsedMs) {
   if (nodes.resultContent) nodes.resultContent.hidden = false;
 
   const presence = currentCapability().responseKind === "video-presence";
+  const imageVerification = currentCapability().responseKind === "image-verification";
   const interpretedResult = { ...payload,
     ...(httpStatus && (httpStatus < 200 || httpStatus >= 300) ? { success: false } : {}) };
   const view = getSuggestionView(interpretedResult, state.capabilityId);
@@ -561,8 +562,9 @@ function renderResult(payload, httpStatus, elapsedMs) {
   const notices = [...view.notices];
   if (httpStatus && httpStatus !== 200) notices.unshift(`HTTP ${httpStatus}`);
   if (Number.isFinite(elapsedMs)) notices.push(`浏览器往返 ${(elapsedMs / 1000).toFixed(2)} 秒`);
-  const reasons = translateReasons(presence && Array.isArray(payload.reason_codes)
-    ? payload.reason_codes.filter((code) => !["CALIBRATION_REQUIRED", "THRESHOLD_UNCALIBRATED"].includes(code)) : payload.reason_codes);
+  const reasons = imageVerification && view.validContract === false ? ["响应契约不一致，请检查后端响应。"]
+    : translateReasons(presence && Array.isArray(payload.reason_codes)
+      ? payload.reason_codes.filter((code) => !["CALIBRATION_REQUIRED", "THRESHOLD_UNCALIBRATED"].includes(code)) : payload.reason_codes);
   setText(nodes.resultMessage, [view.message, ...notices].filter(Boolean).join("；"));
   if (nodes.resultReasons) {
     nodes.resultReasons.replaceChildren();
@@ -572,7 +574,8 @@ function renderResult(payload, httpStatus, elapsedMs) {
   const trace = typeof payload.trace_id === "string" && payload.trace_id ? `${payload.trace_id.slice(0, 8)}…` : "—";
   setText(nodes.resultTraceId, trace);
 
-  renderMetrics(buildResultDetails(state.capabilityId, presence ? interpretedResult : payload));
+  renderMetrics(buildResultDetails(state.capabilityId,
+    presence || imageVerification ? interpretedResult : payload));
   if (nodes.evidencePanel) nodes.evidencePanel.hidden = !presence;
   renderEvidenceFrames(nodes.evidenceBody, presence && view.validContract ? payload : {}, { onSeek: seekLocalEvidence });
   try {

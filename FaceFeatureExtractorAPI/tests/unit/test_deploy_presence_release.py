@@ -17,11 +17,11 @@ from scripts import deploy_presence_release as release
 
 
 COMMIT = 'a' * 40
-BASELINE_COMMIT = '2557e1707eb77b7cf7a077541030d7ec64f5ae84'
+BASELINE_COMMIT = '4e6a3372ddeb0a53d4f3e024e0e072f636ae9f1a'
 BASELINE_SHORT = BASELINE_COMMIT[:12]
 BASELINE_IDS = {
-    release.API: '9eb1ce46e1f6523e2a022c772016be3aff3857b9e99f9f11fb1d384fad89d622',
-    release.CONSOLE: 'a4d07dc28b2af9b1e05e416ae0e2205d36c9c605472e24491f733c1c2fc8482a',
+    release.API: '1cf05a422d89290099d03b2bead2cd9396e0451e7ca26beef68fba1bf23f150e',
+    release.CONSOLE: 'e4af1efbeae7b5d189e00838f48b2a9b39aa320882f075e508d7b6121eef8185',
 }
 BASELINE_CONFIG_SHA256 = '6d300c20cac3158ce1c5a720eb92f6a9231e3915e2a81e90bfe2653226cf7b5d'
 READY_MODEL_NAMES = (
@@ -43,17 +43,19 @@ NEW_DTO_FIELDS = {
 
 def presence_schema() -> dict:
     from face_algorithm.presence.contracts import VideoPresenceResult
-    from api.openapi import PortraitResponse
+    from api.openapi import PortraitResponse, ImageVerificationResponse
 
     model = VideoPresenceResult.model_json_schema(ref_template='#/components/schemas/{model}')
     definitions = model.pop('$defs')
     portrait = PortraitResponse.model_json_schema(ref_template='#/components/schemas/{model}')
     definitions.update(portrait.pop('$defs'))
+    image_result = ImageVerificationResponse.model_json_schema(ref_template='#/components/schemas/{model}')
+    definitions.update(image_result.pop('$defs'))
     definitions['ReasonCode']['enum'] = sorted(set(definitions['ReasonCode']['enum']) | {
         'PORTRAIT_SOURCE_LIMITED', 'PORTRAIT_UPSCALE_LIMITED',
     })
     return {
-        'info': {'version': '2.3.1'},
+        'info': {'version': '2.4.0'},
         'paths': {'/api/v2/verify/video/presence': {'post': {'responses': {'200': {
             'content': {'application/json': {'schema': {'$ref': '#/components/schemas/VideoPresenceResult'}}},
         }}}}, '/api/v2/portrait/generate': {'post': {
@@ -63,8 +65,20 @@ def presence_schema() -> dict:
             'responses': {'200': {'content': {'application/json': {
                 'schema': {'$ref': '#/components/schemas/PortraitResponse'},
             }}}},
+        }}, '/api/v2/verify/images': {'post': {
+            'requestBody': {'required': True, 'content': {'multipart/form-data': {
+                'schema': {'$ref': '#/components/schemas/ImageUpload'},
+            }}},
+            'responses': {'200': {'content': {'application/json': {
+                'schema': {'$ref': '#/components/schemas/ImageVerificationResponse'},
+            }}}},
         }}},
         'components': {'schemas': {'VideoPresenceResult': model, 'PortraitResponse': portrait,
+                                  'ImageVerificationResponse': image_result,
+                                  'ImageUpload': {'required': ['reference_image', 'probe_image'], 'properties': {
+                                      'reference_image': {'type': 'string', 'format': 'binary'},
+                                      'probe_image': {'type': 'string', 'format': 'binary'},
+                                  }},
                                   'PortraitUpload': {'required': ['image'], 'properties': {
                                       'image': {'type': 'string', 'format': 'binary'},
                                   }}, **definitions}},
@@ -103,7 +117,9 @@ def legacy_portrait_config() -> str:
             'portrait_template:\n  version: head-shoulders-480x640-v1 # preserve comment\n'
             '  output_width: 480\n  output_height: 640\n'
             '  background_rgb: [255, 255, 255]\n'
-            'resources: {max_video_bytes: 99}\n')
+            'resources: {max_video_bytes: 99}\n'
+            'image_verification:\n  mode: uncalibrated # retain comment\n'
+            '  reference_quality_profile: entry_verify\n  probe_quality_profile: entry_verify\n')
 
 
 def approved_config() -> str:
@@ -124,7 +140,57 @@ def test_commit_must_be_full_unambiguous_lowercase_sha() -> None:
             release.full_commit(invalid)
 
 
-def test_release_baseline_is_the_deployed_230_portrait_revision() -> None:
+@pytest.mark.parametrize('newline', ['\n', '\r\n'])
+def test_image_migration_changes_only_trial_mode_and_threshold(newline):
+    original = approved_config().replace('\n', newline)
+    migrated = release.image_threshold_config(original)
+    expected = yaml.safe_load(original)
+    expected['image_verification'].update(mode='configured', threshold=.55)
+    assert yaml.safe_load(migrated) == expected
+    assert migrated.split('image_verification:')[0] == original.split('image_verification:')[0]
+    assert 'mode: configured # retain comment' + newline in migrated
+    assert '  threshold: 0.55' + newline in migrated
+
+
+@pytest.mark.parametrize('section', [
+    '', 'image_verification: {}\n', '"image_verification":\n  mode: uncalibrated\n',
+    'image_verification:\n  mode: artifact\n',
+    'image_verification:\n  mode: uncalibrated\n  mode: uncalibrated\n',
+    'image_verification:\n  mode: uncalibrated\n  threshold: 0.4\n',
+    'image_verification: &shared\n  mode: uncalibrated\n',
+    'image_verification:\n  <<: *defaults\n',
+    'image_verification:\n  mode: uncalibrated\nimage_verification:\n',
+])
+def test_image_migration_refuses_ambiguous_or_unapproved_baseline(section):
+    with pytest.raises(release.ReleaseError, match='image_verification'):
+        release.image_threshold_config(section)
+
+
+@pytest.mark.parametrize('defect', ['wrong-threshold', 'missing-threshold', 'string-threshold',
+                                  'wrong-mode', 'changed-profile', 'extra-field', 'image-alias'])
+def test_image_semantic_delta_guard(tmp_path, defect):
+    original = approved_config()
+    migrated = release.image_threshold_config(original)
+    if defect == 'wrong-threshold':
+        migrated = migrated.replace('threshold: 0.55', 'threshold: 0.5')
+    elif defect == 'missing-threshold':
+        migrated = migrated.replace('  threshold: 0.55\n', '')
+    elif defect == 'string-threshold':
+        migrated = migrated.replace('threshold: 0.55', 'threshold: "0.55"')
+    elif defect == 'wrong-mode':
+        migrated = migrated.replace('mode: configured # retain', 'mode: uncalibrated # retain')
+    elif defect == 'changed-profile':
+        migrated = migrated.replace('probe_quality_profile: entry_verify', 'probe_quality_profile: portrait')
+    elif defect == 'extra-field':
+        migrated += '  unexpected: true\n'
+    else:
+        original = original.replace('image_verification:\n', 'image_verification: &image\n') + 'retained_image_alias: *image\n'
+        migrated = migrated.replace('image_verification:\n', 'image_verification: &image\n') + 'retained_image_alias: *image\n'
+    with pytest.raises((AssertionError, ValueError, yaml.YAMLError)):
+        run_config_validation(tmp_path, original, migrated)
+
+
+def test_release_baseline_is_the_deployed_231_portrait_revision() -> None:
     assert release.OLD_COMMIT == BASELINE_COMMIT
     assert release.OLD_REVISION == BASELINE_SHORT
     assert release.OLD_SOURCE == release.ROOT / ('source-' + BASELINE_COMMIT) / 'FaceFeatureExtractorAPI'
@@ -151,6 +217,8 @@ def test_build_uses_current_baseline_validator_and_never_overwrites_custom_polic
     if custom_interval:
         old_policy['sample_interval_seconds'] = 0.75
     old_config = {'models': {'portrait_matting': {'enabled': True}}, 'video_presence': old_policy,
+                  'image_verification': {'mode': 'uncalibrated', 'reference_quality_profile': 'entry_verify',
+                                         'probe_quality_profile': 'entry_verify'},
                   'resources': {'max_video_bytes': 99},
                   'portrait_template': {'mode': 'face_archive', 'version': 'face-archive-480x640-v1',
                                         'output_width': 480}}
@@ -220,9 +288,12 @@ def test_build_uses_current_baseline_validator_and_never_overwrites_custom_polic
     assert merged['models']['portrait_matting']['enabled'] is True
     assert merged['resources'] == old_config['resources']
     assert merged['video_presence'] == old_policy
-    assert merged == old_config
-    assert old_path.read_bytes() == deploy.config.read_bytes() == original_bytes
-    assert release.sha256(deploy.config) == release.sha256(old_path) == deploy.state['config_sha256']
+    expected = copy.deepcopy(old_config)
+    expected['image_verification'].update(mode='configured', threshold=.55)
+    assert merged == expected
+    assert old_path.read_bytes() == original_bytes
+    assert deploy.config.read_bytes() == release.image_threshold_config(original_bytes.decode('utf-8')).encode('utf-8')
+    assert release.sha256(deploy.config) == deploy.state['config_sha256'] != release.sha256(old_path)
 
 
 @pytest.mark.parametrize('newline', ['\n', '\r\n'])
@@ -269,14 +340,14 @@ def run_config_validation(tmp_path, original, migrated):
 
 def test_container_semantic_validation_preserves_all_data_and_custom_presence(tmp_path) -> None:
     original = approved_config()
-    run_config_validation(tmp_path, original, original)
+    run_config_validation(tmp_path, original, release.image_threshold_config(original))
 
 
 @pytest.mark.parametrize('defect', ['presence', 'modnet', 'resource', 'width', 'version', 'mode',
                                   'duplicate-original', 'duplicate-migrated', 'presence-baseline'])
 def test_container_semantic_validation_rejects_unapproved_changes(tmp_path, defect) -> None:
     original = approved_config()
-    migrated = original
+    migrated = release.image_threshold_config(original)
     if defect == 'presence':
         migrated = migrated.replace('threshold: 0.5', 'threshold: null')
     elif defect == 'modnet':
@@ -317,8 +388,9 @@ def test_semantic_validation_rejects_unapproved_values_even_when_both_copies_mat
 def test_semantic_validation_preserves_shared_yaml_values_without_mutation(tmp_path) -> None:
     original = approved_config().replace('portrait_template:\n', 'portrait_template: &template\n')
     original += 'retained_template_alias: *template\n'
-    run_config_validation(tmp_path, original, original)
-    changed = original.replace('output_width: 480', 'output_width: 481')
+    migrated = release.image_threshold_config(original)
+    run_config_validation(tmp_path, original, migrated)
+    changed = migrated.replace('output_width: 480', 'output_width: 481')
     with pytest.raises(AssertionError):
         run_config_validation(tmp_path, original, changed)
 
@@ -581,6 +653,39 @@ def test_readiness_rejects_changed_portrait_contract(monkeypatch, defect) -> Non
         def open(self, url, timeout):
             payload = {'ready': True, 'capabilities': {'video_presence': 'ready', 'portrait': 'ready'}} if url.endswith('/health/ready') else schema
             return Response(json.dumps(payload).encode())
+
+    ticks = iter((0, 0, 10))
+    monkeypatch.setattr(release.time, 'monotonic', lambda: next(ticks))
+    monkeypatch.setattr(release.time, 'sleep', lambda _: None)
+    monkeypatch.setattr(release.urllib.request, 'build_opener', lambda *_: Opener())
+    with pytest.raises(release.ReleaseError, match='Readiness timeout'):
+        release.wait_http('http://127.0.0.1:18012', presence=True, timeout=1)
+
+
+@pytest.mark.parametrize('defect', ['missing-mode', 'missing-matched', 'missing-not-matched',
+                                  'extra-upload', 'missing-upload', 'response-ref'])
+def test_readiness_rejects_incomplete_image_trial_contract(monkeypatch, defect):
+    schema = presence_schema()
+    models = schema['components']['schemas']
+    if defect == 'missing-mode':
+        models['ImageCalibrationSummary']['properties']['status']['enum'].remove('CONFIGURED_UNVALIDATED')
+    elif defect in ('missing-matched', 'missing-not-matched'):
+        models['ReasonCode']['enum'].remove('IMAGE_TRIAL_THRESHOLD_MATCHED' if defect == 'missing-matched'
+                                          else 'IMAGE_TRIAL_THRESHOLD_NOT_MATCHED')
+    elif defect == 'extra-upload':
+        models['ImageUpload']['properties']['threshold'] = {'type': 'number'}
+    elif defect == 'missing-upload':
+        models['ImageUpload']['required'] = ['reference_image']
+    else:
+        schema['paths']['/api/v2/verify/images']['post']['responses']['200']['content']['application/json']['schema']['$ref'] = '#/components/schemas/Other'
+
+    class Response(io.BytesIO):
+        status = 200
+
+    class Opener:
+        def open(self, url, timeout):
+            value = restored_readiness() if url.endswith('/health/ready') else schema
+            return Response(json.dumps(value).encode())
 
     ticks = iter((0, 0, 10))
     monkeypatch.setattr(release.time, 'monotonic', lambda: next(ticks))
@@ -975,8 +1080,8 @@ def test_rollback_records_success_only_after_old_api_ready_version_and_console(
     elif defect in READY_MODEL_NAMES:
         next(model for model in ready['models'] if model['name'] == defect)['state'] = 'unavailable'
     schema = {'info': {'version': {
-        'wrong-version': '2.3.1', 'older-version': '2.2.0',
-    }.get(defect, '2.3.0')}}
+        'wrong-version': '2.4.0', 'older-version': '2.3.0',
+    }.get(defect, '2.3.1')}}
     urls = []
 
     class Response(io.BytesIO):
@@ -1019,7 +1124,7 @@ def test_rollback_records_success_only_after_old_api_ready_version_and_console(
 
 
 @pytest.mark.parametrize('restored_models_ready', [True, False])
-def test_failed_promotion_runs_real_rollback_and_requires_restored_230_models(
+def test_failed_promotion_runs_real_rollback_and_requires_restored_231_models(
     deploy, monkeypatch, restored_models_ready,
 ) -> None:
     deploy.state = {'stage': 'candidate', 'config_sha256': 'config-hash'}
@@ -1066,9 +1171,9 @@ def test_failed_promotion_runs_real_rollback_and_requires_restored_230_models(
             elif url.endswith('/openapi.json'):
                 payload = presence_schema()
                 if ':18002/' in url:
-                    # Wrong-version formal service triggers rollback; 2.3.0 is only
+                    # Wrong-version formal service triggers rollback; 2.3.1 is only
                     # accepted again after the original pinned container is restored.
-                    payload['info']['version'] = '2.3.0'
+                    payload['info']['version'] = '2.3.1'
             else:
                 payload = {'status': 'live'}
             return Response(json.dumps(payload).encode())

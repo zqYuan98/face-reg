@@ -10,7 +10,7 @@ from .conftest import config_with
 def test_presence_revision_version_and_trial_contract(algorithm_config):
     schema = create_app(config=algorithm_config, services=DefaultAlgorithmServices(
         config=algorithm_config, registry=object())).openapi()
-    assert schema["info"]["version"] == "2.3.1"
+    assert schema["info"]["version"] == "2.4.0"
     props = schema["components"]["schemas"]["VideoPresenceResult"]["properties"]
     assert props["calibration_status"]["enum"] == ["UNCALIBRATED", "CONFIGURED_UNVALIDATED"]
     assert {"threshold", "comparison_status", "compared_candidates", "base_frames"} <= set(props)
@@ -85,3 +85,34 @@ def test_portrait_archive_keeps_request_and_response_fields(algorithm_config):
     }
     assert "REVIEW" in operation["description"]
     assert "肩" in operation["description"]
+
+
+def test_image_trial_extends_enums_but_preserves_all_fields_and_video(algorithm_config):
+    schema = create_app(config=algorithm_config, services=DefaultAlgorithmServices(
+        config=algorithm_config, registry=object())).openapi()
+    definitions = schema["components"]["schemas"]
+    operation = schema["paths"]["/api/v2/verify/images"]["post"]
+    request = operation["requestBody"]["content"]["multipart/form-data"]["schema"]
+    request_model = definitions[request["$ref"].rsplit("/", 1)[-1]]
+    assert set(request_model["properties"]) == {"reference_image", "probe_image"}
+    assert set(request_model["required"]) == {"reference_image", "probe_image"}
+    assert not operation.get("parameters")
+    assert set(definitions["ImageVerificationResponse"]["properties"]) == {
+        "success", "suggestion", "reason_codes", "model_versions", "feature_version",
+        "config_version", "processing_time_ms", "trace_id", "reference", "probe",
+        "similarity_score", "matcher_version", "feature_dimension", "decision_threshold", "calibration",
+    }
+    assert set(definitions["ImageVerificationSide"]["properties"]) == {
+        "role", "analyzed", "usable", "reason_codes", "original_width", "original_height",
+        "box", "landmarks", "quality", "pose", "rotation_quarter_turns", "processing_time_ms", "trace_id",
+    }
+    calibration = definitions["ImageCalibrationSummary"]["properties"]
+    assert set(calibration) == {"status", "calibration_id", "artifact_sha256"}
+    assert calibration["status"]["enum"] == ["UNCALIBRATED", "ACTIVE", "CONFIGURED_UNVALIDATED"]
+    assert definitions["CalibrationSummary"]["properties"]["status"]["enum"] == ["UNCALIBRATED", "ACTIVE"]
+    reasons = definitions["ReasonCode"]["enum"]
+    assert [code for code in reasons if code.startswith("IMAGE_TRIAL_")] == [
+        "IMAGE_TRIAL_THRESHOLD_MATCHED", "IMAGE_TRIAL_THRESHOLD_NOT_MATCHED",
+    ]
+    assert "CONFIGURED_UNVALIDATED" in operation["description"]
+    assert "REVIEW" in operation["description"]

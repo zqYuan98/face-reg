@@ -15,6 +15,9 @@ from face_algorithm.schemas import (
     FeatureVersion,
     FrameSummary,
     HealthLevel,
+    ImageCalibrationSummary,
+    ImageVerificationResult,
+    ImageVerificationSide,
     LandmarkPoint,
     ModelHealth,
     ModelState,
@@ -45,6 +48,8 @@ EXPECTED_REASON_CODES = [
     "FEATURE_FAILED",
     "FEATURE_VERSION_MISMATCH",
     "THRESHOLD_UNCALIBRATED",
+    "IMAGE_TRIAL_THRESHOLD_MATCHED",
+    "IMAGE_TRIAL_THRESHOLD_NOT_MATCHED",
     "MATTING_FAILED",
     "MATTING_LOW_CONFIDENCE",
     "SUBJECT_CROPPED",
@@ -336,3 +341,150 @@ def test_active_video_identity_review_must_fail_a_signed_threshold() -> None:
         {**payload, "aggregate_score": 0.74}
     )
     assert uncertain.suggestion is Suggestion.REVIEW
+
+
+def _configured_image_payload(*, score=0.55, threshold=0.55):
+    def side(role):
+        return ImageVerificationSide(
+            role=role, analyzed=True, usable=True, reason_codes=(),
+            rotation_quarter_turns=0, processing_time_ms=1.0, trace_id=role,
+        )
+
+    return {
+        **_result().model_dump(mode="python"),
+        "success": True,
+        "suggestion": Suggestion.REVIEW,
+        "reason_codes": (ReasonCode("IMAGE_TRIAL_THRESHOLD_MATCHED"),),
+        "reference": side("reference"),
+        "probe": side("probe"),
+        "similarity_score": score,
+        "decision_threshold": threshold,
+        "calibration": ImageCalibrationSummary(status="CONFIGURED_UNVALIDATED"),
+    }
+
+
+@pytest.mark.parametrize("score, threshold, expected", [
+    (0.5499999, 0.55, "IMAGE_TRIAL_THRESHOLD_NOT_MATCHED"),
+    (0.55, 0.55, "IMAGE_TRIAL_THRESHOLD_MATCHED"),
+    (0.5500001, 0.55, "IMAGE_TRIAL_THRESHOLD_MATCHED"),
+    (-1.0, 0.55, "IMAGE_TRIAL_THRESHOLD_NOT_MATCHED"),
+    (0.0, 0.0, "IMAGE_TRIAL_THRESHOLD_MATCHED"),
+    (1.0, 1.0, "IMAGE_TRIAL_THRESHOLD_MATCHED"),
+])
+def test_configured_image_comparison_is_explicit_review(score, threshold, expected):
+    payload = _configured_image_payload(score=score, threshold=threshold)
+    payload["reason_codes"] = (ReasonCode(expected),)
+    result = ImageVerificationResult.model_validate(payload)
+    wire = json.loads(result.model_dump_json())
+    assert wire["success"] is True and wire["suggestion"] == "REVIEW"
+    assert wire["similarity_score"] == score
+    assert wire["decision_threshold"] == threshold
+    assert wire["reason_codes"] == [expected]
+    assert wire["calibration"] == {
+        "status": "CONFIGURED_UNVALIDATED", "calibration_id": None,
+        "artifact_sha256": None,
+    }
+    assert ImageVerificationResult.model_validate_json(result.model_dump_json()) == result
+    assert ReasonCode(expected) not in IMAGE_RECAPTURE_REASON_CODES
+    assert ReasonCode(expected) not in VIDEO_RECAPTURE_REASON_CODES
+
+
+@pytest.mark.parametrize("field, invalid", [
+    (field, value)
+    for field in ("decision_threshold", "similarity_score")
+    for value in (None, True, "0.55", math.nan, math.inf, -math.inf, 1.01)
+] + [("decision_threshold", -0.01), ("similarity_score", -1.01)])
+def test_configured_image_rejects_invalid_comparison_values(field, invalid):
+    payload = _configured_image_payload()
+    payload[field] = invalid
+    with pytest.raises(ValidationError):
+        ImageVerificationResult.model_validate(payload)
+
+
+@pytest.mark.parametrize("mutation", [
+    "pass", "unsuccessful", "wrong_direction", "both_codes", "no_code",
+    "mixed_code", "uncalibrated", "active", "unusable", "signature_metadata",
+])
+def test_configured_image_rejects_contradictory_decisions(mutation):
+    payload = _configured_image_payload()
+    matched = ReasonCode("IMAGE_TRIAL_THRESHOLD_MATCHED")
+    not_matched = ReasonCode("IMAGE_TRIAL_THRESHOLD_NOT_MATCHED")
+    if mutation == "pass":
+        payload.update(suggestion=Suggestion.PASS, reason_codes=())
+    elif mutation == "unsuccessful":
+        payload["success"] = False
+    elif mutation == "wrong_direction":
+        payload["reason_codes"] = (not_matched,)
+    elif mutation == "both_codes":
+        payload["reason_codes"] = (matched, not_matched)
+    elif mutation == "no_code":
+        payload["reason_codes"] = ()
+    elif mutation == "mixed_code":
+        payload["reason_codes"] = (matched, ReasonCode.INFERENCE_ERROR)
+    elif mutation == "uncalibrated":
+        payload.update(calibration={"status": "UNCALIBRATED"}, decision_threshold=None)
+    elif mutation == "active":
+        payload["calibration"] = {
+            "status": "ACTIVE", "calibration_id": "real-id", "artifact_sha256": "a" * 64,
+        }
+    elif mutation == "unusable":
+        payload["probe"] = ImageVerificationSide(
+            role="probe", analyzed=False, usable=False, reason_codes=(),
+        )
+    elif mutation == "signature_metadata":
+        payload["calibration"] = {
+            "status": "CONFIGURED_UNVALIDATED", "calibration_id": "fake",
+            "artifact_sha256": "a" * 64,
+        }
+    with pytest.raises(ValidationError):
+        ImageVerificationResult.model_validate(payload)
+
+
+@pytest.mark.parametrize("code", [
+    "IMAGE_TRIAL_THRESHOLD_MATCHED", "IMAGE_TRIAL_THRESHOLD_NOT_MATCHED",
+])
+@pytest.mark.parametrize("role", ["reference", "probe"])
+def test_trial_reasons_cannot_be_image_side_failures(code, role):
+    with pytest.raises(ValidationError):
+        ImageVerificationSide(
+            role=role, analyzed=True, usable=False, reason_codes=(ReasonCode(code),),
+            rotation_quarter_turns=0, processing_time_ms=1.0, trace_id="side",
+        )
+
+
+@pytest.mark.parametrize("reason, success, suggestion", [
+    (ReasonCode.NO_FACE, True, Suggestion.RECAPTURE),
+    (ReasonCode.INFERENCE_ERROR, False, Suggestion.REVIEW),
+])
+def test_configured_image_incomparable_keeps_original_failure_contract(reason, success, suggestion):
+    payload = _configured_image_payload()
+    payload.update(success=success, suggestion=suggestion, reason_codes=(reason,), similarity_score=None)
+    payload["probe"] = ImageVerificationSide(
+        role="probe", analyzed=True, usable=False, reason_codes=(reason,),
+        rotation_quarter_turns=0, processing_time_ms=1.0, trace_id="side",
+    )
+    result = ImageVerificationResult.model_validate(payload)
+    assert result.similarity_score is None
+    assert result.decision_threshold == 0.55
+    assert result.reason_codes == (reason,)
+
+
+def test_video_calibration_does_not_accept_image_trial_state():
+    payload = _video_result(active=False).calibration.model_dump(mode="python")
+    with pytest.raises(ValidationError):
+        CalibrationSummary.model_validate({**payload, "status": "CONFIGURED_UNVALIDATED"})
+
+
+@pytest.mark.parametrize("active", [False, True])
+@pytest.mark.parametrize("code", [
+    "IMAGE_TRIAL_THRESHOLD_MATCHED", "IMAGE_TRIAL_THRESHOLD_NOT_MATCHED",
+])
+@pytest.mark.parametrize("location", ["top", "frames"])
+def test_image_trial_reasons_cannot_be_video_decisions(active, code, location):
+    payload = _video_result(active=active).model_dump(mode="python")
+    if location == "top":
+        payload.update(suggestion=Suggestion.REVIEW, reason_codes=(ReasonCode(code),))
+    else:
+        payload["frames"]["reason_codes"] = (ReasonCode(code),)
+    with pytest.raises(ValidationError):
+        VideoVerificationResult.model_validate(payload)

@@ -16,8 +16,13 @@ from face_algorithm.schemas import (
     ReasonCode,
     Suggestion,
 )
+from face_algorithm.verification.configured_threshold import (
+    ConfiguredThresholdState,
+    _is_issued_configured_threshold,
+)
 
 __all__ = ["ImageVerificationDecision", "decide_image_verification"]
+
 
 @dataclass(frozen=True, slots=True)
 class ImageVerificationDecision:
@@ -36,13 +41,20 @@ def _stable_reasons(
     for reason in (*reference, *probe):
         if not isinstance(reason, ReasonCode):
             return None
+        if reason in {
+            ReasonCode.IMAGE_TRIAL_THRESHOLD_MATCHED,
+            ReasonCode.IMAGE_TRIAL_THRESHOLD_NOT_MATCHED,
+        }:
+            return None
         if reason not in seen:
             seen.add(reason)
             merged.append(reason)
     return tuple(merged)
 
 
-def _valid_calibration(state: CalibrationState) -> bool:
+def _valid_calibration(state: CalibrationState | ConfiguredThresholdState) -> bool:
+    if isinstance(state, ConfiguredThresholdState):
+        return _is_issued_configured_threshold(state)
     if not _is_loader_issued_calibration(state):
         return False
     if state.status is CalibrationStatus.UNCALIBRATED:
@@ -87,7 +99,7 @@ def decide_image_verification(
     reference_reason_codes: tuple[ReasonCode, ...],
     probe_reason_codes: tuple[ReasonCode, ...],
     score: float | None,
-    calibration: CalibrationState,
+    calibration: CalibrationState | ConfiguredThresholdState,
 ) -> ImageVerificationDecision:
     """Apply hard-error, recapture, calibration, then threshold precedence."""
 
@@ -98,8 +110,7 @@ def decide_image_verification(
         return _failed_closed()
     decision_threshold = (
         float(calibration.threshold)
-        if calibration.status is CalibrationStatus.ACTIVE
-        and calibration.threshold is not None
+        if calibration.threshold is not None
         else None
     )
 
@@ -126,6 +137,20 @@ def decide_image_verification(
     ):
         return _failed_closed()
     score = float(score)
+
+    if isinstance(calibration, ConfiguredThresholdState):
+        assert decision_threshold is not None
+        reason = (
+            ReasonCode.IMAGE_TRIAL_THRESHOLD_MATCHED
+            if score >= decision_threshold
+            else ReasonCode.IMAGE_TRIAL_THRESHOLD_NOT_MATCHED
+        )
+        return ImageVerificationDecision(
+            success=True,
+            suggestion=Suggestion.REVIEW,
+            reason_codes=(reason,),
+            decision_threshold=decision_threshold,
+        )
 
     if calibration.status is CalibrationStatus.UNCALIBRATED:
         return ImageVerificationDecision(

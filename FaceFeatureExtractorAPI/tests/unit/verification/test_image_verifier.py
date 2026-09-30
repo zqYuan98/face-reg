@@ -133,6 +133,308 @@ def _runtime(
     return runtime, pipeline
 
 
+def _configured_config(threshold: float = 0.55):
+    base = load_config(DEFAULT_CONFIG)
+    payload = base.model_dump()
+    payload["image_verification"] = {
+        "mode": "configured",
+        "threshold": threshold,
+        "reference_quality_profile": "entry_verify",
+        "probe_quality_profile": "entry_verify",
+    }
+    return type(base).model_validate(payload)
+
+
+def _configured_runtime(bundle, outputs=None, threshold=0.55):
+    return _runtime(
+        outputs if outputs is not None else [
+            _trusted(embedding=_embedding()), _trusted(embedding=_embedding()),
+        ],
+        config=_configured_config(threshold),
+        key_store=None,
+        model_evidence=bundle.evidence,
+    )
+
+
+@pytest.mark.parametrize(
+    ("threshold", "score", "expected_reason"),
+    [
+        (0.55, 0.5499999, "IMAGE_TRIAL_THRESHOLD_NOT_MATCHED"),
+        (0.55, 0.55, "IMAGE_TRIAL_THRESHOLD_MATCHED"),
+        (0.55, 0.5500001, "IMAGE_TRIAL_THRESHOLD_MATCHED"),
+        (0.0, 0.0, "IMAGE_TRIAL_THRESHOLD_MATCHED"),
+        (0.0, -1.0, "IMAGE_TRIAL_THRESHOLD_NOT_MATCHED"),
+        (1.0, 1.0, "IMAGE_TRIAL_THRESHOLD_MATCHED"),
+        (1.0, 0.9999999, "IMAGE_TRIAL_THRESHOLD_NOT_MATCHED"),
+    ],
+)
+def test_configured_runtime_compares_exact_boundaries_but_never_passes(
+    active_calibration_bundle, monkeypatch, threshold, score, expected_reason,
+) -> None:
+    from face_algorithm.verification import image_verifier as verifier_module
+
+    monkeypatch.setattr(
+        verifier_module, "match_embeddings", lambda *_a, **_kw: SimpleNamespace(score=score)
+    )
+    runtime, _ = _configured_runtime(active_calibration_bundle, threshold=threshold)
+
+    result = runtime.verify(object(), object())
+
+    assert result.success is True
+    assert result.suggestion is Suggestion.REVIEW
+    assert [reason.value for reason in result.reason_codes] == [expected_reason]
+    assert result.similarity_score == score
+    assert result.decision_threshold == threshold
+    assert result.reference.usable and result.probe.usable
+    assert result.calibration.status == "CONFIGURED_UNVALIDATED"
+    assert result.calibration.calibration_id is None
+    assert result.calibration.artifact_sha256 is None
+    assert ImageVerificationResult.model_validate_json(result.model_dump_json()) == result
+
+
+def test_configured_runtime_uses_real_matcher_and_keeps_feature_contract(
+    active_calibration_bundle,
+) -> None:
+    runtime, _ = _configured_runtime(active_calibration_bundle)
+    result = runtime.verify(object(), object())
+    assert result.similarity_score == pytest.approx(1.0)
+    assert result.feature_dimension == 1024
+    assert result.feature_version is FeatureVersion.RECOGNIZER_V1_1024
+    assert result.reason_codes[0].value == "IMAGE_TRIAL_THRESHOLD_MATCHED"
+
+
+@pytest.mark.parametrize(
+    ("reference_reasons", "probe_reasons", "success", "suggestion"),
+    [
+        ((ReasonCode.NO_FACE,), (), True, Suggestion.RECAPTURE),
+        ((), (ReasonCode.FACE_CROPPED,), True, Suggestion.RECAPTURE),
+        ((ReasonCode.TOO_BLURRY,), (ReasonCode.BAD_POSE,), True, Suggestion.RECAPTURE),
+        ((ReasonCode.INFERENCE_ERROR,), (), False, Suggestion.REVIEW),
+        ((ReasonCode.NO_FACE,), (ReasonCode.FEATURE_FAILED,), False, Suggestion.REVIEW),
+    ],
+)
+def test_configured_runtime_quality_and_system_failures_precede_threshold(
+    active_calibration_bundle, monkeypatch, reference_reasons, probe_reasons,
+    success, suggestion,
+) -> None:
+    from face_algorithm.verification import image_verifier as verifier_module
+
+    def no_matching(*_args, **_kwargs):
+        pytest.fail("unusable input must not be matched")
+
+    monkeypatch.setattr(verifier_module, "match_embeddings", no_matching)
+    def analysis(reasons):
+        hard = any(reason in {ReasonCode.INFERENCE_ERROR, ReasonCode.FEATURE_FAILED}
+                   for reason in reasons)
+        return _trusted(
+            reasons=reasons, embedding=None if reasons else _embedding(),
+            suggestion=Suggestion.REVIEW if hard else None,
+        )
+    runtime, _ = _configured_runtime(
+        active_calibration_bundle, [analysis(reference_reasons), analysis(probe_reasons)]
+    )
+
+    result = runtime.verify(object(), object())
+
+    assert result.success is success
+    assert result.suggestion is suggestion
+    assert result.similarity_score is None
+    assert result.decision_threshold == 0.55
+    assert result.reason_codes == tuple(dict.fromkeys((*reference_reasons, *probe_reasons)))
+    assert not any(reason.value.startswith("IMAGE_TRIAL") for reason in result.reason_codes)
+
+
+@pytest.mark.parametrize("embedding", [None, np.ones(512, dtype=np.float32),
+                                       np.full(1024, np.nan, dtype=np.float32)])
+def test_configured_runtime_does_not_bypass_embedding_guards(
+    active_calibration_bundle, embedding,
+) -> None:
+    runtime, pipeline = _configured_runtime(active_calibration_bundle, [
+        _trusted(embedding=embedding), AssertionError("probe must not run"),
+    ])
+    result = runtime.verify(object(), object())
+    assert result.success is False
+    assert result.similarity_score is None
+    assert result.decision_threshold == 0.55
+    assert len(pipeline.calls) == 1
+
+
+@pytest.mark.parametrize("threshold", [True, "0.55", float("nan"), float("inf"), -0.1, 1.1])
+def test_configured_builder_revalidates_model_copy_updates(
+    active_calibration_bundle, threshold,
+) -> None:
+    config = _configured_config()
+    config = config.model_copy(update={
+        "image_verification": config.image_verification.model_copy(update={"threshold": threshold})
+    })
+    with pytest.raises((ValidationError, ValueError, TypeError)):
+        _runtime([], config=config, key_store=None,
+                 model_evidence=active_calibration_bundle.evidence)
+
+
+@pytest.mark.parametrize("mutation", ["clone", "threshold", "status", "metadata", "other_runtime"])
+def test_configured_runtime_invalid_state_fails_before_inference_and_no_scored_dto(
+    active_calibration_bundle, mutation,
+) -> None:
+    from dataclasses import fields
+    runtime, pipeline = _configured_runtime(active_calibration_bundle)
+    state = runtime.calibration
+    if mutation == "clone":
+        forged = object.__new__(type(state))
+        for item in fields(state):
+            object.__setattr__(forged, item.name, getattr(state, item.name))
+        object.__setattr__(runtime._verifier, "_calibration", forged)
+    elif mutation == "other_runtime":
+        other, _ = _configured_runtime(active_calibration_bundle)
+        object.__setattr__(runtime._verifier, "_calibration", other.calibration)
+    else:
+        field, value = {
+            "threshold": ("threshold", 0.01),
+            "status": ("status", "ACTIVE"),
+            "metadata": ("calibration_id", "forged-artifact"),
+        }[mutation]
+        object.__setattr__(state, field, value)
+
+    with pytest.raises(ValueError, match="threshold state"):
+        runtime.verify(object(), object())
+    assert pipeline.calls == []
+
+
+def test_configured_runtime_rechecks_state_after_inference(active_calibration_bundle) -> None:
+    runtime, pipeline = _configured_runtime(active_calibration_bundle)
+    original_analyze = runtime._verifier._analyze_trusted
+    def mutate_during_inference(image, profile):
+        result = original_analyze(image, profile)
+        object.__setattr__(runtime.calibration, "threshold", 0.01)
+        return result
+    object.__setattr__(runtime._verifier, "_analyze_trusted", mutate_during_inference)
+
+    with pytest.raises(ValueError, match="threshold state"):
+        runtime.verify(object(), object())
+    assert pipeline.calls
+
+
+@pytest.mark.parametrize("score", [None, True, "0.6", float("nan"), float("inf"), -1.01, 1.01])
+def test_configured_runtime_invalid_matcher_score_never_produces_scored_failure(
+    active_calibration_bundle, monkeypatch, score,
+) -> None:
+    from face_algorithm.verification import image_verifier as verifier_module
+    monkeypatch.setattr(
+        verifier_module, "match_embeddings", lambda *_a, **_kw: SimpleNamespace(score=score)
+    )
+    runtime, _ = _configured_runtime(active_calibration_bundle)
+    result = runtime.verify(object(), object())
+    assert result.success is False
+    assert result.similarity_score is None
+    assert result.reason_codes == (ReasonCode.FEATURE_FAILED,)
+    assert not result.probe.usable
+
+
+def test_configured_state_is_frozen_and_cannot_be_directly_constructed(
+    active_calibration_bundle,
+) -> None:
+    runtime, _ = _configured_runtime(active_calibration_bundle)
+    with pytest.raises(TypeError):
+        type(runtime.calibration)()
+    with pytest.raises(FrozenInstanceError):
+        runtime.calibration.threshold = 0.01
+
+
+@pytest.mark.parametrize("reason", [
+    ReasonCode.IMAGE_TRIAL_THRESHOLD_MATCHED,
+    ReasonCode.IMAGE_TRIAL_THRESHOLD_NOT_MATCHED,
+])
+@pytest.mark.parametrize("configured", [False, True])
+def test_trial_reason_in_pipeline_side_is_a_system_failure_not_a_match(
+    active_calibration_bundle, reason, configured,
+) -> None:
+    analysis = _trusted(embedding=_embedding())
+    forged = TrustedFaceAnalysis(
+        public=analysis.public.model_copy(update={
+            "reason_codes": (reason,), "success": False, "suggestion": Suggestion.REVIEW,
+        }),
+        embedding=analysis.embedding, corrected_image=None, aligned_face=None,
+    )
+    runtime, pipeline = _runtime(
+        [forged, AssertionError("probe must not run")],
+        config=_configured_config() if configured else load_config(DEFAULT_CONFIG),
+        key_store=None, model_evidence=active_calibration_bundle.evidence,
+    )
+
+    result = runtime.verify(object(), object())
+
+    assert result.success is False
+    assert result.reason_codes == (ReasonCode.INFERENCE_ERROR,)
+    assert result.reference.reason_codes == (ReasonCode.INFERENCE_ERROR,)
+    assert result.similarity_score is None
+    assert len(pipeline.calls) == 1
+
+
+@pytest.mark.parametrize("drift", ["model_versions", "config_version", "feature_version"])
+def test_configured_runtime_still_checks_analysis_metadata(
+    active_calibration_bundle, drift,
+) -> None:
+    config = _configured_config()
+    pipeline = QueuePipeline(
+        [_trusted(embedding=_embedding()), AssertionError("probe must not run")],
+        model_evidence=active_calibration_bundle.evidence,
+        config_version=config.config_version,
+    )
+    analysis = pipeline.outputs[0]
+    pipeline.outputs[0] = TrustedFaceAnalysis(
+        public=analysis.public.model_copy(update={
+            drift: {"face_recognizer": "tampered"} if drift == "model_versions" else "tampered"
+        }),
+        embedding=analysis.embedding, corrected_image=None, aligned_face=None,
+    )
+    runtime = _bind_image_verification_runtime(pipeline=pipeline, config=config, key_store=None)
+
+    result = runtime.verify(object(), object())
+
+    assert result.success is False
+    assert result.similarity_score is None
+    assert result.reason_codes == ((ReasonCode.FEATURE_VERSION_MISMATCH,)
+                                   if drift == "feature_version"
+                                   else (ReasonCode.INFERENCE_ERROR,))
+    assert len(pipeline.calls) == 1
+
+
+def test_configured_builder_rejects_model_copy_relaxed_identity_quality(
+    active_calibration_bundle,
+) -> None:
+    config = _configured_config()
+    profile = config.quality_profiles.entry_verify.model_copy(update={
+        "face_selection": config.quality_profiles.portrait.face_selection,
+    })
+    config = config.model_copy(update={
+        "quality_profiles": config.quality_profiles.model_copy(update={"entry_verify": profile}),
+    })
+    with pytest.raises(ValidationError, match="entry_verify.*exact_one"):
+        _runtime([], config=config, key_store=None,
+                 model_evidence=active_calibration_bundle.evidence)
+
+
+@pytest.mark.parametrize("mutation", ["dimension", "missing_role", "metadata"])
+def test_configured_builder_requires_complete_and_consistent_model_evidence(
+    active_calibration_bundle, mutation,
+) -> None:
+    from dataclasses import replace
+    from face_algorithm.runtime.calibration import CalibrationLoadError
+    evidence = dict(active_calibration_bundle.evidence)
+    if mutation == "dimension":
+        evidence["face_recognizer"] = replace(evidence["face_recognizer"], output_dimension=512)
+    elif mutation == "missing_role":
+        evidence.pop("rotation_classifier")
+    pipeline = QueuePipeline([], model_evidence=evidence,
+                             config_version=_configured_config().config_version)
+    if mutation == "metadata":
+        pipeline.model_versions["face_recognizer"] = "tampered"
+    with pytest.raises((CalibrationLoadError, ValueError)):
+        _bind_image_verification_runtime(
+            pipeline=pipeline, config=_configured_config(), key_store=None,
+        )
+
+
 def test_public_builder_constructs_and_owns_the_face_pipeline() -> None:
     assert tuple(signature(build_image_verification_runtime).parameters) == (
         "registry",

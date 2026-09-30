@@ -74,7 +74,17 @@ def create_v2_router(
             deadline_monotonic=deadline,
         )
 
-    @router.post("/verify/images", operation_id="verify_two_images")
+    @router.post(
+        "/verify/images", operation_id="verify_two_images",
+        description=(
+            "上传 reference_image 与 probe_image 进行照片一对一核验；不接受请求级阈值覆盖。"
+            "阈值由服务端配置并在启动时绑定。CONFIGURED_UNVALIDATED 表示未验证精度的试用阈值，"
+            "有效分数大于等于阈值返回 IMAGE_TRIAL_THRESHOLD_MATCHED，"
+            "低于阈值返回 IMAGE_TRIAL_THRESHOLD_NOT_MATCHED；两者均 success=true、REVIEW，"
+            "不代表业务审核通过。质量不合格仍需 RECAPTURE，系统失败仍 success=false，"
+            "不可比结果没有分数或试用匹配原因码。原未标定及签名标定模式语义不变。"
+        ),
+    )
     async def verify_images(
         request: Request,
         reference_image: UploadFile = File(...),

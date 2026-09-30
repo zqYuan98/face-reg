@@ -27,14 +27,14 @@ API = 'face-algorithm-task-2026-001'
 CONSOLE = 'face-algorithm-visual-console-task-2026-001'
 PROTECTED = 'face-algorithm'
 PROTECTED_ID = 'd6773816222a2200ee76b0b23f35af51786cc64a46147e04933ff7d3281ece7f'
-OLD_COMMIT = '2557e1707eb77b7cf7a077541030d7ec64f5ae84'
+OLD_COMMIT = '4e6a3372ddeb0a53d4f3e024e0e072f636ae9f1a'
 OLD_REVISION = OLD_COMMIT[:12]
 OLD_SOURCE = ROOT / ('source-' + OLD_COMMIT) / 'FaceFeatureExtractorAPI'
 OLD_CONFIG = ROOT / 'runtime' / ('algorithm-' + OLD_COMMIT + '.yaml')
 OLD_CONFIG_SHA256 = '6d300c20cac3158ce1c5a720eb92f6a9231e3915e2a81e90bfe2653226cf7b5d'
 OLD_CONTAINER_IDS = {
-    API: '9eb1ce46e1f6523e2a022c772016be3aff3857b9e99f9f11fb1d384fad89d622',
-    CONSOLE: 'a4d07dc28b2af9b1e05e416ae0e2205d36c9c605472e24491f733c1c2fc8482a',
+    API: '1cf05a422d89290099d03b2bead2cd9396e0451e7ca26beef68fba1bf23f150e',
+    CONSOLE: 'e4af1efbeae7b5d189e00838f48b2a9b39aa320882f075e508d7b6121eef8185',
 }
 CHECKPOINT = ROOT / 'runtime/checkpoints/modnet_photographic_portrait_matting.ckpt'
 REVISION_LABEL = 'org.opencontainers.image.revision'
@@ -249,9 +249,43 @@ def portrait_config(old: str) -> str:
     return ''.join(lines)
 
 
+def image_threshold_config(old: str) -> str:
+    """Narrow, comment-preserving image-only migration from the pinned baseline."""
+    lines = old.splitlines(keepends=True)
+    headers = [i for i, line in enumerate(lines)
+               if re.match(r'''^(?:image_verification|['"]image_verification['"])[ \t]*:''', line)]
+    require(len(headers) == 1, 'Missing or ambiguous image_verification section')
+    index = headers[0]
+    require(re.fullmatch(r'image_verification:[ \t]*(?:#[^\r\n]*)?(?:\r?\n)?', lines[index]) is not None,
+            'Unsupported image_verification section syntax')
+    fields = {}
+    for offset in range(index + 1, len(lines)):
+        line = lines[offset]
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        if not line[0].isspace():
+            break
+        field = re.fullmatch(
+            r'  ([a-z_][a-z_0-9]*):[ \t]+([a-z_]+)([ \t]*(?:#[^\r\n]*)?)(\r?\n)?', line)
+        require(field is not None, 'Unsupported image_verification field syntax')
+        key, value = field.group(1, 2)
+        require(key not in fields, 'Duplicate image_verification field')
+        fields[key] = (offset, value, field.group(3), field.group(4) or '')
+    require({key: value[1] for key, value in fields.items()} == {
+        'mode': 'uncalibrated', 'reference_quality_profile': 'entry_verify',
+        'probe_quality_profile': 'entry_verify',
+    }, 'Unexpected image_verification baseline')
+    offset, _, comment, ending = fields['mode']
+    newline = '\r\n' if lines[index].endswith('\r\n') else '\n'
+    lines[offset] = '  mode: configured' + comment + (ending or newline)
+    lines.insert(offset + 1, '  threshold: 0.55' + newline)
+    return ''.join(lines)
+
+
 def config_validation_script() -> str:
-    """Run in the existing API image: strict load and no configuration delta."""
-    return '''import json
+    """Strict YAML comparison: permit only the approved image trial delta."""
+    return '''import copy
+import json
 from pathlib import Path
 import yaml
 
@@ -275,7 +309,13 @@ assert type(a['video_presence']['threshold']) is float and a['video_presence']['
 assert a['video_presence']['threshold_id'] == 'TASK-2026-001-presence-trial-050-20260928'
 assert a['portrait_template']['mode'] == 'face_archive'
 assert a['portrait_template']['version'] == 'face-archive-480x640-v1'
-assert json.dumps(b, sort_keys=True, allow_nan=False) == json.dumps(a, sort_keys=True, allow_nan=False)
+assert a['image_verification'] == {'mode': 'uncalibrated',
+    'reference_quality_profile': 'entry_verify', 'probe_quality_profile': 'entry_verify'}
+expected = copy.deepcopy(a)
+# Replace this mapping, never mutate a potentially aliased object.
+expected['image_verification'] = dict(a['image_verification'], mode='configured', threshold=0.55)
+assert type(b['image_verification'].get('threshold')) is float
+assert json.dumps(b, sort_keys=True, allow_nan=False) == json.dumps(expected, sort_keys=True, allow_nan=False)
 '''
 
 
@@ -324,11 +364,23 @@ def wait_http(base: str, *, presence: bool, timeout: float = 180) -> None:
                     schema = json.load(response)
                 require('/api/v2/verify/video/presence' in schema['paths'],
                         'New presence route is absent')
-                require(schema['info']['version'] == '2.3.1', 'Expected API 2.3.1 is absent')
+                require(schema['info']['version'] == '2.4.0', 'Expected API 2.4.0 is absent')
                 response = schema['paths']['/api/v2/verify/video/presence']['post']['responses']['200']
                 require(response['content']['application/json']['schema']['$ref'] ==
                         '#/components/schemas/VideoPresenceResult', 'Presence response contract differs')
                 models = schema['components']['schemas']
+                image_op = schema['paths']['/api/v2/verify/images']['post']
+                image_ref = image_op['requestBody']['content']['multipart/form-data']['schema']['$ref']
+                image_upload = models[image_ref.rsplit('/', 1)[1]]
+                require(set(image_upload['properties']) == {'reference_image', 'probe_image'} and
+                        set(image_upload['required']) == {'reference_image', 'probe_image'},
+                        'Image comparison upload contract differs')
+                require(image_op['responses']['200']['content']['application/json']['schema']['$ref'] ==
+                        '#/components/schemas/ImageVerificationResponse', 'Image response contract differs')
+                require(set(models['ImageCalibrationSummary']['properties']['status']['enum']) ==
+                        {'UNCALIBRATED', 'ACTIVE', 'CONFIGURED_UNVALIDATED'} and
+                        {'IMAGE_TRIAL_THRESHOLD_MATCHED', 'IMAGE_TRIAL_THRESHOLD_NOT_MATCHED'} <=
+                        set(models['ReasonCode']['enum']), 'Image trial threshold contract is absent')
                 properties = models['VideoPresenceResult']['properties']
                 require({
                     'comparison_status', 'threshold', 'threshold_id', 'policy_fingerprint',
@@ -377,7 +429,7 @@ def wait_http(base: str, *, presence: bool, timeout: float = 180) -> None:
 
 
 def wait_restored_api(base: str, *, timeout: float = 180) -> None:
-    """Verify the restored 2557 API against its approved 2.3.0 baseline."""
+    """Verify the restored 4e6a API against its approved 2.3.1 baseline."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -396,7 +448,7 @@ def wait_restored_api(base: str, *, timeout: float = 180) -> None:
                 )), 'Restored API models are not ready')
             with opener.open(base + '/openapi.json', timeout=4) as response:
                 require(response.status == 200, 'Restored API schema is not available')
-                require(json.load(response)['info']['version'] == '2.3.0',
+                require(json.load(response)['info']['version'] == '2.3.1',
                         'Restored API version differs from approved baseline')
             return
         except (OSError, ValueError, KeyError, TypeError, ReleaseError):
@@ -458,11 +510,13 @@ class Release:
                 require(path.resolve().is_relative_to(self.source.resolve()), 'Model path escapes source')
                 require(path.is_file() and sha256(path) == model['sha256'], 'Model integrity check failed')
         require(not self.config.exists(), 'Refusing to overwrite an existing runtime config')
-        with OLD_CONFIG.open('rb') as source, self.config.open('xb') as target:
-            shutil.copyfileobj(source, target)
+        original_bytes = OLD_CONFIG.read_bytes()
+        migrated = image_threshold_config(original_bytes.decode('utf-8')).encode('utf-8')
+        with self.config.open('xb') as target:
+            target.write(migrated)
         self.config.chmod(OLD_CONFIG.stat().st_mode & 0o777)
-        require(sha256(self.config) == sha256(OLD_CONFIG) == OLD_CONFIG_SHA256,
-                'Copied runtime config differs from approved baseline')
+        require(sha256(OLD_CONFIG) == OLD_CONFIG_SHA256,
+                'Original runtime config differs from approved baseline')
         # Use the already installed PyYAML, without depending on host Python packages.
         validation = config_validation_script()
         docker('run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL',

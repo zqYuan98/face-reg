@@ -386,6 +386,15 @@ class UncalibratedImageVerification(_StrictModel):
     probe_quality_profile: Literal["entry_verify"]
 
 
+class ConfiguredImageVerification(_StrictModel):
+    """Explicit image-only trial threshold; this is not calibration evidence."""
+
+    mode: Literal["configured"]
+    threshold: float = Field(ge=0, le=1, allow_inf_nan=False)
+    reference_quality_profile: Literal["entry_verify"]
+    probe_quality_profile: Literal["entry_verify"]
+
+
 class ArtifactImageVerification(_StrictModel):
     mode: Literal["artifact"]
     reference_quality_profile: Literal["entry_verify"]
@@ -402,7 +411,9 @@ class ArtifactImageVerification(_StrictModel):
 
 
 ImageVerificationConfig = Annotated[
-    UncalibratedImageVerification | ArtifactImageVerification,
+    UncalibratedImageVerification
+    | ConfiguredImageVerification
+    | ArtifactImageVerification,
     Field(discriminator="mode"),
 ]
 

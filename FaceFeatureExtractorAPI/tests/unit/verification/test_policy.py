@@ -274,3 +274,52 @@ def test_policy_cannot_invent_a_fourth_suggestion_state() -> None:
         Suggestion.RECAPTURE,
         Suggestion.REVIEW,
     )
+
+
+@pytest.fixture
+def configured_threshold():
+    from face_algorithm.runtime.config import ConfiguredImageVerification
+    from face_algorithm.verification.configured_threshold import _issue_configured_threshold
+
+    return _issue_configured_threshold(
+        ConfiguredImageVerification(
+            mode="configured", threshold=0.55,
+            reference_quality_profile="entry_verify", probe_quality_profile="entry_verify",
+        ),
+        owner=object(), pipeline_fingerprint="a" * 64,
+    )
+
+
+@pytest.mark.parametrize("score", [None, True, False, "0.55", math.nan, math.inf, -1.01, 1.01])
+def test_configured_policy_rejects_invalid_scores(configured_threshold, score) -> None:
+    decision = decide_image_verification(
+        reference_reason_codes=(), probe_reason_codes=(), score=score,
+        calibration=configured_threshold,
+    )
+    assert decision.success is False
+    assert decision.suggestion is Suggestion.REVIEW
+    assert decision.reason_codes == (ReasonCode.FEATURE_FAILED,)
+
+
+@pytest.mark.parametrize("reason", [
+    ReasonCode.IMAGE_TRIAL_THRESHOLD_MATCHED, ReasonCode.IMAGE_TRIAL_THRESHOLD_NOT_MATCHED,
+])
+def test_configured_policy_cannot_propagate_trial_codes_from_side_results(
+    configured_threshold, reason,
+) -> None:
+    decision = decide_image_verification(
+        reference_reason_codes=(reason,), probe_reason_codes=(), score=1.0,
+        calibration=configured_threshold,
+    )
+    assert decision.success is False
+    assert decision.reason_codes == (ReasonCode.FEATURE_FAILED,)
+
+
+def test_configured_policy_rejects_a_copied_issued_state(configured_threshold) -> None:
+    import copy
+    decision = decide_image_verification(
+        reference_reason_codes=(), probe_reason_codes=(), score=1.0,
+        calibration=copy.copy(configured_threshold),
+    )
+    assert decision.success is False
+    assert decision.reason_codes == (ReasonCode.FEATURE_FAILED,)

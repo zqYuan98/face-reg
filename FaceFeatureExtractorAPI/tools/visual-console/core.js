@@ -246,6 +246,8 @@ export const REASON_LABELS = Object.freeze({
   FEATURE_FAILED: "人脸特征提取失败",
   FEATURE_VERSION_MISMATCH: "特征版本不匹配",
   THRESHOLD_UNCALIBRATED: "身份阈值尚未标定",
+  IMAGE_TRIAL_THRESHOLD_MATCHED: "达到试用匹配阈值",
+  IMAGE_TRIAL_THRESHOLD_NOT_MATCHED: "未达到试用匹配阈值",
   THRESHOLD_NOT_CONFIGURED: "尚未配置判定阈值",
   MATTING_FAILED: "人像分割失败",
   MATTING_LOW_CONFIDENCE: "人像分割可信度不足",
@@ -507,6 +509,24 @@ export function getSuggestionView(result, capabilityId) {
     });
   }
 
+  const imageThreshold = getCapability(capabilityId)?.responseKind === "image-verification"
+    ? imageThresholdState(result) : "legacy";
+  if (imageThreshold === "invalid") {
+    return Object.freeze({
+      key: "error", label: "结果不可用", tone: "danger", validContract: false,
+      message: "图片阈值状态、分数与原因不一致，请检查后端响应。",
+      notices: Object.freeze([]), canTreatAsPass: false,
+    });
+  }
+  if (imageThreshold === "matched" || imageThreshold === "not-matched") {
+    return Object.freeze({
+      key: "review", tone: "warning", validContract: true, canTreatAsPass: false,
+      label: imageThreshold === "matched" ? "达到试用匹配阈值" : "未达到试用匹配阈值",
+      message: `本次相似度 ${result.similarity_score}，试用阈值 ${result.decision_threshold.toFixed(4)}。`,
+      notices: Object.freeze(["试用阈值，精度未验证，业务仍需人工复核。"]),
+    });
+  }
+
   const reasonCodes = normalizedReasonCodes(result.reason_codes);
   const reasonLabels = translateReasons(reasonCodes);
   const notices = [];
@@ -515,6 +535,9 @@ export function getSuggestionView(result, capabilityId) {
   const featureDimensionMismatch = hasFeatureDimension && Number(result.feature_dimension) !== EXPECTED_FEATURE_DIMENSION;
   let suggestion = String(result.suggestion ?? "").toUpperCase();
 
+  if (imageThreshold === "configured") {
+    notices.push("试用阈值，精度未验证，业务仍需人工复核。");
+  }
   if (uncalibrated) {
     notices.push("阈值尚未标定，任何相似度都不能作为通过依据。");
     if (suggestion === "PASS") {
@@ -585,6 +608,7 @@ export function getSuggestionView(result, capabilityId) {
 
   return Object.freeze({
     ...view,
+    ...(imageThreshold === "configured" ? { validContract: true } : {}),
     notices: Object.freeze(notices),
     canTreatAsPass,
   });
@@ -598,6 +622,51 @@ const nonemptyText = (value) => typeof value === "string" && value.trim().length
 const reasonArray = (value) => Array.isArray(value) && value.every(nonemptyText);
 const qualityArray = (value) => Array.isArray(value) && value.length <= 6
   && new Set(value).size === value.length && value.every((code) => PRESENCE_QUALITY_CODES.has(code));
+
+const IMAGE_TRIAL_CODES = new Set(["IMAGE_TRIAL_THRESHOLD_MATCHED", "IMAGE_TRIAL_THRESHOLD_NOT_MATCHED"]);
+const IMAGE_RECAPTURE_CODES = new Set(["INVALID_IMAGE", "IMAGE_TOO_LARGE", "UNSUPPORTED_FORMAT", "NO_FACE",
+  "MULTIPLE_FACES", "FACE_TOO_SMALL", "FACE_CROPPED", "TOO_DARK", "TOO_BRIGHT", "TOO_BLURRY", "BAD_POSE",
+  "LANDMARK_FAILED", "ALIGNMENT_FAILED", "MATTING_LOW_CONFIDENCE", "SUBJECT_CROPPED", "SHOULDERS_NOT_VISIBLE",
+  "PORTRAIT_GEOMETRY_INVALID"]);
+
+// This interpretation is image-only. The backend reason supplies the decision;
+// numeric comparison merely rejects inconsistent claims, never invents one.
+function imageThresholdState(result) {
+  const status = result.calibration?.status;
+  const sides = [result.reference, result.probe];
+  const hasTrialCode = (reasons) => normalizedReasonCodes(reasons).some(code => IMAGE_TRIAL_CODES.has(code));
+  const sideHasTrialCode = sides.some(side => hasTrialCode(side?.reason_codes) || hasTrialCode(side?.quality?.reason_codes));
+  if (status !== "CONFIGURED_UNVALIDATED") {
+    if (hasTrialCode(result.reason_codes) || sideHasTrialCode
+      || ((result.calibration !== undefined || result.success === true) && !["ACTIVE", "UNCALIBRATED"].includes(status))) return "invalid";
+    return "legacy";
+  }
+
+  if (result.calibration.calibration_id !== null || result.calibration.artifact_sha256 !== null
+    || !finiteNumber(result.decision_threshold) || result.decision_threshold < 0 || result.decision_threshold > 1
+    || result.feature_dimension !== EXPECTED_FEATURE_DIMENSION || !reasonArray(result.reason_codes)
+    || sideHasTrialCode || sides.some((side, index) => !side || side.role !== (index ? "probe" : "reference")
+      || typeof side.analyzed !== "boolean" || typeof side.usable !== "boolean" || !reasonArray(side.reason_codes)
+      || (!side.analyzed && (side.usable || side.reason_codes.length !== 0))
+      || (side.analyzed && side.usable !== (side.reason_codes.length === 0)))) return "invalid";
+
+  if (result.similarity_score !== null) {
+    if (!score(result.similarity_score) || result.success !== true || result.suggestion !== "REVIEW"
+      || !sides.every(side => side.analyzed && side.usable) || result.reason_codes.length !== 1) return "invalid";
+    const reason = result.reason_codes[0];
+    if (reason === "IMAGE_TRIAL_THRESHOLD_MATCHED" && result.similarity_score >= result.decision_threshold) return "matched";
+    if (reason === "IMAGE_TRIAL_THRESHOLD_NOT_MATCHED" && result.similarity_score < result.decision_threshold) return "not-matched";
+    return "invalid";
+  }
+
+  const reasons = result.reason_codes;
+  const sideReasons = [...new Set(sides.flatMap(side => side.reason_codes))];
+  if (!reasons.length || hasTrialCode(reasons) || reasons.some(code => ["THRESHOLD_UNCALIBRATED", "IDENTITY_UNCERTAIN"].includes(code))
+    || reasons.length !== sideReasons.length || reasons.some((code, index) => code !== sideReasons[index])) return "invalid";
+  const recapture = reasons.every(code => IMAGE_RECAPTURE_CODES.has(code));
+  return ((result.success === true && result.suggestion === "RECAPTURE" && recapture)
+    || (result.success === false && result.suggestion === "REVIEW" && !recapture)) ? "configured" : "invalid";
+}
 const fingerprint = (value) => typeof value === "string" && /^[a-f\d]{64}$/.test(value);
 
 function validPresenceObservations(result, modern) {
@@ -862,9 +931,10 @@ export function buildResultDetails(capabilityId, result) {
 
   const suggestionView = getSuggestionView(result, capabilityId);
   add("suggestion", capability?.responseKind === "video-presence" ? "身份结论" : "算法建议", suggestionView.label);
-  const reasons = translateReasons(capability?.responseKind === "video-presence"
-    ? normalizedReasonCodes(result.reason_codes).filter((code) => !["CALIBRATION_REQUIRED", "THRESHOLD_UNCALIBRATED"].includes(code))
-    : result.reason_codes);
+  const reasons = capability?.responseKind === "image-verification" && suggestionView.validContract === false
+    ? ["响应契约不一致，请检查后端响应。"] : translateReasons(capability?.responseKind === "video-presence"
+      ? normalizedReasonCodes(result.reason_codes).filter((code) => !["CALIBRATION_REQUIRED", "THRESHOLD_UNCALIBRATED"].includes(code))
+      : result.reason_codes);
   add("reasons", "原因", reasons.length ? reasons.join("、") : "无");
   const processingTime = finiteText(result.processing_time_ms, 1);
   add("processing-time", "处理耗时", processingTime === null ? null : `${processingTime} ms`);
@@ -892,10 +962,13 @@ export function buildResultDetails(capabilityId, result) {
     add("card-candidates", "证卡候选数", Number.isInteger(result.card_candidate_count) ? result.card_candidate_count : null);
     add("protected-area", "前景保护面积", percentText(result.protected_area_ratio));
   } else if (capability?.responseKind === "image-verification") {
-    add("similarity-score", "相似度", finiteText(result.similarity_score, 4));
-    add("decision-threshold", "决策阈值", finiteText(result.decision_threshold, 4) ?? (hasUncalibratedSemantics(result, normalizedReasonCodes(result.reason_codes)) ? "未标定" : null));
+    const invalid = suggestionView.validContract === false;
+    const configured = result.calibration?.status === "CONFIGURED_UNVALIDATED";
+    add("similarity-score", "相似度", invalid ? "不可用" : finiteText(result.similarity_score, 4));
+    add("decision-threshold", configured ? "试用匹配阈值" : "决策阈值", invalid ? "不可用"
+      : finiteText(result.decision_threshold, 4) ?? (hasUncalibratedSemantics(result, normalizedReasonCodes(result.reason_codes)) ? "未标定" : null));
     add("feature-dimension", "特征维度", result.feature_dimension === undefined ? null : `${result.feature_dimension} 维`);
-    add("calibration", "校准状态", calibrationText(result.calibration));
+    add("calibration", "校准状态", invalid ? "不可用" : configured ? "试用阈值（精度未验证）" : calibrationText(result.calibration));
     add("reference", "参考照片", sideText(result.reference));
     add("probe", "待核验照片", sideText(result.probe));
   } else if (capability?.responseKind === "video-presence") {

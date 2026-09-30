@@ -70,6 +70,8 @@ class ReasonCode(str, Enum):
     FEATURE_FAILED = "FEATURE_FAILED"
     FEATURE_VERSION_MISMATCH = "FEATURE_VERSION_MISMATCH"
     THRESHOLD_UNCALIBRATED = "THRESHOLD_UNCALIBRATED"
+    IMAGE_TRIAL_THRESHOLD_MATCHED = "IMAGE_TRIAL_THRESHOLD_MATCHED"
+    IMAGE_TRIAL_THRESHOLD_NOT_MATCHED = "IMAGE_TRIAL_THRESHOLD_NOT_MATCHED"
     MATTING_FAILED = "MATTING_FAILED"
     MATTING_LOW_CONFIDENCE = "MATTING_LOW_CONFIDENCE"
     SUBJECT_CROPPED = "SUBJECT_CROPPED"
@@ -101,6 +103,12 @@ class ReasonCode(str, Enum):
     MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
     INFERENCE_ERROR = "INFERENCE_ERROR"
     ALGORITHM_TIMEOUT = "ALGORITHM_TIMEOUT"
+
+
+_IMAGE_TRIAL_REASON_CODES = frozenset({
+    ReasonCode.IMAGE_TRIAL_THRESHOLD_MATCHED,
+    ReasonCode.IMAGE_TRIAL_THRESHOLD_NOT_MATCHED,
+})
 
 
 IMAGE_RECAPTURE_REASON_CODES: frozenset[ReasonCode] = frozenset(
@@ -242,9 +250,9 @@ class FaceAnalysisResult(ResultBase):
 
 
 class ImageCalibrationSummary(_PublicSchema):
-    """Non-biometric public metadata for the bound startup calibration."""
+    """Bound image threshold metadata; a configured trial is not calibration."""
 
-    status: Literal["UNCALIBRATED", "ACTIVE"]
+    status: Literal["UNCALIBRATED", "ACTIVE", "CONFIGURED_UNVALIDATED"]
     calibration_id: str | None = Field(default=None, min_length=1)
     artifact_sha256: str | None = Field(
         default=None,
@@ -284,6 +292,11 @@ class ImageVerificationSide(_PublicSchema):
 
     @model_validator(mode="after")
     def validate_analysis_state(self) -> Self:
+        if _IMAGE_TRIAL_REASON_CODES.intersection(self.reason_codes) or (
+            self.quality is not None
+            and _IMAGE_TRIAL_REASON_CODES.intersection(self.quality.reason_codes)
+        ):
+            raise ValueError("image trial decisions cannot be side analysis reasons")
         details = (
             self.original_width,
             self.original_height,
@@ -348,7 +361,31 @@ class ImageVerificationResult(ResultBase):
             if self.decision_threshold is not None or self.suggestion is Suggestion.PASS:
                 raise ValueError("uncalibrated result cannot contain a passing threshold")
         elif self.decision_threshold is None:
-            raise ValueError("active calibration requires its decision threshold")
+            raise ValueError("bound calibration or trial requires its decision threshold")
+        if (
+            self.calibration.status == "CONFIGURED_UNVALIDATED"
+            and self.suggestion is Suggestion.PASS
+        ):
+            raise ValueError("configured image trial cannot PASS without calibration")
+        if _IMAGE_TRIAL_REASON_CODES.intersection(self.reason_codes):
+            if (
+                self.calibration.status != "CONFIGURED_UNVALIDATED"
+                or not self.success
+                or self.suggestion is not Suggestion.REVIEW
+                or self.similarity_score is None
+                or self.decision_threshold is None
+                or not self.reference.usable
+                or not self.probe.usable
+            ):
+                raise ValueError("image trial REVIEW requires a usable configured comparison")
+            expected = (
+                ReasonCode.IMAGE_TRIAL_THRESHOLD_MATCHED
+                if self.similarity_score >= self.decision_threshold
+                else ReasonCode.IMAGE_TRIAL_THRESHOLD_NOT_MATCHED
+            )
+            if self.reason_codes != (expected,):
+                raise ValueError("image trial reason contradicts its threshold comparison")
+            return self
         if self.suggestion is Suggestion.PASS:
             if (
                 not self.success
@@ -550,6 +587,10 @@ class VideoVerificationResult(ResultBase):
 
     @model_validator(mode="after")
     def validate_video_decision(self) -> Self:
+        if _IMAGE_TRIAL_REASON_CODES.intersection(
+            (*self.reason_codes, *self.frames.reason_codes)
+        ):
+            raise ValueError("image trial reasons cannot describe a video decision")
         if self.frames.decoded_frames and self.duration_seconds is None:
             raise ValueError("decoded video result requires a duration")
         score_fields = (

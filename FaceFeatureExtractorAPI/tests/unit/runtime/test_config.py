@@ -80,6 +80,55 @@ def test_only_loader_functions_are_public() -> None:
     assert config_module.__all__ == ["resolve_config_path", "load_config"]
 
 
+@pytest.mark.parametrize("threshold", [0, 0.55, 1])
+def test_configured_image_threshold_is_explicit_and_keeps_video_unchanged(
+    tmp_path: Path, threshold: float,
+) -> None:
+    payload = _default_payload()
+    video = deepcopy(payload["video_verification"])
+    payload["image_verification"].update(mode="configured", threshold=threshold)
+
+    config = load_config(_write_config(tmp_path / "configured.yaml", payload))
+
+    assert config.image_verification.mode == "configured"
+    assert config.image_verification.threshold == threshold
+    assert config.image_verification.reference_quality_profile == "entry_verify"
+    assert config.image_verification.probe_quality_profile == "entry_verify"
+    assert config.video_verification.model_dump(mode="json") == video
+    assert load_config(DEFAULT_CONFIG).image_verification.mode == "uncalibrated"
+
+
+@pytest.mark.parametrize(
+    "threshold", [None, True, False, "0.55", -0.00001, 1.00001,
+                  float("nan"), float("inf"), -float("inf")],
+)
+def test_configured_image_threshold_rejects_invalid_values(
+    tmp_path: Path, threshold: object,
+) -> None:
+    payload = _default_payload()
+    payload["image_verification"].update(mode="configured", threshold=threshold)
+    with pytest.raises(ValidationError):
+        load_config(_write_config(tmp_path / "invalid-configured.yaml", payload))
+
+
+def test_configured_image_threshold_is_required(tmp_path: Path) -> None:
+    payload = _default_payload()
+    payload["image_verification"]["mode"] = "configured"
+    with pytest.raises(ValidationError, match="threshold"):
+        load_config(_write_config(tmp_path / "missing-threshold.yaml", payload))
+
+
+@pytest.mark.parametrize("extra", ["artifact_path", "expected_sha256", "signer_key_id"])
+def test_configured_image_mode_rejects_fake_artifact_fields(
+    tmp_path: Path, extra: str,
+) -> None:
+    payload = _default_payload()
+    payload["image_verification"].update(mode="configured", threshold=0.55)
+    payload["image_verification"][extra] = "forged"
+    with pytest.raises(ValidationError):
+        load_config(_write_config(tmp_path / "mixed-configured.yaml", payload))
+
+
 def test_explicit_path_beats_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     explicit = _derived_config(tmp_path, "explicit")
     environment = _derived_config(tmp_path, "environment")
