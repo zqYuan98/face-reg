@@ -70,6 +70,47 @@ def test_hard_top_contact_with_required_headroom_is_not_a_crop() -> None:
     validation = validate_portrait_subject(core, FACE, _settings())
 
     assert validation.robust_core_top == 0
+    assert validation.reason_codes == ()
+
+
+@pytest.mark.parametrize("mode", ["face_archive", "head_shoulders"])
+def test_reliable_top_contact_with_sufficient_headroom_warns_only_for_archive(mode) -> None:
+    core = _complete_core()
+    core[0:20, 20:180] = 1
+
+    validation = validate_portrait_subject(core, FACE, _settings(mode=mode))
+
+    assert validation.robust_core_top == 0
+    assert validation.top_edge_core_coverage == 1.0
+    assert FACE.y1 - validation.robust_core_top > 0.12 * FACE.height
+    assert validation.reason_codes == (
+        (ReasonCode.PORTRAIT_SOURCE_LIMITED,) if mode == "face_archive" else ()
+    )
+
+
+@pytest.mark.parametrize("tail_width", [1, 9, 22])
+def test_archive_ignores_sparse_top_hair_below_reliable_coverage(tail_width) -> None:
+    core = _complete_core()
+    core[0:20, 90:90 + tail_width] = 1
+
+    validation = validate_portrait_subject(core, FACE, _settings(mode="face_archive"))
+
+    assert validation.robust_core_top == 20
+    assert validation.top_edge_core_coverage < 0.15
+    assert validation.reason_codes == ()
+
+
+@pytest.mark.parametrize("second_row_width,expected", [(21, ()), (22, (ReasonCode.PORTRAIT_SOURCE_LIMITED,))])
+def test_archive_top_warning_keeps_exact_band_coverage_threshold(second_row_width, expected) -> None:
+    core = _complete_core()
+    core[0:20, 90:113] = 1
+    core[1, 90 + second_row_width:113] = 0
+
+    validation = validate_portrait_subject(core, FACE, _settings(mode="face_archive"))
+
+    assert validation.robust_core_top == 0
+    assert validation.top_edge_core_coverage == pytest.approx((23 + second_row_width) / 300)
+    assert validation.reason_codes == expected
 
 
 def test_top_occupancy_below_threshold_does_not_claim_a_crop() -> None:

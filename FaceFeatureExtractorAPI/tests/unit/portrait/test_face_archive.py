@@ -159,6 +159,20 @@ def test_archive_partial_head_top_is_source_warning_not_hard_failure():
     assert [reason.value for reason in result.reason_codes] == ["PORTRAIT_SOURCE_LIMITED"]
 
 
+def test_archive_top_contact_with_sufficient_headroom_generates_review_image():
+    face = _face(y1=70, height=307.2)
+    result, _, _ = _generate(face, cropped_top=True)
+
+    _assert_full_face(result, face)
+    assert result.suggestion is Suggestion.REVIEW
+    assert result.reason_codes == (ReasonCode.PORTRAIT_SOURCE_LIMITED,)
+    assert result.image is not None and result.matting_quality is not None
+    decoded = cv2.imdecode(
+        np.frombuffer(encode_portrait_image(result), np.uint8), cv2.IMREAD_COLOR,
+    )
+    assert decoded.shape == (640, 480, 3)
+
+
 @pytest.mark.parametrize("height", [112, 113, 160, 204])
 def test_archive_112_to_204_pixel_faces_generate_at_cap_with_white_padding(height):
     face = _face(width=112, height=height)

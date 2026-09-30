@@ -125,11 +125,13 @@ def validate_portrait_subject(
     if (
         robust_core_top < top_edge_band_height
         and top_edge_core_coverage >= min_top_coverage
-        and available_headroom < required_headroom
     ):
-        if not archive:
+        # Archive warns about reliable source-edge truncation regardless of
+        # forehead/headroom size; strict mode retains its original crop gate.
+        if archive:
+            reasons = (ReasonCode.PORTRAIT_SOURCE_LIMITED,)
+        elif available_headroom < required_headroom:
             raise PortraitSubjectValidationError(ReasonCode.SUBJECT_CROPPED)
-        reasons = (ReasonCode.PORTRAIT_SOURCE_LIMITED,)
 
     shoulder_depth_ratio = _setting(template, "min_shoulder_depth_ratio", 0.60)
     shoulder_y1 = max(0, min(height, int(np.floor(face.y2))))
