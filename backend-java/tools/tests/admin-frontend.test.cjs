@@ -26,7 +26,7 @@ const deferred = () => {
 const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(setImmediate); };
 
 function harness(customFetch, login = false) {
-  const calls = [], messages = [], revoked = [], timers = new Map();
+  const calls = [], messages = [], revoked = [], replacements = [], timers = new Map();
   let mounted, unmount, exposed, timerId = 0, objectId = 0;
   const context = {
     console, URLSearchParams, FormData, AbortController, Headers,
@@ -34,9 +34,9 @@ function harness(customFetch, login = false) {
       createObjectURL() { return `blob:fixture-${++objectId}`; },
       revokeObjectURL(url) { revoked.push(url); }
     },
-    setTimeout(callback) { timers.set(++timerId, callback); return timerId; },
+    setTimeout(callback, delay) { timers.set(++timerId, { callback, delay }); return timerId; },
     clearTimeout(id) { timers.delete(id); },
-    window: { location: {} }, ElementPlusIconsVue: {},
+    window: { location: { replace(url) { this.href = url; replacements.push(url); } } }, ElementPlusIconsVue: {},
     ElementPlus: {
       ElMessage: Object.fromEntries(['error', 'success', 'warning'].map(type => [type, message => messages.push({ type, message })])),
       ElMessageBox: { confirm: async () => true }
@@ -67,9 +67,10 @@ function harness(customFetch, login = false) {
   const script = login ? [...fs.readFileSync(loginSource, 'utf8').matchAll(/<script>([\s\S]*?)<\/script>/g)][0][1] : scripts[0][1];
   vm.runInNewContext(script, context, { filename: login ? loginSource : source });
   return {
-    app: exposed, calls, messages, revoked, location: context.window.location,
+    app: exposed, calls, messages, revoked, replacements, location: context.window.location,
     mount: () => mounted(), unmount: () => unmount(),
-    flushTimers() { const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach(callback => callback()); }
+    pendingTimerDelays: () => [...timers.values()].map(timer => timer.delay),
+    flushTimers() { const scheduled = [...timers.values()]; timers.clear(); scheduled.forEach(timer => timer.callback()); }
   };
 }
 
@@ -433,7 +434,7 @@ test('logout is a CSRF-protected server mutation and only then redirects', async
   assert.equal(h.location.href, 'login.html');
 });
 
-test('login prevents duplicate submissions and reloads CSRF after session rotation', async () => {
+test('login prevents duplicate submissions and navigates immediately after the protected POST', async () => {
   const firstToken = deferred();
   let tokenReads = 0;
   const h = harness(url => {
@@ -446,12 +447,15 @@ test('login prevents duplicate submissions and reloads CSRF after session rotati
   assert.equal(h.calls.length, 1);
   firstToken.resolve(response({ token: 'pre-login', headerName: 'X-CSRF-TOKEN' }));
   await login;
-  assert.deepEqual(h.calls.map(call => call.url), ['/api/csrf', '/api/login', '/api/csrf']);
+  assert.deepEqual(h.calls.map(call => call.url), ['/api/csrf', '/api/login']);
   assert.equal(h.calls[1].options.headers['X-CSRF-TOKEN'], 'pre-login');
   assert.equal(h.calls.every(call => call.options.credentials === 'same-origin'), true);
   assert.equal(JSON.parse(h.calls[1].options.body).password, 'test-password');
   assert.equal(h.app.form.password, '');
   assert.equal(h.location.href, 'index.html');
+  assert.deepEqual(h.replacements, ['index.html']);
+  await h.app.handleLogin();
+  assert.equal(h.calls.filter(call => call.url === '/api/login').length, 1);
   assert.equal(h.app.loading.value, false);
 });
 
@@ -464,4 +468,127 @@ test('failed login shows the server error and never automatically retries creden
   assert.equal(h.location.href, undefined);
   assert.equal(h.messages.filter(message => message.type === 'error').length, 1);
   assert.equal(h.app.loading.value, false);
+  assert.equal(h.app.form.username, 'admin');
+  assert.equal(h.app.form.password, 'incorrect');
+  assert.equal(h.replacements.length, 0);
+});
+
+test('opening login with an existing session uses an uncached same-origin probe and replaces the login page', async () => {
+  const h = harness(undefined, true);
+  h.app.form.password = 'unsent-form-value';
+  await h.mount();
+  assert.deepEqual(h.calls.map(call => call.url), ['/api/me']);
+  assert.equal(h.calls[0].options.credentials, 'same-origin');
+  assert.equal(h.calls[0].options.cache, 'no-store');
+  assert.deepEqual(h.replacements, ['index.html']);
+  assert.equal(h.app.form.password, '');
+  assert.equal(h.app.checkingSession.value, false);
+  assert.equal(h.app.sessionError.value, '');
+  assert.equal(h.pendingTimerDelays().length, 0);
+});
+
+test('a 401 session probe leaves the login form available without treating it as a login failure', async () => {
+  const h = harness(url => url === '/api/me' ? response(null, 401) : undefined, true);
+  await h.mount();
+  assert.deepEqual(h.calls.map(call => call.url), ['/api/me']);
+  assert.equal(h.app.checkingSession.value, false);
+  assert.equal(h.app.sessionError.value, '');
+  assert.equal(h.replacements.length, 0);
+  assert.equal(h.messages.length, 0);
+  h.app.form.username = 'admin';
+  h.app.form.password = 'fixture-password';
+  await h.app.handleLogin();
+  assert.deepEqual(h.calls.map(call => call.url), ['/api/me', '/api/csrf', '/api/login']);
+  assert.deepEqual(h.replacements, ['index.html']);
+});
+
+test('an in-flight session probe blocks duplicate probes and login submissions, then releases the form', async () => {
+  const pending = deferred();
+  const h = harness(url => url === '/api/me' ? pending.promise : undefined, true);
+  h.app.form.username = 'admin';
+  h.app.form.password = 'fixture-password';
+  const probing = h.mount();
+  await h.app.checkSession();
+  await h.app.handleLogin();
+  assert.deepEqual(h.calls.map(call => call.url), ['/api/me']);
+  assert.equal(h.app.checkingSession.value, true);
+  assert.deepEqual(h.pendingTimerDelays(), [5000]);
+  pending.resolve(response(null, 401));
+  await probing;
+  assert.equal(h.app.checkingSession.value, false);
+  await h.app.handleLogin();
+  assert.equal(h.calls.filter(call => call.url === '/api/login').length, 1);
+});
+
+test('session probe errors and malformed identities are recoverable with an explicit retry', async () => {
+  for (const failure of [() => Promise.reject(new Error('offline')), () => response(null, 503),
+    () => response({ username: '' }), () => ({ ok: true, status: 200, json: async () => { throw new Error('bad JSON'); } })]) {
+    let failing = true;
+    const h = harness(url => url === '/api/me' ? failing ? failure() : response(null, 401) : undefined, true);
+    h.app.form.username = 'admin';
+    h.app.form.password = 'unsubmitted-fixture';
+    await h.mount();
+    assert.ok(h.app.sessionError.value);
+    assert.equal(h.app.checkingSession.value, false);
+    assert.equal(h.replacements.length, 0);
+    assert.equal(h.app.form.password, 'unsubmitted-fixture');
+    failing = false;
+    await h.app.checkSession();
+    assert.equal(h.calls.length, 2, 'only an explicit retry should make another probe');
+    assert.equal(h.app.sessionError.value, '');
+    assert.equal(h.app.checkingSession.value, false);
+    assert.equal(h.pendingTimerDelays().length, 0);
+  }
+});
+
+test('session probe timeout releases login even when fetch ignores abort, and a late result cannot override success', async () => {
+  const oldProbe = deferred();
+  const h = harness(url => url === '/api/me' ? oldProbe.promise : undefined, true);
+  const probing = h.mount();
+  h.flushTimers();
+  await probing;
+  assert.equal(h.calls[0].options.signal.aborted, true);
+  assert.match(h.app.sessionError.value, /超时/);
+  assert.equal(h.app.checkingSession.value, false);
+  h.app.form.username = 'admin';
+  h.app.form.password = 'fixture-password';
+  await h.app.handleLogin();
+  assert.deepEqual(h.replacements, ['index.html']);
+  oldProbe.resolve(response({ username: 'stale-identity' }));
+  await settle();
+  assert.deepEqual(h.replacements, ['index.html'], 'the late probe must not navigate again');
+  assert.equal(h.app.sessionError.value, '');
+  assert.equal(h.app.loading.value, false);
+  assert.equal(h.app.form.password, '');
+});
+
+test('a timed-out session probe cannot finish a newer probe or navigate while it is pending', async () => {
+  const first = deferred(), second = deferred();
+  let reads = 0;
+  const h = harness(url => url === '/api/me' ? [first, second][reads++].promise : undefined, true);
+  const firstRun = h.mount();
+  h.flushTimers();
+  await firstRun;
+  const secondRun = h.app.checkSession();
+  first.resolve(response({ username: 'obsolete' }));
+  await settle();
+  assert.equal(h.app.checkingSession.value, true);
+  assert.equal(h.replacements.length, 0);
+  second.resolve(response(null, 401));
+  await secondRun;
+  assert.equal(h.app.checkingSession.value, false);
+  assert.equal(h.app.sessionError.value, '');
+});
+
+test('unmount cancels the session probe and suppresses its late navigation', async () => {
+  const pending = deferred();
+  const h = harness(url => url === '/api/me' ? pending.promise : undefined, true);
+  const probing = h.mount();
+  h.unmount();
+  assert.equal(h.calls[0].options.signal.aborted, true);
+  assert.equal(h.pendingTimerDelays().length, 0);
+  pending.resolve(response({ username: 'late' }));
+  await probing;
+  assert.equal(h.replacements.length, 0);
+  assert.equal(h.app.sessionError.value, '');
 });

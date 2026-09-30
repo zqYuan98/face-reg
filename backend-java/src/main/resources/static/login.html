@@ -76,16 +76,24 @@
                 </div>
                 <div style="font-size: 18px; opacity: 0.8; font-weight: normal;">人脸识别智能管理系统</div>
             </div>
-            <el-form label-position="top" size="large">
+            <el-alert v-if="sessionError" :title="sessionError" type="warning" :closable="false" show-icon
+                style="margin-bottom: 16px">
+                <el-button link :disabled="loading || checkingSession" @click="checkSession">重新验证登录状态</el-button>
+            </el-alert>
+            <el-form label-position="top" size="large" @submit.prevent="handleLogin">
                 <el-form-item label="账号">
-                    <el-input v-model="form.username" placeholder="请输入账号" :prefix-icon="User"></el-input>
+                    <el-input v-model="form.username" placeholder="请输入账号" :prefix-icon="User"
+                        autocomplete="username"></el-input>
                 </el-form-item>
                 <el-form-item label="密码">
                     <el-input v-model="form.password" type="password" placeholder="请输入密码" :prefix-icon="Lock"
-                        @keyup.enter="handleLogin"></el-input>
+                        autocomplete="current-password"></el-input>
                 </el-form-item>
                 <el-form-item style="margin-top: 30px;">
-                    <el-button type="primary" class="login-btn" :loading="loading" @click="handleLogin">登 录</el-button>
+                    <el-button type="primary" class="login-btn" native-type="submit"
+                        :loading="loading || checkingSession" :disabled="checkingSession">
+                        {{ checkingSession ? '正在验证登录状态' : '登 录' }}
+                    </el-button>
                 </el-form-item>
             </el-form>
         </div>
@@ -96,11 +104,18 @@
     <script src="https://unpkg.com/@element-plus/icons-vue"></script>
 
     <script>
-        const { createApp, reactive, ref } = Vue;
+        const { createApp, reactive, ref, onMounted, onBeforeUnmount } = Vue;
         const app = createApp({
             setup() {
                 const loading = ref(false);
+                const checkingSession = ref(false);
+                const sessionError = ref('');
                 let csrfPromise = null;
+                let sessionSequence = 0;
+                let sessionController = null;
+                let sessionTimer = null;
+                let navigating = false;
+                let disposed = false;
                 const form = reactive({
                     username: '',
                     password: ''
@@ -126,11 +141,70 @@
                     })().catch(error => { csrfPromise = null; throw error; });
                     return csrfPromise;
                 };
+                const cancelSessionCheck = () => {
+                    sessionSequence++;
+                    if (sessionController) sessionController.abort();
+                    clearTimeout(sessionTimer);
+                    sessionController = null;
+                    sessionTimer = null;
+                    checkingSession.value = false;
+                };
+                const enterIndex = () => {
+                    if (disposed || navigating) return;
+                    navigating = true;
+                    form.password = '';
+                    window.location.replace('index.html');
+                };
+                const checkSession = async () => {
+                    if (loading.value || checkingSession.value || navigating || disposed) return;
+                    const sequence = ++sessionSequence;
+                    const controller = new AbortController();
+                    sessionController = controller;
+                    checkingSession.value = true;
+                    sessionError.value = '';
+                    let timer;
+                    try {
+                        const identity = await Promise.race([
+                            (async () => {
+                                const response = await fetch('/api/me', {
+                                    credentials: 'same-origin', cache: 'no-store', signal: controller.signal
+                                });
+                                if (response.status === 401) return null;
+                                const result = await readResponse(response);
+                                if (typeof result.data?.username !== 'string' || !result.data.username.trim()) {
+                                    throw new Error('服务器未返回有效的登录身份');
+                                }
+                                return result.data;
+                            })(),
+                            new Promise((_, reject) => {
+                                timer = setTimeout(() => {
+                                    reject(new Error('登录状态验证超时，可重新验证或直接登录'));
+                                    controller.abort();
+                                }, 5000);
+                                sessionTimer = timer;
+                            })
+                        ]);
+                        if (sequence === sessionSequence && identity) enterIndex();
+                    } catch (error) {
+                        if (sequence === sessionSequence && !disposed) {
+                            sessionError.value = error.message || '暂时无法验证登录状态，可重新验证或直接登录';
+                        }
+                    } finally {
+                        clearTimeout(timer);
+                        if (sequence === sessionSequence) {
+                            sessionController = null;
+                            sessionTimer = null;
+                            checkingSession.value = false;
+                        }
+                    }
+                };
                 const handleLogin = async () => {
-                    if (loading.value) return;
+                    if (loading.value || checkingSession.value || navigating || disposed) return;
                     if (!form.username || !form.password) {
                         return ElementPlus.ElMessage.warning('请输入账号和密码');
                     }
+                    cancelSessionCheck();
+                    sessionError.value = '';
                     loading.value = true;
                     try {
                         const csrf = await loadCsrf();
@@ -141,12 +215,11 @@
                             body: JSON.stringify(form)
                         });
                         await readResponse(response);
-                        // Authentication rotates the session and invalidates the pre-login CSRF token.
+                        // The index page obtains the rotated CSRF token before its first write.
                         csrfPromise = null;
-                        await loadCsrf();
                         form.password = '';
                         ElementPlus.ElMessage.success('登录成功');
-                        window.location.href = 'index.html';
+                        enterIndex();
                     } catch (error) {
                         csrfPromise = null;
                         ElementPlus.ElMessage.error(error.message || '网络错误，请稍后重试');
@@ -155,9 +228,18 @@
                     }
                 };
 
+                onMounted(checkSession);
+                onBeforeUnmount(() => {
+                    disposed = true;
+                    cancelSessionCheck();
+                });
+
                 return {
                     form,
                     loading,
+                    checkingSession,
+                    sessionError,
+                    checkSession,
                     handleLogin,
                     User: ElementPlusIconsVue.User,
                     Lock: ElementPlusIconsVue.Lock,
