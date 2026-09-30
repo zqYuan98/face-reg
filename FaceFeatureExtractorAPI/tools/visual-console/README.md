@@ -1,19 +1,23 @@
 # 人脸算法可视化测试台
 
-2026-09-30 测试台与算法服务已正式部署 API `2.3.1` 白底检测框越界修正（代码 `4e6a337`），
-服务器 37 的 `18002/18003` 均 healthy；portrait 已启用 `face_archive`。
-不强制肩部，按 `success=true && image_base64` 判断出图；成功 REVIEW 显示质量提醒但保留图片与下载。
-部署状态与各项验收完成状态以 [检测框越界修正发布记录](../../docs/reports/2026-09-30-portrait-box-overflow-release.md) 为准。
-直接升级基线与回滚目标为 `2.3.0 / 2557e17`，原 API/测试台容器已停止保留，回滚恢复原 presence `0.5` 配置；
-本次配置字节哈希不变，不以更早的 `d78 / 2.2.0` 为本轮回滚目标。
+2026-09-30 服务器 37 的 `18002/18003` 已正式部署 API `2.4.0` 图片独立试用阈值及配套测试台，
+代码为 `a49670dc91234a7ac599c7e9628614c02be4b885`。
+发布代码、实测状态与回滚入口以 [图片 0.55 试用阈值发布记录](../../docs/reports/2026-09-30-image-threshold-055-release.md) 为准。
+直接升级基线与回滚目标为 API `2.3.1`、提交 `4e6a3372ddeb0a53d4f3e024e0e072f636ae9f1a` 的原 API/测试台
+及升级前完整配置，不使用更早的 `2557e17 / 2.3.0` 回滚入口。
+37 本次仅启用图片 `configured + 0.55`，保留两侧 `entry_verify`、presence `0.5`/原 ID、
+portrait `face_archive`/MODNet 及其他配置；`18001` 不参与切换。
 
-2.3.1 补丁仅修正 `face_archive` 的轻微检测框外扩：每侧溢出不超过原框对应宽/高的 5%、
+白底人脸照沿用 `face_archive`：
+不强制肩部，按 `success=true && image_base64` 判断出图；成功 REVIEW 显示质量提醒但保留图片与下载。
+
+2.4.0 沿用 2.3.1 的白底轻微检测框外扩修正：每侧溢出不超过原框对应宽/高的 5%、
 可见面积至少 90%，且有效五点均在图内、裁后宽高均至少 112px、抠图通过时，返回有图的
 `REVIEW + PORTRAIT_SOURCE_LIMITED`；测试台须保留预览、下载及提醒。
 严重越界、坏关键点或坏抠图仍失败无图；不能据框越界断言真实脸部缺失，也不能把 FACE_CROPPED
-统一显示为成功。补丁不补造像素、不提取 embedding，不新增字段或枚举，复用 2.3.0 已有原因码；
-严格 `head_shoulders` 与其他五个 v2 接口不变。正式测试台已用反馈原图验证预览和实际下载，
-显示“已生成，存在质量提醒”，浏览器往返约 1.34 秒；详细证据与限制见本次发布记录。
+统一显示为成功。2.3.1 白底补丁本身不补造像素、不提取 embedding，不新增字段或枚举，复用 2.3.0 已有原因码；
+严格 `head_shoulders` 与其他能力的质量门禁不变。2.3.1 反馈原图预览/下载的历史证据见
+[白底检测框修正记录](../../docs/reports/2026-09-30-portrait-box-overflow-release.md)，不作为本轮浏览器验收证据。
 
 这是独立于 `face_algorithm` 和 FastAPI 适配层的内网测试工具。浏览器只访问本测试台；
 测试台通过固定白名单把六条公开 v2 请求流式转发给算法服务。服务端仅使用 Python
@@ -26,7 +30,7 @@
 37 的 presence 上游运行配置随后已按用户指定设为试用阈值 `0.5`（`configured`），返回
 `CONFIGURED_UNVALIDATED`，业务仍需人工 REVIEW；显示匹配结论不等于生产精度已经验收。
 该次阈值调整未改测试台、18001 或 images/quick/full，源码默认无阈值不变。
-本次 2.3.1 沿用 2.3.0 的白底人脸照展示，保留 presence `0.5` 与原阈值 ID；配置依据见
+本次 2.4.0 沿用既有白底人脸照展示，保留 presence `0.5` 与原阈值 ID；配置依据见
 [0.5 试用阈值记录](../../docs/reports/2026-09-28-presence-threshold-050.md)。
 完整请求响应见 [API 联调文档](../../docs/TASK-2026-001-API-DEBUGGING.md)。
 
@@ -90,6 +94,22 @@ python3 server.py
 同一时刻只允许一条昂贵 POST；繁忙时返回 429。健康、会话、readiness 和静态资源不受
 该并发槽影响。请求与响应按固定大小块传递，不创建临时媒体文件。
 
+## 图片试用阈值与结果
+
+- `/api/v2/verify/images` 仍只提交 `reference_image + probe_image`，不新增 `threshold` HTTP 参数或前端可调阈值。
+- API 2.4.0 新增图片 `calibration.status=CONFIGURED_UNVALIDATED`、顶层原因码
+  `IMAGE_TRIAL_THRESHOLD_MATCHED` / `IMAGE_TRIAL_THRESHOLD_NOT_MATCHED`，没有新增响应字段；签名 ID/digest 均 null。
+- 37 已启用服务端 `image_verification.mode=configured`、`threshold=0.55`，源码默认仍 uncalibrated。
+  阈值修改须在受控完整 YAML 中进行并重启/重建算法服务；测试台不能覆盖配置。
+- 两侧可比、有有限 `[-1,1]` 分数时，后端 `>=0.55` 给 MATCHED、低于给 NOT_MATCHED，均为 `success=true + REVIEW`。
+  标题对应“达到试用匹配阈值”或“未达到试用匹配阈值”，显示实际分数及 `0.5500`；
+  明示“试用阈值，精度未验证，业务仍需人工复核”，`canTreatAsPass=false`，沿用原 REVIEW 徽标和布局。
+- 页面必须由后端唯一原因码解释结论，仅用分数核对方向，不凭裸分数补造判断。
+  非法数值、两码并存、方向矛盾、未知图片标定状态、伪造 PASS 或签名元数据均显示“结果不可用”。
+- 质量失败仍显示重新采集、系统失败仍保留人工复核及错误提示；`similarity_score=null` 不等于未匹配。
+  原 artifact/uncalibrated 显示、白底/见证、quick/full 和 presence 规则保留。HTTP 错误时主标题与详情一致失效；重置清除旧结果。
+- 图片每次联调建议先点击“重置”，再上传两图并运行。既有图片页面单独移除/替换素材时，旧结果会保留至重跑或重置，不能将旧结果视为新素材的判断；本次未调整该既有行为。
+
 ## 视频能力与结果
 
 - “视频目标出现”使用 `video_presence` readiness，提交 `reference_image + video`，检查目标
@@ -114,7 +134,7 @@ python3 server.py
   总默认 1200 分析帧包含首尾和补采，长视频实际基础间隔可高于请求的 0.5 秒。
   `liveness_evaluated=false` 表示未执行且接口不要求，不是门禁；仍无活体/反翻拍保证。
 - 新页面兼容旧 2.1.0 响应的历史 INCONCLUSIVE/null 含义；缺失/未知/不一致的新契约显示协议错误，
-  不将无效分数/计数/枚举升级为匹配成功。旧五入口与签名 calibration 展示规则不变。
+  不将无效分数/计数/枚举升级为匹配成功。图片原 artifact/uncalibrated 与其他能力展示规则不变，图片新增试用模式见上节。
 - presence/full 服务算法预算 600 秒、代理总预算 620 秒、浏览器请求截止 630 秒；三种视频
   请求体均为 540,082,176 字节上限、响应 4 MiB。超时后不立即并发重试。
 - readiness 返回五个能力键（quick/full 共享一个），页面按六个任务计算可用数量；缺失

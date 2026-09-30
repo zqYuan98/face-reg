@@ -4,12 +4,13 @@
 [TASK-2026-001 新算法 API 联调文档](TASK-2026-001-API-DEBUGGING.md)。本文侧重安全边界、
 部署约束和生产接入责任。
 
-2026-09-30 服务器 37 的 `18002/18003` 已正式发布 API `2.3.1`（代码 `4e6a337`），均 healthy。
-portrait 已启用 `face_archive` 白底人脸照策略；
-请求和响应字段不变，2.3.0 已引入两种原因枚举；成功有图可带 REVIEW 提醒。
-发布状态、各项验收完成状态及回滚入口见 [检测框越界修正发布记录](reports/2026-09-30-portrait-box-overflow-release.md)。
-直接升级基线与回滚目标为 `2.3.0 / 2557e17`：保留的原 API/测试台容器与原 presence `0.5` 配置；
-本次配置字节哈希不变，不使用更早的 `d78 / 2.2.0` 作为本轮回滚目标。
+2026-09-30 服务器 37 的 `18002/18003` 已正式部署 API `2.4.0` 图片独立试用阈值，
+代码为 `a49670dc91234a7ac599c7e9628614c02be4b885`。
+发布代码、实测完成状态和回滚入口见 [图片 0.55 试用阈值发布记录](reports/2026-09-30-image-threshold-055-release.md)。
+直接升级基线与回滚目标为 API `2.3.1`、提交 `4e6a3372ddeb0a53d4f3e024e0e072f636ae9f1a`，
+须恢复该版本原 API/测试台及升级前完整配置，不使用更早的 `2557e17 / 2.3.0`。
+本次仅修改图片 `mode=configured`、`threshold=0.55`；保留两侧 `entry_verify`、presence `0.5`/原 ID、
+portrait `face_archive`/MODNet、其余配置与 `18001`。沿用白底成功有图可带 REVIEW 质量提醒的规则。
 
 更早历史（2026-09-28）：API `2.2.0`。
 服务器 37 的 `http://<server-37>:18002` 与测试台 `http://<server-37>:18003` 在该次发布后均 healthy，
@@ -17,7 +18,7 @@ portrait 已启用 `face_archive` 白底人脸照策略；
 该次部署证据与历史回滚记录见 [2.2.0 历史发布记录](reports/2026-09-28-presence-best-effort-release.md)。
 37 在 2026-09-28 随后按用户指定仅将 presence 运行配置设为 `configured`、试用阈值 `0.5`，返回
 `CONFIGURED_UNVALIDATED`，业务仍需人工 REVIEW；源码默认无阈值、代码版本、images/quick/full、
-18001 和测试台在该次阈值调整中均不变。2.3.1 升级继续保留该阈值与 ID；配置依据见
+18001 和测试台在该次阈值调整中均不变。2.4.0 升级继续保留该阈值与 ID；配置依据见
 [0.5 试用阈值记录](reports/2026-09-28-presence-threshold-050.md)。
 功能上线或指定试用阈值不表示人工标签、生产阈值或识别精度已验收。
 
@@ -44,7 +45,7 @@ HTTP 长连接。算法建议不等于合同审批结果。
 | `GET /health/live` | 进程事件循环可响应，不代表模型可用 | 200 |
 | `GET /health/ready` | 必需模型完成哈希、契约及 Provider 检查；artifact 模式还完成签名校准绑定 | ready 时 200，否则 503 |
 | `GET /health` | 兼容别名，语义同 ready | 200/503 |
-| `GET /openapi.json` | 类型化请求/响应与错误契约；本次已部署 2.3.1，接入须重新导入并核对 info.version | 200 |
+| `GET /openapi.json` | 类型化请求/响应与错误契约；本轮 2.4.0，部署后须重新导入并核对 info.version 与图片新增枚举 | 200 |
 
 `degraded + ready=true` 表示核心人脸能力可用、某个可选能力（例如 MODNet）不可用；
 调用不可用能力仍返回 503，不能只看 liveness 接流量。
@@ -136,7 +137,7 @@ processing_time_ms,trace_id`。新增 `mode=presence`、`decision`、可空 `fou
 严重溢出、无效/越界关键点、裁后尺寸不足、推理异常或坏蒙版仍失败且无派生图；检测框外扩本身
 不能证明真实脸部已缺失。只变换真实源像素，不补造缺失部位，portrait 不提取 embedding。
 原 18 个响应字段及枚举、480×640 JPEG、30 秒预算、模板/模型/运行配置均不变；
-严格 `head_shoulders` 和 witness/images/quick/full/presence 五个 v2 接口不变。
+这项白底修正不改变严格 `head_shoulders` 或 witness/images/quick/full/presence 的质量门禁。
 实际验收证据与已知限制以上方本次发布记录为准；不以接口规则本身替代实测证据。
 
 - `POST /api/detect_face` 仅在 `legacy.detect_face_enabled=true` 时注册（候选默认 true），保持旧字段：`image`、可选 `expand_scale`；该值必须有限且位于
@@ -177,12 +178,26 @@ presence 的 `VideoInputError` 映射为 400（无效视频等）或 413（大�
 deadline 映射 504。18002 忙时排队等到请求 deadline；不是立即返回 503，503 用于模型或
 服务停止等不可用情况。18003 测试台另有并发槽即时 429，不能混用两者契约。
 
-## 6. 阈值校准与 presence 试用阈值（独立规则）
+## 6. 图片试用、签名校准与 presence 阈值（独立规则）
 
-旧 images/quick/full 交付配置保持 `calibrated: false`（当前 YAML 的等价状态是 `mode: uncalibrated`）。在没有
-客户授权且按身份隔离的正负样本、ROC、FAR/FRR 和签名校准制品前，即使相似度很高，
-这些图像与视频接口也必须返回 `REVIEW + THRESHOLD_UNCALIBRATED`，绝不能返回 PASS。
-以下签名制品和 artifact 信任源要求仅适用于旧图片/quick/full，不是 presence 的配置前提。
+API 2.4.0 的 `image_verification` 支持 `uncalibrated`、`artifact` 和图片专属 `configured`。
+源码默认仍为 `uncalibrated`；37 已显式启用 `configured`、`threshold: 0.55`，保留参考照和待核验照
+的 `entry_verify` 严格质量配置。阈值必须为有限数值且在 `[0,1]`，缺失、字符串、bool、NaN/Infinity 均非法；
+请求仍只有 `reference_image`、`probe_image` 两个上传字段，不支持 HTTP 阈值覆盖或热更新。
+修改受控完整 YAML 后重启/重建绑定的服务，不能把图片配置片段当完整配置覆盖其他模块。
+
+configured 返回图片 `calibration.status=CONFIGURED_UNVALIDATED`、`decision_threshold=0.55`，
+`calibration_id` 和 `artifact_sha256` 均为 null，绝不伪装 ACTIVE 或签名标定包。
+仅在两侧可用、有有限 `[-1,1]` 分数时，后端按 `>=` 返回唯一 `IMAGE_TRIAL_THRESHOLD_MATCHED`，
+低于时返回唯一 `IMAGE_TRIAL_THRESHOLD_NOT_MATCHED`；两者均为 `success=true + REVIEW`，精度未验证、业务仍需人工复核。
+质量失败保持 `true/RECAPTURE`，系统/特征失败保持 `false/REVIEW`，分数均为 null、沿用原原因，
+不得携带试用匹配码或当作未匹配。匹配码只能在 configured 的顶层可比结果出现，不能放入单侧/质量原因。
+HTTP 与域模型均拒绝矛盾原因、非法阈值、假元数据、伪造 PASS；状态失效须明确失败，不能降级成任意可比分数。
+接口与全部字段名不变，但消费者必须支持上述两个新增原因枚举和图片新增状态；视频 CalibrationSummary 不扩展。
+
+图片原 `uncalibrated` 与 quick/full 仍保留未标定语义：有效分数只供复核，返回
+`REVIEW + THRESHOLD_UNCALIBRATED`，绝不自动 PASS。图片 `artifact` 原有达到阈值 PASS、低于阈值 REVIEW 语义保留。
+以下签名制品与信任源要求适用于图片/quick/full 的 artifact 模式，不是图片 configured 或 presence 的配置前提。
 
 业务方提供的样本要按人员隔离训练/标定/测试集。算法方产出阈值和签名制品；业务方
 负责发布审批、版本绑定、回滚以及把校准版本与合同审计记录关联。不可直接沿用历史
@@ -265,6 +280,7 @@ readiness 会在启动期预建。内存不能按单个 ONNX 文件简单相加�
 - 模型文件、大小、SHA-256、Provider 和 `recognizer_v1_1024` 契约校验通过；
 - `/health/ready` 符合本次启用能力，未把 degraded 误当全部能力正常；
 - 阈值仍未校准时，验收用例均不产生身份 PASS；
+- 图片 configured 验证 `0.55` 上下边界、两种互斥原因、质量/系统失败优先及伪造状态拒绝；试用匹配仍为 REVIEW；
 - full/presence 只从业务异步队列调用，可信参考和合同有效性在业务侧锁定；
 - presence 验证 configured 三态与默认 uncalibrated 证据返回；无可比脸/扫描不完整仍为 INCONCLUSIVE/null，低于阈值但候选截断/局部失败不出 false；
 - presence 证据只有数字和受限提示，质量软提示与补采不改变旧五接口、签名 calibration 或业务审核责任；

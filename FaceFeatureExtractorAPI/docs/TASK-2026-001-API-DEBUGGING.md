@@ -1,37 +1,41 @@
 # TASK-2026-001 新算法 API 联调文档
 
 本文供业务后端、APP、测试和实施人员在公司内网联调人脸算法服务。
-本文对应 2026-09-30 已正式部署的 API `2.3.1`，代码为 `4e6a3372ddeb0a53d4f3e024e0e072f636ae9f1a`。
-服务器 37 的 `18002/18003` 均 healthy，8/8 模型就绪；portrait 已启用 `face_archive`。
-本次部署状态、各项验收完成状态与回滚入口统一见 [检测框越界修正发布记录](reports/2026-09-30-portrait-box-overflow-release.md)。
-直接升级基线为 `2.3.0 / 2557e1707eb77b7cf7a077541030d7ec64f5ae84`，原 API/测试台容器已停止保留；
-回滚恢复该版本与原 presence `0.5` 配置，本次配置字节哈希不变，不回滚到更早的 `d78 / 2.2.0`。
+本文对应 2026-09-30 API `2.4.0` 图片独立试用阈值，代码提交为 `a49670dc91234a7ac599c7e9628614c02be4b885`；
+服务器 37 的 `18002/18003` 已正式部署，具体实测完成状态见下方发布记录。
+发布代码、健康检查、各项实测与回滚入口统一见 [图片 0.55 试用阈值发布记录](reports/2026-09-30-image-threshold-055-release.md)。
+直接升级基线与回滚目标为 API `2.3.1`、提交 `4e6a3372ddeb0a53d4f3e024e0e072f636ae9f1a`，
+恢复该版本原 API/测试台及升级前完整配置，不使用更早的 `2557e17 / 2.3.0` 回滚入口。
+37 本次仅修改图片 `mode=configured`、`threshold=0.55`，保留两侧 `entry_verify`、视频 `0.5`/原 ID、
+portrait `face_archive`/MODNet 和其余配置；`18001` 不参与切换。
 更早历史：2026-09-28 服务器 37 的 `18002/18003` 发布 `2.2.0`，当时均 healthy，代码为
 `d78e723b8fb8737b09e12859e57aa9856a640db6`。该次镜像、端口和验证证据见
 [2.2.0 历史发布记录](reports/2026-09-28-presence-best-effort-release.md)；历史 `18001` 完全未改动。
 37 在同日后续按用户指定将 presence 运行配置设为试用阈值 `0.5`，返回 `CONFIGURED_UNVALIDATED`，
 业务仍需人工 REVIEW。该次阈值调整只改 presence 运行配置，未改代码、源码默认配置、images/quick/full、
-18001 或测试台；本次 2.3.1 升级继续保留该阈值与 ID，配置依据见 [0.5 试用阈值记录](reports/2026-09-28-presence-threshold-050.md)。
+18001 或测试台；本次 2.4.0 升级继续保留该阈值与 ID，配置依据见 [0.5 试用阈值记录](reports/2026-09-28-presence-threshold-050.md)。
 上线或指定试用阈值不等于生产精度已验证。2026-09-28 历史本地测试及人工标签/阈值边界另见
 [2.2.0 尽力比对本地验证记录](reports/2026-09-28-presence-best-effort-validation.md)。
 
 | 项目 | 值 |
 |---|---|
-| 文档 / 已部署 API 版本 | `2.3.1 / 4e6a337`（白底轻微检测框越界修正；请求/响应字段与枚举不变） |
-| 本次部署状态与回滚入口 | [检测框越界修正发布记录](reports/2026-09-30-portrait-box-overflow-release.md)；升级前及回滚目标为 `2.3.0 / 2557e17` |
+| 已部署 API 版本 | `2.4.0 / a49670d`（完整代码提交见页首；请求/响应字段名不变，扩展图片状态和两个原因枚举） |
+| 本次部署代码、状态与回滚入口 | [图片 0.55 试用阈值发布记录](reports/2026-09-30-image-threshold-055-release.md)；回滚目标为上述完整 `4e6a337... / 2.3.1` |
 | 配置版本 | `2026-08-24-v1` |
+| 37 当前图片运行配置 | `mode=configured`、`threshold=0.55`；图片状态 `CONFIGURED_UNVALIDATED`，匹配与未匹配均 REVIEW |
 | 37 当前 presence 运行配置 | `mode=configured`、`threshold=0.5`；`CONFIGURED_UNVALIDATED`，业务仍 REVIEW |
 | 37 当前 presence 阈值 ID | `TASK-2026-001-presence-trial-050-20260928` |
-| 文档更新时间 | `2026-09-30`（白底轻微检测框越界容错；不改变视频 0.5） |
+| 文档更新时间 | `2026-09-30`（图片独立试用阈值 0.55；不改变视频 0.5） |
 | 特征契约 | `recognizer_v1_1024`，固定 `1024` 维 |
 | 测试环境 Base URL | `http://<server-37>:18002` |
 | 可视化测试台 | `http://<server-37>:18003` |
 | OpenAPI JSON | `http://<server-37>:18002/openapi.json` |
 | 网络范围 | 公司局域网；测试环境为 HTTP，不得暴露到公网 |
 
-> 旧图片、quick/full 身份阈值仍处于 `UNCALIBRATED`。即使相似度很高，也会安全返回
-> `REVIEW + THRESHOLD_UNCALIBRATED`，不能将它解释为人员不一致，也不能自行写死
-> `0.6`、`0.7` 等阈值；旧视频还会返回 `CALIBRATION_REQUIRED`，签名 calibration 规则不变。
+> 图片源码默认仍为 `UNCALIBRATED`，有效分数返回 `REVIEW + THRESHOLD_UNCALIBRATED`。
+> 2.4.0 可由服务端显式启用图片 `configured` 试用模式，37 实际使用 0.55；达到或低于阈值都仍是 REVIEW，
+> 精度未验证、业务必须人工复核。不得把未匹配等同不同人，也不能把质量失败当未匹配，详见第 6 节。
+> quick/full 的未标定及签名 calibration 规则不变，仍会返回 `THRESHOLD_UNCALIBRATED` / `CALIBRATION_REQUIRED`。
 > presence 沿用 2.2.0 契约，独立使用服务端 `configured` / `uncalibrated` 配置：前者返回
 > `CONFIGURED_UNVALIDATED` 并可产生三态结果，后者仍计算证据但返回
 > `THRESHOLD_NOT_CONFIGURED + INCONCLUSIVE/null`。本接口不要求签名校准包或活体门禁，
@@ -54,7 +58,7 @@ curl -sS http://<server-37>:18002/health/ready
   `video_verification` 或 `video_presence`；
 - 当前测试环境应显示 `8` 个模型均为 `ready`。
 
-就绪响应结构节选（2026-09-30 正式切换后复核 8/8 模型就绪；实际调用仍须检查所需能力）：
+就绪响应结构节选（不是本轮部署实测记录；实际调用须检查所需能力及本次发布记录）：
 
 ```json
 {
@@ -98,8 +102,8 @@ http://<server-37>:18002/openapi.json
 ```
 
 服务关闭了 Swagger UI 和 ReDoc 页面，因此 `/docs`、`/redoc` 不可用是正常现象。
-本次白底人脸照已部署 OpenAPI 2.3.1 契约。联调时须重新导入以上 OpenAPI，
-核对 `info.version=2.3.1` 与六条 v2 路由；本补丁相对 2.3.0 的 OpenAPI 仅版本号变化，仅路由存在不足以确认已升级。
+本轮图片阈值契约为 OpenAPI 2.4.0。部署后须重新导入以上 OpenAPI，核对 `info.version=2.4.0`、六条 v2 路由、
+图片状态 `CONFIGURED_UNVALIDATED` 与两个 `IMAGE_TRIAL_THRESHOLD_*` 原因码；路由和上传字段名不变，仅路由存在不足以确认升级。
 应用字段校验的实际契约是 `400 + INVALID_IMAGE`，不是框架默认的 `422`。
 
 Postman/Apifox 中所有文件字段都选择 `form-data` 的 **File** 类型，不要把文件路径、
@@ -186,14 +190,14 @@ HTTP `200` 表示服务已正常给出算法结果，不等于身份通过。por
 - `image_base64` 是原始 Base64 字符串，没有 `data:image/...;base64,` 前缀；
 - v2 接口永远不返回 embedding、1024 维特征数组、原图、视频帧或原始抠图蒙版。
 
-## 4. 白底人脸照（2.3.1）
+## 4. 白底人脸照（2.4.0 沿用 2.3.1）
 
 地址、multipart 字段和所有响应字段保持不变。默认 `face_archive` 用于考勤识别完成后的归档/协议展示，
 不强制完整头顶、颈部或肩膀；只抠图、等比缩放和平移真实像素，不补画缺失人体、不美颜、不重新核验身份。
 业务方负责触发、选择已识别的目标照片或单人区域、关联人员及保存原图/派生图；不要传无法确定目标的多人全景。
 出图失败不应直接推翻已完成的考勤。
 
-下述轻微检测框越界容错已随 2.3.1 部署；各项实际验收证据以上方本次发布记录为准。
+下述轻微检测框越界容错为 2.3.1 已有功能，2.4.0 保留；本轮回归证据以上方本次发布记录为准。
 补丁保留原 18 个响应字段、全部原因枚举、480×640 JPEG 与 30 秒预算；
 `PORTRAIT_SOURCE_LIMITED` / `PORTRAIT_UPSCALE_LIMITED` 已在 2.3.0 引入，2.3.1 不新增枚举。
 
@@ -404,10 +408,84 @@ curl -sS -X POST \
   http://<server-37>:18002/api/v2/verify/images
 ```
 
-### 6.2 当前未标定响应示例
+### 6.2 服务端启用图片 0.55（2.4.0）
+
+请求仍严格使用上述两个文件字段，不新增 `threshold`、`is_same_person` 或其他请求/响应字段。
+37 当前运行配置如下；这是完整运行 YAML 中的片段，不可用它覆盖其他配置：
+
+```yaml
+image_verification:
+  mode: configured
+  threshold: 0.55
+  reference_quality_profile: entry_verify
+  probe_quality_profile: entry_verify
+```
+
+运维修改受控完整 YAML（默认 `config/algorithm.yaml`，或 `FACE_ALGO_CONFIG` 指向的完整配置），
+保留模型路径、两个 profile 及所有其他模块配置，再重启/重建绑定该配置的算法服务并检查 readiness/OpenAPI。
+容器部署使用原受控配置挂载；37 的固定提交、配置校验和切换/回滚命令只从本次发布记录获取。
+不支持热更新、HTTP 上传阈值或每次请求覆盖。阈值必须为有限数值 `[0,1]`；缺失、bool、字符串、NaN/Infinity 均非法。
+源码默认仍是 `mode: uncalibrated`，不能把 37 用户指定的 0.55 当通用默认值或已验证生产阈值。
+
+configured 的 `calibration.status` 为 `CONFIGURED_UNVALIDATED`，`calibration_id/artifact_sha256` 必须均为 null。
+只有两侧 `usable=true` 且有有限 `[-1,1]` 分数时，后端才返回唯一的试用匹配原因：
+
+| 场景 | success / suggestion | similarity_score / reason_codes |
+|---|---|---|
+| 分数 `>=0.55`（含等号） | `true / REVIEW` | 实际分数；仅 `IMAGE_TRIAL_THRESHOLD_MATCHED` |
+| 分数 `<0.55` | `true / REVIEW` | 实际分数；仅 `IMAGE_TRIAL_THRESHOLD_NOT_MATCHED` |
+| 无脸/小脸/裁切等质量不合格 | `true / RECAPTURE` | null；原质量原因，不含试用匹配码 |
+| 系统/特征等失败 | `false / REVIEW` | null；原错误原因，不含试用匹配码 |
+
+下面三个 JSON **仅列关键字段**，省略公共元数据和侧分析详情；分数为说明值，不是完整 DTO、实测结果或精度证据。
+
+达到试用匹配阈值（等号边界）：
+
+```json
+{
+  "success": true, "suggestion": "REVIEW",
+  "reason_codes": ["IMAGE_TRIAL_THRESHOLD_MATCHED"],
+  "reference": {"usable": true}, "probe": {"usable": true},
+  "similarity_score": 0.55, "decision_threshold": 0.55,
+  "calibration": {"status": "CONFIGURED_UNVALIDATED", "calibration_id": null, "artifact_sha256": null}
+}
+```
+
+未达到试用匹配阈值：
+
+```json
+{
+  "success": true, "suggestion": "REVIEW",
+  "reason_codes": ["IMAGE_TRIAL_THRESHOLD_NOT_MATCHED"],
+  "reference": {"usable": true}, "probe": {"usable": true},
+  "similarity_score": 0.5499999, "decision_threshold": 0.55,
+  "calibration": {"status": "CONFIGURED_UNVALIDATED", "calibration_id": null, "artifact_sha256": null}
+}
+```
+
+不可比，保留重拍原因：
+
+```json
+{
+  "success": true, "suggestion": "RECAPTURE", "reason_codes": ["NO_FACE"],
+  "reference": {"usable": true}, "probe": {"usable": false, "reason_codes": ["NO_FACE"]},
+  "similarity_score": null, "decision_threshold": 0.55,
+  "calibration": {"status": "CONFIGURED_UNVALIDATED", "calibration_id": null, "artifact_sha256": null}
+}
+```
+
+两个试用码只允许在 configured、两侧可比的顶层结果出现，不得混入单侧或 quality 原因。
+客户端据后端互斥原因码显示结论，只核对分数方向，不凭分数自创判断；两码并存、方向矛盾、假签名元数据、
+未知状态或伪造 PASS 应视为不可用。测试台保留 REVIEW，显示实际分数与 0.5500，并提示
+“试用阈值，精度未验证，业务仍需人工复核”；无分数不能显示未匹配。严格单脸、质量、1024 维和模型绑定门禁不变。
+
+测试台每次建议先点“重置”，再上传两图并运行；既有图片模式单独移除/替换素材时会保留旧结果至重跑或重置，不要把旧结果误当新素材的判断。此处不影响直接调用 API 的响应。
+
+### 6.3 源码默认 uncalibrated 响应示例
 
 下面是完整 DTO 结构示例（以既有合成样本结果为背景，质量/坐标等数值仅作说明，不是本次
-上线实测证据）。相似度很高，但尚未发布客户标定包，结果仍为 `REVIEW`：
+上线实测证据，也不是 37 当前 configured 响应）。该实例未启用试用阈值、也未发布客户标定包，
+即使相似度很高仍为 `REVIEW`：
 
 ```json
 {
@@ -466,10 +544,11 @@ curl -sS -X POST \
 
 业务处理：
 
-- 任一侧 `usable=false`：根据该侧 `reason_codes` 重新采集；
+- 任一侧 `usable=false`：按原建议与原因处理，质量问题重新采集，系统/特征错误转人工排查；
 - `similarity_score=null`：本次没有形成可比较的双侧特征；
 - `calibration.status=UNCALIBRATED`：不得根据 `similarity_score` 自行判断通过；
-- 只有未来 `calibration.status=ACTIVE` 且 `suggestion=PASS` 时才能自动通过。
+- `calibration.status=CONFIGURED_UNVALIDATED`：使用第 6.2 节试用结论，仍为 REVIEW，不能自动放行；
+- 原 artifact 模式仅在 `calibration.status=ACTIVE` 且 `suggestion=PASS` 时才满足算法通过条件，最终业务决定由上层负责。
 
 ## 7. 视频快速核验
 
@@ -626,7 +705,7 @@ full 是同步算法接口，但最长截止时间为 600 秒。APP/网页不要
 业务后端异步任务调用，并实现幂等、任务状态、结果回写和超时补偿。算法服务本身不保存
 任务状态。
 
-## 8A. 视频目标出现（presence，2.3.1 沿用的 2.2.0 契约）
+## 8A. 视频目标出现（presence，2.4.0 沿用的 2.2.0 契约）
 
 ### 8A.1 请求与边界
 
@@ -1004,7 +1083,9 @@ multipart spool 和私有解码文件两份占用，按 500 MiB 上限需预留�
 | `INSUFFICIENT_VALID_FRAMES` | 视频有效帧不足 | 延长稳定正脸时长后重拍 |
 | `MULTIPLE_SUBJECTS` | 视频存在多个主体 | 只保留本次签署人 |
 | `SUBJECT_SWITCH` / `SUBJECT_SWITCHED` | 视频主体发生切换 | 重新录制完整连续视频 |
-| `THRESHOLD_UNCALIBRATED` | 旧 images/quick/full 身份阈值尚未标定 | 只能 REVIEW，不得自动判定 |
+| `THRESHOLD_UNCALIBRATED` | 图片 uncalibrated / quick/full 身份阈值尚未标定 | 只能 REVIEW，不得自动判定 |
+| `IMAGE_TRIAL_THRESHOLD_MATCHED` | 图片 configured：有效分数达到试用阈值（含等号） | 显示达到试用匹配阈值；精度未验证、业务仍需人工复核，不能 PASS |
+| `IMAGE_TRIAL_THRESHOLD_NOT_MATCHED` | 图片 configured：有效分数低于试用阈值 | 显示未达到试用匹配阈值；仍 REVIEW，不等同不同人，不用于不可比/失败 |
 | `IDENTITY_UNCERTAIN` | 已标定但相似度未达通过条件 | 转人工复核 |
 | `CALIBRATION_REQUIRED` | 旧身份接口缺少可信标定结果 | 检查旧接口签名标定发布状态，不用于 presence 缺阈值提示 |
 | `THRESHOLD_NOT_CONFIGURED` | presence 未配置试用阈值 | 保留数值证据，INCONCLUSIVE/null；不是缺签名或活体失败 |
@@ -1060,9 +1141,9 @@ const previewUrl = URL.createObjectURL(blob);
 2. 使用 Postman/Apifox 或 `curl` 发 multipart 文件，不发 JSON/Base64 请求；
 3. 上传时使用匿名文件名，例如 `upload.jpg`，不要透传身份证号、姓名等本地文件名；
 4. 先验证白底照和人证虚化，确认能够解码 `image_base64`；
-5. 图片/quick/full 按已标定的 `suggestion` 判定；presence 按 `decision/found`，不按 `success` 或裸分数；
+5. 图片 configured 按互斥试用原因码展示且仍人工 REVIEW；图片 artifact/quick/full 按标定后 `suggestion`，presence 按 `decision/found`，不按 `success` 或裸分数；
 6. 确认 `feature_dimension=1024`、`feature_version=recognizer_v1_1024`；
-7. 旧未标定 images/quick/full 应为 `REVIEW + THRESHOLD_UNCALIBRATED`；presence 按配置核验三态，不能输出业务 `PASS`；
+7. 图片 uncalibrated / quick/full 的有效未标定结果仍为 `REVIEW + THRESHOLD_UNCALIBRATED`；图片 configured 按第 6.2 节两种原因复核，presence 按配置核验三态，试用均不能业务 `PASS`；
 8. quick 可同步调试；full/presence 由业务异步 worker 调用；
 9. 记录 `trace_id`、配置/模型版本和业务请求号，但不记录媒体及 Base64；
 10. 出现 HTTP 500/503/504 时附上发生时间、接口、HTTP 状态和安全的结构化响应联系算法人员。
@@ -1122,8 +1203,8 @@ portrait 的 `success=true` 同时允许 `PASS + []` 或 `REVIEW + 软提醒码`
 | `similarity_score` | `number` 或 `null`，范围 `[-1,1]` |
 | `matcher_version` | 固定 `"l2_dot_v1"` |
 | `feature_dimension` | 固定 `1024` |
-| `decision_threshold` | `number` 或 `null`，未标定时为 `null` |
-| `calibration` | `{status,calibration_id,artifact_sha256}` |
+| `decision_threshold` | 有限 `number [0,1]` 或 `null`；uncalibrated 为 null，configured 为显式试用阈值（37 实际 0.55），artifact 为绑定阈值 |
+| `calibration` | `{status,calibration_id,artifact_sha256}`；status 为 `UNCALIBRATED / ACTIVE / CONFIGURED_UNVALIDATED`，只有 ACTIVE 带签名 ID/digest，其余两者均 null |
 
 `ImageVerificationSide`：
 
