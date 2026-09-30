@@ -27,10 +27,15 @@ API = 'face-algorithm-task-2026-001'
 CONSOLE = 'face-algorithm-visual-console-task-2026-001'
 PROTECTED = 'face-algorithm'
 PROTECTED_ID = 'd6773816222a2200ee76b0b23f35af51786cc64a46147e04933ff7d3281ece7f'
-OLD_COMMIT = '1e6b57b5b1dd32693497c21a0ce0039b4f77fc1b'
+OLD_COMMIT = 'd78e723b8fb8737b09e12859e57aa9856a640db6'
 OLD_REVISION = OLD_COMMIT[:12]
 OLD_SOURCE = ROOT / ('source-' + OLD_COMMIT) / 'FaceFeatureExtractorAPI'
 OLD_CONFIG = ROOT / 'runtime' / ('algorithm-' + OLD_COMMIT + '.yaml')
+OLD_CONFIG_SHA256 = 'c0d27189eb153cedb0b4d81890b18e2b99a88f5cedec0ba2a63785a882be0287'
+OLD_CONTAINER_IDS = {
+    API: 'cf671e39ce84b74ecbd4acd0679e76e5090070ea67daba006fb647d77edb0c76',
+    CONSOLE: '65eaacd8f838d0f02c2a271ed0969321ceb8601391d8ccd24e4b11de240872a5',
+}
 CHECKPOINT = ROOT / 'runtime/checkpoints/modnet_photographic_portrait_matting.ckpt'
 REVISION_LABEL = 'org.opencontainers.image.revision'
 OWNER_LABEL = 'face-algorithm.release-owner'
@@ -105,6 +110,39 @@ def protected_snapshot() -> dict:
     }
 
 
+def verify_baseline_config() -> None:
+    require(OLD_CONFIG.is_file() and not OLD_CONFIG.is_symlink() and
+            sha256(OLD_CONFIG) == OLD_CONFIG_SHA256, 'Approved baseline config SHA differs')
+
+
+def verify_original(name: str, item: dict | None, *, running: bool) -> None:
+    require(bool(item) and item['Id'] == OLD_CONTAINER_IDS[name],
+            'Original container identity differs from approved baseline')
+    prefix = 'face-algorithm' if name == API else 'face-algorithm-visual-console'
+    require(item['Config']['Image'] == prefix + ':task-2026-001-' + OLD_REVISION,
+            'Original image differs from approved baseline')
+    labels = item['Config'].get('Labels') or {}
+    require(labels.get(REVISION_LABEL) == OLD_COMMIT and labels.get(OWNER_LABEL) == API,
+            'Original labels differ from approved baseline')
+    if running:
+        require(item['State']['Running'] and item['State'].get('Health', {}).get('Status') == 'healthy',
+                'Original container is not running and healthy at approved baseline')
+    if name == API:
+        mounts = [mount for mount in item.get('Mounts', [])
+                  if mount.get('Destination') == '/app/config/algorithm.yaml']
+        require(len(mounts) == 1 and mounts[0].get('Source') == str(OLD_CONFIG) and
+                mounts[0].get('RW') is False, 'Original config mount differs from approved baseline')
+
+
+def baseline_snapshot() -> dict:
+    """Read-only exact-current-baseline guard, before any deployment mutation."""
+    verify_baseline_config()
+    containers = {name: inspect(name) for name in (API, CONSOLE)}
+    for name, item in containers.items():
+        verify_original(name, item, running=True)
+    return containers
+
+
 def extract_archive(archive: Path, target: Path, commit: str) -> None:
     """Only regular API files/directories; reject all links and escaping names."""
     require(not target.exists(), 'Release source already exists without a completed build state')
@@ -125,7 +163,7 @@ def extract_archive(archive: Path, target: Path, commit: str) -> None:
 
 
 def merged_config(old: str) -> str:
-    """Patch only new scalar defaults in the approved plain YAML section.
+    """Legacy presence migration, retained for compatibility but not this release.
 
     Keep every existing value/text intact. Nonstandard or ambiguous section
     syntax is refused rather than guessing without a host YAML dependency.
@@ -161,6 +199,87 @@ def merged_config(old: str) -> str:
         lines[index] += newline
     lines.insert(index + 1, additions)
     return ''.join(lines)
+
+
+def portrait_config(old: str) -> str:
+    """Change only approved portrait scalars; never merge repository defaults.
+
+    This deliberately narrow text patch needs no host YAML package. The
+    containerized strict YAML comparison below is the semantic authority.
+    """
+    lines = old.splitlines(keepends=True)
+    headers = [index for index, line in enumerate(lines)
+               if re.match(r'''^(?:portrait_template|['"]portrait_template['"])[ \t]*:''', line)]
+    require(len(headers) == 1, 'Missing or ambiguous duplicate portrait_template section')
+    index = headers[0]
+    require(re.fullmatch(r'portrait_template:[ \t]*(?:#[^\r\n]*)?(?:\r?\n)?', lines[index]) is not None,
+            'Unsupported portrait_template section syntax')
+    fields = {}
+    for offset in range(index + 1, len(lines)):
+        line = lines[offset]
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        if not line[0].isspace():
+            break
+        field = re.fullmatch(
+            r'  ([a-z_][a-z_0-9]*):[ \t]+([a-zA-Z0-9_.-]+)([ \t]*(?:#[^\r\n]*)?)(\r?\n)?', line)
+        if field is None:
+            # The deployed template has one standard flow-list value. It is
+            # preserved byte-for-byte, never parsed or rewritten on the host.
+            field = re.fullmatch(
+                r'  (background_rgb):[ \t]+(\[[0-9]{1,3},[ \t]*[0-9]{1,3},[ \t]*[0-9]{1,3}\])'
+                r'([ \t]*(?:#[^\r\n]*)?)(\r?\n)?', line)
+        require(field is not None, 'Unsupported portrait_template scalar syntax')
+        key, value = field.group(1, 2)
+        require(key not in fields, 'Ambiguous duplicate portrait_template field')
+        fields[key] = (offset, value, field.group(3), field.group(4) or '')
+    mode = fields.get('mode', (None, 'head_shoulders'))[1]
+    version = fields.get('version', (None, None))[1]
+    require((mode, version) in {
+        ('head_shoulders', 'head-shoulders-480x640-v1'),
+        ('face_archive', 'face-archive-480x640-v1'),
+    }, 'Unexpected portrait_template mode or version')
+    for key, value in (('mode', 'face_archive'), ('version', 'face-archive-480x640-v1')):
+        if key in fields:
+            offset, _, comment, newline = fields[key]
+            lines[offset] = f'  {key}: {value}{comment}{newline}'
+    if 'mode' not in fields:
+        newline = '\r\n' if lines[index].endswith('\r\n') else '\n'
+        lines.insert(index + 1, '  mode: face_archive' + newline)
+    return ''.join(lines)
+
+
+def config_validation_script() -> str:
+    """Run in the existing API image: strict load and exact allowed delta."""
+    return '''import copy
+import json
+from pathlib import Path
+import yaml
+
+class UniqueLoader(yaml.SafeLoader):
+    def construct_mapping(self, node, deep=False):
+        keys = set()
+        for key_node, _ in node.value:
+            if key_node.tag != 'tag:yaml.org,2002:str':
+                raise ValueError('Unsupported configuration mapping key')
+            key = self.construct_object(key_node, deep=deep)
+            if key in keys:
+                raise ValueError('Duplicate configuration mapping key')
+            keys.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+a = yaml.load(Path('/old.yaml').read_text(), Loader=UniqueLoader)
+b = yaml.load(Path('/new.yaml').read_text(), Loader=UniqueLoader)
+assert a['models']['portrait_matting']['enabled'] is True
+assert a['video_presence']['mode'] == 'configured'
+assert type(a['video_presence']['threshold']) is float and a['video_presence']['threshold'] == 0.5
+assert a['video_presence']['threshold_id'] == 'TASK-2026-001-presence-trial-050-20260928'
+assert a['portrait_template'].get('mode', 'head_shoulders') == 'head_shoulders'
+assert a['portrait_template']['version'] == 'head-shoulders-480x640-v1'
+expected = copy.deepcopy(a)
+expected['portrait_template'].update(mode='face_archive', version='face-archive-480x640-v1')
+assert json.dumps(b, sort_keys=True, allow_nan=False) == json.dumps(expected, sort_keys=True, allow_nan=False)
+'''
 
 
 def port_free(host: str, port: int) -> None:
@@ -200,14 +319,15 @@ def wait_http(base: str, *, presence: bool, timeout: float = 180) -> None:
                 if presence:
                     ready = json.load(response)
                     require(ready.get('ready') is True and
-                            ready.get('capabilities', {}).get('video_presence') == 'ready',
-                            'Presence capability is not ready')
+                            all(ready.get('capabilities', {}).get(name) == 'ready'
+                                for name in ('video_presence', 'portrait')),
+                            'Presence or portrait capability is not ready')
             if presence:
                 with opener.open(base + '/openapi.json', timeout=4) as response:
                     schema = json.load(response)
                 require('/api/v2/verify/video/presence' in schema['paths'],
                         'New presence route is absent')
-                require(schema['info']['version'] == '2.2.0', 'Expected API 2.2.0 is absent')
+                require(schema['info']['version'] == '2.3.0', 'Expected API 2.3.0 is absent')
                 response = schema['paths']['/api/v2/verify/video/presence']['post']['responses']['200']
                 require(response['content']['application/json']['schema']['$ref'] ==
                         '#/components/schemas/VideoPresenceResult', 'Presence response contract differs')
@@ -222,10 +342,64 @@ def wait_http(base: str, *, presence: bool, timeout: float = 180) -> None:
                         {'UNCALIBRATED', 'CONFIGURED_UNVALIDATED'}, 'Presence trial contract differs')
                 require({'candidate_index', 'quality_warnings'} <=
                         models['PresenceEvidenceFrame']['properties'].keys(), 'Presence evidence fields are absent')
+                portrait = schema['paths']['/api/v2/portrait/generate']['post']
+                body = portrait['requestBody']
+                body_ref = body['content']['multipart/form-data']['schema']['$ref']
+                require(body_ref.startswith('#/components/schemas/'), 'Portrait request reference differs')
+                upload = models[body_ref.rsplit('/', 1)[1]]
+                image_upload = upload['properties']['image']
+                require(body.get('required') is True and set(upload.get('required', [])) == {'image'} and
+                        set(upload['properties']) == {'image'} and
+                        image_upload.get('type') == 'string' and
+                        (image_upload.get('format') == 'binary' or
+                         ('format' not in image_upload and
+                          image_upload.get('contentMediaType') == 'application/octet-stream')),
+                        'Portrait image upload contract differs')
+                require(portrait['responses']['200']['content']['application/json']['schema']['$ref'] ==
+                        '#/components/schemas/PortraitResponse', 'Portrait response contract differs')
+                fields = models['PortraitResponse']['properties']
+                require(set(fields) == {
+                    'success', 'suggestion', 'reason_codes', 'model_versions', 'config_version',
+                    'processing_time_ms', 'trace_id', 'template_version', 'output_width', 'output_height',
+                    'output_format', 'jpeg_quality', 'original_width', 'original_height',
+                    'rotation_quarter_turns', 'placement', 'matting_quality', 'image_base64',
+                }, 'Portrait response fields changed')
+                require(set(models['PortraitMattingQuality']['properties']) == {
+                    'face_mean', 'face_coverage', 'subject_area_ratio',
+                    'shoulder_depth_ratio', 'shoulder_band_coverage',
+                } and set(models['PortraitPlacement']['properties']) == {
+                    'scale', 'translate_x', 'translate_y', 'affine',
+                }, 'Portrait nested response fields changed')
+                require(fields['reason_codes']['items'].get('$ref') == '#/components/schemas/ReasonCode' and
+                        {'PORTRAIT_SOURCE_LIMITED', 'PORTRAIT_UPSCALE_LIMITED'} <=
+                        set(models['ReasonCode']['enum']), 'Portrait warning reason codes are absent')
             return
-        except (OSError, ValueError, KeyError, ReleaseError):
+        except (OSError, ValueError, KeyError, TypeError, ReleaseError):
             time.sleep(2)
     raise ReleaseError('Readiness timeout; no response bodies were logged')
+
+
+def wait_restored_api(base: str, *, timeout: float = 180) -> None:
+    """Verify the restored d78 API without requiring the new portrait contract."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with opener.open(base + '/health/ready', timeout=4) as response:
+                require(response.status == 200, 'Restored API readiness is not successful')
+                ready = json.load(response)
+                require(ready.get('ready') is True and
+                        all(ready.get('capabilities', {}).get(name) == 'ready'
+                            for name in ('video_presence', 'portrait')),
+                        'Restored presence or portrait capability is not ready')
+            with opener.open(base + '/openapi.json', timeout=4) as response:
+                require(response.status == 200, 'Restored API schema is not available')
+                require(json.load(response)['info']['version'] == '2.2.0',
+                        'Restored API version differs from approved baseline')
+            return
+        except (OSError, ValueError, KeyError, TypeError, ReleaseError):
+            time.sleep(2)
+    raise ReleaseError('Restored API readiness timeout; no response bodies were logged')
 
 
 class Release:
@@ -260,6 +434,8 @@ class Release:
                     == self.commit, 'Required image missing or revision label differs')
 
     def build(self) -> None:
+        if self.state.get('stage') != 'promoted':
+            baseline_snapshot()
         if self.state.get('stage') in ('built', 'candidate', 'promoted', 'rolled-back'):
             self.verify_images()
             require(sha256(self.config) == self.state['config_sha256'], 'Release config changed')
@@ -282,23 +458,14 @@ class Release:
         old_text = OLD_CONFIG.read_text(encoding='utf-8')
         require(not self.config.exists(), 'Refusing to overwrite an existing runtime config')
         with self.config.open('x', encoding='utf-8', newline='') as stream:
-            stream.write(merged_config(old_text))
+            stream.write(portrait_config(old_text))
         self.config.chmod(OLD_CONFIG.stat().st_mode & 0o777)
         # Use the already installed PyYAML, without depending on host Python packages.
-        validation = (
-            "import yaml; from pathlib import Path; "
-            "a=yaml.safe_load(Path('/old.yaml').read_text()); "
-            "b=yaml.safe_load(Path('/new.yaml').read_text()); "
-            "s=yaml.safe_load(Path('/source.yaml').read_text()); "
-            "assert a['models']['portrait_matting']['enabled'] is True; "
-            "assert b['video_presence']==s['video_presence']; "
-            "a.pop('video_presence',None); b.pop('video_presence',None); assert a==b"
-        )
+        validation = config_validation_script()
         docker('run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL',
                '--security-opt', 'no-new-privileges',
                '--mount', f'type=bind,src={OLD_CONFIG},dst=/old.yaml,readonly',
                '--mount', f'type=bind,src={self.config},dst=/new.yaml,readonly',
-               '--mount', f'type=bind,src={self.source / "config/algorithm.yaml"},dst=/source.yaml,readonly',
                'face-algorithm:task-2026-001-' + OLD_REVISION, 'python', '-c', validation)
         shutil.copyfile(OLD_SOURCE / 'Dockerfile.offline', self.source / 'Dockerfile.offline')
         print('Building pinned API image (offline wheelhouse)')
@@ -354,15 +521,14 @@ class Release:
                 current = inspect(name)
                 require(bool(current) and current['Id'] == original_id and current['State']['Running'],
                         'Original container identity differs or is not restored and running')
+        baseline = baseline_snapshot()
         existing = inspect(self.candidate)
         if existing:
             require(self.owned(existing), 'Candidate name belongs to another release')
             require(existing['State']['Running'], 'Existing candidate is stopped; inspect before retrying')
         else:
             port_free('127.0.0.1', 18012)
-            current = inspect(API)
-            require(bool(current), 'Current API not found')
-            self.run_container(self.candidate, console=False, candidate=True, old_api=current)
+            self.run_container(self.candidate, console=False, candidate=True, old_api=baseline[API])
         wait_http('http://127.0.0.1:18012', presence=True)
         self.save('candidate')
         print('Candidate ready on 127.0.0.1:18012; perform acceptance before promote')
@@ -370,6 +536,8 @@ class Release:
     def rollback(self) -> None:
         originals = self.state.get('originals', {})
         require(set(originals) == {API, CONSOLE}, 'No recorded original container IDs; refusing rollback')
+        require(originals == OLD_CONTAINER_IDS, 'Recorded original IDs differ from approved baseline')
+        verify_baseline_config()
         # Validate EVERY target before removing or renaming ANY container.
         for name, original_id in originals.items():
             current, backup = inspect(name), inspect(name + '-prev-' + OLD_REVISION)
@@ -377,6 +545,8 @@ class Release:
                     'Current name belongs to an unrelated container; refusing rollback')
             require((current and current['Id'] == original_id) or
                     (backup and backup['Id'] == original_id), 'Original container missing; refusing rollback')
+            original = current if current and current['Id'] == original_id else backup
+            verify_original(name, original, running=False)
         for name in (CONSOLE, API):
             current = inspect(name)
             if current and current['Id'] != originals[name]:
@@ -386,14 +556,15 @@ class Release:
             if not current:
                 docker('rename', originals[name], name)
             docker('start', originals[name])
-        self.save('rolled-back')
-        wait_http('http://<server-37>:18002', presence=False)
+        wait_restored_api('http://<server-37>:18002')
         wait_http('http://<server-37>:18003', presence=False)
+        self.save('rolled-back')
         print('Original API and console restored; earlier backups retained')
 
     def promote(self) -> None:
         self.verify_images()
         if self.state.get('stage') == 'promoted':
+            require(sha256(self.config) == self.state['config_sha256'], 'Release config changed')
             require(all(self.owned(inspect(name)) for name in (API, CONSOLE)),
                     'Promoted container identity changed')
             wait_http('http://<server-37>:18002', presence=True)
@@ -406,12 +577,9 @@ class Release:
         require(self.owned(candidate) and candidate['State']['Running'], 'Candidate identity differs')
         wait_http('http://127.0.0.1:18012', presence=True)
         originals = {}
-        current_api = inspect(API)
-        for name, image_prefix in ((API, 'face-algorithm'), (CONSOLE, 'face-algorithm-visual-console')):
-            current = inspect(name)
-            require(bool(current) and current['State']['Running'], 'Original container missing or stopped')
-            require(current['Config']['Image'] == image_prefix + ':task-2026-001-' + OLD_REVISION,
-                    'Original image differs from approved baseline')
+        baseline = baseline_snapshot()
+        current_api = baseline[API]
+        for name, current in baseline.items():
             require(inspect(name + '-prev-' + OLD_REVISION) is None, 'Backup name already exists')
             originals[name] = current['Id']
         self.state['originals'] = originals

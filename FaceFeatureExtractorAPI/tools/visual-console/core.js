@@ -69,8 +69,8 @@ const VIDEO_BYTES = 500 * MIB;
 export const CAPABILITIES = Object.freeze([
   freezeCapability({
     id: "portrait",
-    label: "白底头肩照",
-    description: "生成标准白底头肩照",
+    label: "白底人脸照",
+    description: "生成考勤归档用白底人脸照，不强制完整肩部",
     endpoint: "/api/v2/portrait/generate",
     method: "POST",
     timeoutMs: 30_000,
@@ -252,6 +252,8 @@ export const REASON_LABELS = Object.freeze({
   SUBJECT_CROPPED: "人物主体被裁切",
   SHOULDERS_NOT_VISIBLE: "肩部区域不可见",
   PORTRAIT_GEOMETRY_INVALID: "头肩照构图不符合要求",
+  PORTRAIT_SOURCE_LIMITED: "源图范围受限，已保留可用人脸",
+  PORTRAIT_UPSCALE_LIMITED: "放大倍率受限，已增加白色留边",
   CARD_NOT_FOUND: "未检测到证卡",
   CARD_TOO_SMALL: "证卡区域过小",
   CARD_CROPPED: "证卡被画面裁切",
@@ -484,6 +486,24 @@ export function getSuggestionView(result, capabilityId) {
       message: "请先提交一次测试请求。",
       notices: Object.freeze([]),
       canTreatAsPass: false,
+    });
+  }
+
+  if (getCapability(capabilityId)?.id === "portrait" && result.success === true) {
+    const warnings = normalizedReasonCodes(result.reason_codes);
+    const allowed = new Set(["TOO_DARK", "TOO_BRIGHT", "TOO_BLURRY", "BAD_POSE",
+      "PORTRAIT_SOURCE_LIMITED", "PORTRAIT_UPSCALE_LIMITED"]);
+    const generated = Array.isArray(result.reason_codes)
+      && typeof result.image_base64 === "string" && result.image_base64.length > 0
+      && ((result.suggestion === "PASS" && warnings.length === 0)
+        || (result.suggestion === "REVIEW" && warnings.length > 0 && warnings.every(code => allowed.has(code))));
+    return Object.freeze({
+      key: generated ? "generated" : "error", generated,
+      label: !generated ? "结果不可用" : warnings.length ? "已生成，存在质量提醒" : "白底人脸照已生成",
+      tone: !generated ? "danger" : warnings.length ? "warning" : "success",
+      message: generated ? "已使用真实输入像素生成白底图片；此结果不代表身份核验或考勤通过。"
+        : "出图状态与响应内容不一致，请检查后端响应。",
+      notices: Object.freeze(translateReasons(warnings)), canTreatAsPass: false,
     });
   }
 
@@ -840,7 +860,7 @@ export function buildResultDetails(capabilityId, result) {
     details.push(Object.freeze({ key, label, value: String(value) }));
   };
 
-  const suggestionView = capability?.responseKind === "video-presence" ? getPresenceView(result) : getSuggestionView(result);
+  const suggestionView = getSuggestionView(result, capabilityId);
   add("suggestion", capability?.responseKind === "video-presence" ? "身份结论" : "算法建议", suggestionView.label);
   const reasons = translateReasons(capability?.responseKind === "video-presence"
     ? normalizedReasonCodes(result.reason_codes).filter((code) => !["CALIBRATION_REQUIRED", "THRESHOLD_UNCALIBRATED"].includes(code))

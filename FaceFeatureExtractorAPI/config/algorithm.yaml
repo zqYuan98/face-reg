@@ -135,7 +135,8 @@ quality_profiles:
     landmark_geometry: {require_points_inside_bbox: true, bbox_tolerance_ratio: 0.02, min_eye_distance_ratio: 0.15, min_mouth_width_ratio: 0.10, max_eye_vertical_difference_ratio: 0.20}
 
 portrait_template:
-  version: head-shoulders-480x640-v1
+  mode: face_archive
+  version: face-archive-480x640-v1
   output_width: 480
   output_height: 640
   output_format: jpeg

@@ -3,24 +3,32 @@
 面向私有化 CPU 部署的模块化人脸算法包及薄 FastAPI 适配层。算法模块不访问数据库、
 不判断合同状态，也不创建业务工单。
 
-## 接口入口（API 2.2.0 已部署）
+## 接口入口（API 2.3.0）
+
+2026-09-30 源码候选处于构建/验证阶段，不表示已上线：白底人脸照默认不强制完整头顶/颈部/肩部；
+保持原接口、`image` 上传字段和响应字段，仅新增 `PORTRAIT_SOURCE_LIMITED` / `PORTRAIT_UPSCALE_LIMITED` 原因枚举。
+成功出图可为 `success=true + REVIEW`，提醒在 `reason_codes`；客户端按 `success=true && image_base64`
+判断出图，不能仅凭 REVIEW 判定失败。
+本次构建/部署状态和回滚入口以 [白底人脸照发布记录](docs/reports/2026-09-30-attendance-face-portrait-release.md) 为准。
+下面 2026-09-28 记录是本次升级前基线，视频 0.5 配置本轮保留。
 
 公司内网 API：`http://<server-37>:18002`；人工测试台：`http://<server-37>:18003`。
 2026-09-28 以上 `18002/18003` 已发布 `2.2.0` 且均 healthy，发布代码提交为
 `d78e723b8fb8737b09e12859e57aa9856a640db6`；旧 `18001` 未改动，不属于新开发入口。
-当前镜像、回归与回滚命令见 [本轮发布验收记录](docs/reports/2026-09-28-presence-best-effort-release.md)。
-本轮已上线低质量尽力比对、补采和试用阈值三态能力。37 随后按用户指定将 presence 运行配置
+该次镜像、回归与历史回滚记录见 [2.2.0 历史发布记录](docs/reports/2026-09-28-presence-best-effort-release.md)。
+2.2.0 引入的低质量尽力比对、补采和试用阈值三态能力在 2.3.0 保持不变。37 在 2026-09-28 随后按用户指定将 presence 运行配置
 设为试用阈值 `0.5`（`configured`），返回 `CONFIGURED_UNVALIDATED`，业务仍需人工 REVIEW。
-仅 presence 运行配置改变；代码版本、源码默认无阈值配置、images/quick/full、18001 和测试台不变。
+该次阈值调整仅改变 presence 运行配置，未改代码版本、源码默认无阈值配置、images/quick/full、18001 或测试台。
+本次 2.3.0 升级保留 `0.5` 及原阈值 ID，不用仓库默认 null 覆盖运行配置。
 配置 ID、验证与配置回退见 [0.5 试用阈值记录](docs/reports/2026-09-28-presence-threshold-050.md)，生产精度未验证。
-本地/匿名现场功能验证及验收边界另见
-[本地验证记录](docs/reports/2026-09-28-presence-best-effort-validation.md)，不替代人工标签和阈值验收。
+2026-09-28 历史本地/匿名现场功能验证及验收边界另见
+[2.2.0 本地验证记录](docs/reports/2026-09-28-presence-best-effort-validation.md)，不代表 2.3.0 上线或人工标签和阈值验收。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/health/live`、`/health/ready`、`/health` | 存活、模型/能力就绪、ready 兼容别名 |
 | GET | `/openapi.json` | 接入契约；`/docs`、`/redoc` 关闭 |
-| POST | `/api/v2/portrait/generate` | 白底头肩照 |
+| POST | `/api/v2/portrait/generate` | 考勤归档白底人脸照，成功图片可附 REVIEW 提醒 |
 | POST | `/api/v2/witness/blur-background` | 人物优先背景虚化 |
 | POST | `/api/v2/verify/images` | 双图身份比对 |
 | POST | `/api/v2/verify/video/quick` | 持续身份一致性快速抽样 |
@@ -30,7 +38,7 @@
 | POST | `/api/extract_feature` | legacy 特征，默认关闭/404，不为新功能开启 |
 
 六个 v2 使用 multipart 文件上传；presence 与 full 都有 600 秒算法截止，正式业务由异步
-worker 调用。2.2.0 presence 的亮暗/模糊/姿态/小脸/贴边为软提示，可形成有效 1024 维特征就比较；
+worker 调用。沿用 2.2.0 的 presence 规则：亮暗/模糊/姿态/小脸/贴边为软提示，可形成有效 1024 维特征就比较；
 参考 112px、视频 64px 不是硬拒绝门槛。默认 0.5 秒基础采样、每窗口最多补采 2 帧，1200 帧预算
 包含首尾与补采；长视频必要时增大实际基础间隔。每帧最多 5 候选，局部候选失败保留其他证据。
 

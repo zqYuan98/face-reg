@@ -1,24 +1,25 @@
 # TASK-2026-001 新算法 API 联调文档
 
 本文供业务后端、APP、测试和实施人员在公司内网联调人脸算法服务。
-本文对应已部署 API `2.2.0`：presence 支持低质量候选尽力比对和明确配置的试用阈值三态判定。
-2026-09-28 服务器 37 的 `18002/18003` 已更新且均 healthy，发布代码提交为
-`d78e723b8fb8737b09e12859e57aa9856a640db6`。本轮镜像、端口、发布验证和回滚证据见
-[发布验收记录](reports/2026-09-28-presence-best-effort-release.md)；历史 `18001` 完全未改动。
-37 的 presence 运行配置随后已按用户指定设为试用阈值 `0.5`，返回 `CONFIGURED_UNVALIDATED`，
-业务仍需人工 REVIEW。此次仅改 presence 运行配置，代码版本、源码默认配置、images/quick/full、
-18001 和测试台不变；配置验证与回退见 [0.5 试用阈值记录](reports/2026-09-28-presence-threshold-050.md)。
-上线或指定试用阈值不等于生产精度已验证。本轮本地测试及人工标签/阈值边界另见
+本文对应 API `2.3.0` 源码契约（2026-09-30 构建/候选验证阶段，不表示已完成线上切换）。
+本次部署状态与回滚入口统一见 [白底人脸照发布记录](reports/2026-09-30-attendance-face-portrait-release.md)。
+升级前基线：2026-09-28 服务器 37 的 `18002/18003` 发布 `2.2.0`，当时均 healthy，代码为
+`d78e723b8fb8737b09e12859e57aa9856a640db6`。该次镜像、端口和验证证据见
+[2.2.0 历史发布记录](reports/2026-09-28-presence-best-effort-release.md)；历史 `18001` 完全未改动。
+37 在同日后续按用户指定将 presence 运行配置设为试用阈值 `0.5`，返回 `CONFIGURED_UNVALIDATED`，
+业务仍需人工 REVIEW。该次阈值调整只改 presence 运行配置，未改代码、源码默认配置、images/quick/full、
+18001 或测试台；本次 2.3.0 升级保留该阈值与 ID，配置依据见 [0.5 试用阈值记录](reports/2026-09-28-presence-threshold-050.md)。
+上线或指定试用阈值不等于生产精度已验证。2026-09-28 历史本地测试及人工标签/阈值边界另见
 [2.2.0 尽力比对本地验证记录](reports/2026-09-28-presence-best-effort-validation.md)。
 
 | 项目 | 值 |
 |---|---|
-| 文档 / 源码 API 版本 | `2.2.0`（已部署） |
-| 服务器 37 已部署 API 版本 | `2.2.0`（发布代码 `d78e723`） |
+| 文档 / 源码 API 版本 | `2.3.0`（白底人脸照；请求/响应字段不变） |
+| 本次部署状态与回滚入口 | [白底人脸照发布记录](reports/2026-09-30-attendance-face-portrait-release.md)；升级前为 `2.2.0 / d78e723` |
 | 配置版本 | `2026-08-24-v1` |
 | 37 当前 presence 运行配置 | `mode=configured`、`threshold=0.5`；`CONFIGURED_UNVALIDATED`，业务仍 REVIEW |
 | 37 当前 presence 阈值 ID | `TASK-2026-001-presence-trial-050-20260928` |
-| 文档更新时间 | `2026-09-28`（区分功能上线与未完成的现场精度验证） |
+| 文档更新时间 | `2026-09-30`（白底人脸照成功 REVIEW 语义；不改变视频 0.5） |
 | 特征契约 | `recognizer_v1_1024`，固定 `1024` 维 |
 | 测试环境 Base URL | `http://<server-37>:18002` |
 | 可视化测试台 | `http://<server-37>:18003` |
@@ -28,7 +29,7 @@
 > 旧图片、quick/full 身份阈值仍处于 `UNCALIBRATED`。即使相似度很高，也会安全返回
 > `REVIEW + THRESHOLD_UNCALIBRATED`，不能将它解释为人员不一致，也不能自行写死
 > `0.6`、`0.7` 等阈值；旧视频还会返回 `CALIBRATION_REQUIRED`，签名 calibration 规则不变。
-> 2.2.0 presence 独立使用服务端 `configured` / `uncalibrated` 配置：前者返回
+> presence 沿用 2.2.0 契约，独立使用服务端 `configured` / `uncalibrated` 配置：前者返回
 > `CONFIGURED_UNVALIDATED` 并可产生三态结果，后者仍计算证据但返回
 > `THRESHOLD_NOT_CONFIGURED + INCONCLUSIVE/null`。本接口不要求签名校准包或活体门禁，
 > 试用结果也不能自动放行业务。服务器 37 当前为 `configured + threshold=0.5`；源码默认仍为
@@ -50,7 +51,7 @@ curl -sS http://<server-37>:18002/health/ready
   `video_verification` 或 `video_presence`；
 - 当前测试环境应显示 `8` 个模型均为 `ready`。
 
-就绪响应结构节选（线上已核验 8 个模型和 5 个能力键就绪）：
+就绪响应结构节选（2026-09-28 升级前基线曾核验 8 个模型和 5 个能力键就绪；候选/升级后须重新核验）：
 
 ```json
 {
@@ -94,8 +95,8 @@ http://<server-37>:18002/openapi.json
 ```
 
 服务关闭了 Swagger UI 和 ReDoc 页面，因此 `/docs`、`/redoc` 不可用是正常现象。
-线上 OpenAPI 已描述 2.2.0 契约。联调本文新增字段时须重新导入以上 OpenAPI，
-核对 `info.version=2.2.0` 与六条 v2 路由；仅路由存在不足以确认已升级。
+本次白底人脸照期望 OpenAPI 2.3.0 契约。联调时须重新导入以上 OpenAPI，
+核对 `info.version=2.3.0` 与六条 v2 路由；仅路由存在不足以确认已升级。
 应用字段校验的实际契约是 `400 + INVALID_IMAGE`，不是框架默认的 `422`。
 
 Postman/Apifox 中所有文件字段都选择 `form-data` 的 **File** 类型，不要把文件路径、
@@ -119,7 +120,7 @@ Base64 或 JSON 当作请求体发送。
 
 | 能力 | 方法与路径 | multipart 字段 | 服务截止时间 |
 |---|---|---|---:|
-| 白底头肩照 | `POST /api/v2/portrait/generate` | `image` | 30 秒 |
+| 白底人脸照 | `POST /api/v2/portrait/generate` | `image` | 30 秒 |
 | 人证背景虚化 | `POST /api/v2/witness/blur-background` | `image` | 30 秒 |
 | 两图身份比对 | `POST /api/v2/verify/images` | `reference_image`, `probe_image` | 30 秒 |
 | 视频快速持续一致性 | `POST /api/v2/verify/video/quick` | `reference_image`, `video` | 60 秒 |
@@ -146,18 +147,19 @@ presence 总预算为 620 秒，浏览器截止为 630 秒，服务算法预算�
 
 ### 3.1 HTTP 状态和算法建议是两层含义
 
-HTTP `200` 表示服务已正常给出算法结果，不等于身份通过。业务代码必须优先读取
-`suggestion`（presence 的身份结论必须改读 `decision/found`，见第 8A 节）：
+HTTP `200` 表示服务已正常给出算法结果，不等于身份通过。portrait 先检查 `success` 与
+`image_base64` 判断出图，再展示 `suggestion/reason_codes`；presence 的身份结论读取
+`decision/found`（见第 8A 节），其他能力按 `suggestion` 处理：
 
 | `suggestion` | 业务含义 | 推荐动作 |
 |---|---|---|
 | `PASS` | 当前能力成功；身份类接口还要求已发布有效标定包 | 进入下一业务步骤 |
 | `RECAPTURE` | 拍摄质量或构图不符合要求 | 根据 `reason_codes` 提示重新拍摄 |
-| `REVIEW` | 阈值未标定、身份不确定或需要人工处理 | 转人工/等待标定，不能自动放行 |
+| `REVIEW` | 白底人脸照可能已出图但有质量提醒；身份类可能未标定或不确定 | portrait 保留图片与提醒；身份类转人工/等待标定，不能自动放行 |
 
 不要只判断 `success`：
 
-- 白底照、人证虚化的 `success=true` 表示成功生成派生图；
+- 白底照、人证虚化的 `success=true` 表示成功生成派生图；白底照还须存在 `image_base64`，成功 REVIEW 不能隐藏图片；
 - 身份类接口可能出现 `success=true + suggestion=REVIEW`，表示算法已完成，但当前不能
   自动作出身份结论；
 - `success=false` 表示算法流水线未形成可用结果。
@@ -166,7 +168,7 @@ HTTP `200` 表示服务已正常给出算法结果，不等于身份通过。业
 
 ```text
 1. 先判断 HTTP 状态码；
-2. HTTP 200 时，presence 读取 decision/found；其他五个 v2 读取 suggestion；
+2. HTTP 200 时，portrait 按 success=true 且有 image_base64 判断出图；presence 读取 decision/found；其余读取 suggestion；
 3. RECAPTURE/REVIEW 时读取 reason_codes；
 4. 旧身份接口未标定不得自动通过；presence 试用结果仍需业务审核，不把 success/suggestion 当匹配结论；
 5. 保存 trace_id、config_version、model_versions 和业务请求号用于审计。
@@ -181,7 +183,12 @@ HTTP `200` 表示服务已正常给出算法结果，不等于身份通过。业
 - `image_base64` 是原始 Base64 字符串，没有 `data:image/...;base64,` 前缀；
 - v2 接口永远不返回 embedding、1024 维特征数组、原图、视频帧或原始抠图蒙版。
 
-## 4. 白底头肩照
+## 4. 白底人脸照（2.3.0）
+
+地址、multipart 字段和所有响应字段保持不变。默认 `face_archive` 用于考勤识别完成后的归档/协议展示，
+不强制完整头顶、颈部或肩膀；只抠图、等比缩放和平移真实像素，不补画缺失人体、不美颜、不重新核验身份。
+业务方负责触发、选择已识别的目标照片或单人区域、关联人员及保存原图/派生图；不要传无法确定目标的多人全景。
+出图失败不应直接推翻已完成的考勤。
 
 ### 4.1 请求
 
@@ -217,7 +224,7 @@ curl -sS -X POST \
   "config_version": "2026-08-24-v1",
   "processing_time_ms": 1857.3,
   "trace_id": "a10486704a8c4684aa2accb61fce87a8",
-  "template_version": "head-shoulders-480x640-v1",
+  "template_version": "face-archive-480x640-v1",
   "output_width": 480,
   "output_height": 640,
   "output_format": "jpeg",
@@ -242,12 +249,37 @@ curl -sS -X POST \
 }
 ```
 
-失败时仍可能是 HTTP `200`，但 `success=false`、`suggestion=RECAPTURE`，且不会返回
-`image_base64`。业务侧根据 `NO_FACE`、`MULTIPLE_FACES`、`BAD_POSE`、
-`SUBJECT_CROPPED` 等原因提示用户。
+### 4.3 成功带质量提醒与失败
 
-人物衣服、身体触及侧边或底边不再直接判定裁剪；真正的头顶或必要肩部被截断仍会
-安全拒绝。
+| 结果 | success | suggestion | reason_codes | image_base64 |
+|---|---|---|---|---|
+| 无提醒出图 | true | PASS | 空数组 | 有 |
+| 带提醒出图 | true | REVIEW | 仅软提醒码 | 有 |
+| 不可生成 | false | RECAPTURE / REVIEW | 拒绝原因 | 无 |
+
+**不能仅凭 `REVIEW` 判断出图失败。** 成功提醒允许 `TOO_DARK`、`TOO_BRIGHT`、`TOO_BLURRY`、
+`BAD_POSE`、`PORTRAIT_SOURCE_LIMITED`（源图头部范围或边距受限）、`PORTRAIT_UPSCALE_LIMITED`（限制放大并增加白边）。
+这些提醒不代表图像细节已被恢复。只有可用人脸/有效几何/可靠抠图均满足时才会生成。
+单纯无肩没有警告；原始脸框仍需至少 112×112，112–204px 不再仅因固定模板拒绝。
+无脸、目标歧义、真实越界/坏关键点、推理异常或脸部蒙版明显缺损仍失败且不带图。
+
+```python
+import base64
+
+# response 为调用方已提交 portrait 请求后取得的 HTTP 响应。
+response.raise_for_status()
+result = response.json()
+if result.get("success") is True and result.get("image_base64"):
+    derived_jpeg = base64.b64decode(result["image_base64"], validate=True)
+    # 由业务保存派生图；REVIEW 表示同时展示 reason_codes 质量提醒。
+else:
+    # 根据 reason_codes 提示重采或转人工，不修改已有考勤结果。
+    derived_jpeg = None
+```
+
+肩部两项指标仍保留，按实际可见范围测量，无肩可为 0；不是出图通过门槛。
+服务端可配置 `portrait_template.mode: head_shoulders` 恢复严格头肩策略；旧 YAML 缺失 mode 时也保持严格，
+上线归档策略须显式设 `face_archive` 和模板版本 `face-archive-480x640-v1`。请求侧不能传 mode 覆盖。
 
 ## 5. 人证背景虚化
 
@@ -572,7 +604,7 @@ full 是同步算法接口，但最长截止时间为 600 秒。APP/网页不要
 业务后端异步任务调用，并实现幂等、任务状态、结果回写和超时补偿。算法服务本身不保存
 任务状态。
 
-## 8A. 视频目标出现（presence，2.2.0 已部署契约）
+## 8A. 视频目标出现（presence，2.3.0 沿用的 2.2.0 契约）
 
 ### 8A.1 请求与边界
 
@@ -593,7 +625,7 @@ curl -sS --max-time 660 -X POST \
   http://<server-37>:18002/api/v2/verify/video/presence
 ```
 
-上例指向服务器 37 已部署的 2.2.0 服务。请求只声明两个文件字段，
+上例指向服务器 37 固定内网入口；实际版本须检查 OpenAPI 与本次发布记录。请求仍只声明两个文件字段，
 不接受调用方提供判定阈值；测试台也不得自行按分数重算结果。
 
 参考图允许一个明确主脸，小背景脸不必直接拒绝；无法消歧的多个主体仍为参考目标无效。
@@ -831,7 +863,7 @@ PTS 可用时优先采用；无法可靠获得时可能使用 FPS 推算，`time
 ```python
 import requests
 
-url = "http://<server-37>:18002/api/v2/verify/video/presence"  # 已部署的 2.2.0 服务
+url = "http://<server-37>:18002/api/v2/verify/video/presence"  # 固定内网入口；版本以 OpenAPI/发布记录为准
 with open("reference.jpg", "rb") as reference, open("capture.mp4", "rb") as video:
     response = requests.post(
         url,
@@ -938,8 +970,10 @@ multipart spool 和私有解码文件两份占用，按 500 MiB 上限需预留�
 | `TOO_BLURRY` | 图像模糊 | 稳定设备、重新对焦 |
 | `BAD_POSE` | 头部偏转过大 | 正视摄像头 |
 | `LANDMARK_FAILED` / `ALIGNMENT_FAILED` | 关键点或对齐失败 | 重新拍摄；持续出现时联系算法人员 |
-| `SUBJECT_CROPPED` | 白底照必要人物区域被裁剪 | 保留头顶和必要肩部 |
-| `SHOULDERS_NOT_VISIBLE` | 肩部信息不足 | 调整为标准头肩构图 |
+| `SUBJECT_CROPPED` | 严格头肩模式下必要人物区域被裁剪 | 保留头顶和必要肩部；归档模式不以缺肩拒绝 |
+| `SHOULDERS_NOT_VISIBLE` | 严格头肩模式下肩部信息不足 | 调整构图；归档模式不强制肩部 |
+| `PORTRAIT_SOURCE_LIMITED` | 白底人脸照源图范围/边距受限 | 成功 REVIEW 的提醒；使用真实可见像素，不补画 |
+| `PORTRAIT_UPSCALE_LIMITED` | 白底人脸照放大倍率受限 | 成功 REVIEW 的提醒；输出保留更大白边 |
 | `PORTRAIT_GEOMETRY_INVALID` | 无法放入标准证照模板 | 调整距离和构图 |
 | `MATTING_LOW_CONFIDENCE` | 人物分割不可靠 | 换纯净背景、改善光线后重拍 |
 | `MATTING_FAILED` | 抠图推理失败 | 转人工并联系算法运维 |
@@ -964,7 +998,7 @@ multipart spool 和私有解码文件两份占用，按 500 MiB 上限需预留�
 人证虚化中的证卡识别是可选增强：`CARD_NOT_FOUND`、`CARD_TOO_SMALL`、
 `CARD_CROPPED`、`CARD_DETECTION_UNCERTAIN` 不应成为人物虚化成功的业务门禁。
 
-在 2.2.0 presence 中，`TOO_DARK/TOO_BRIGHT/TOO_BLURRY/BAD_POSE/FACE_TOO_SMALL/FACE_CROPPED`
+在沿用的 presence 契约中，`TOO_DARK/TOO_BRIGHT/TOO_BLURRY/BAD_POSE/FACE_TOO_SMALL/FACE_CROPPED`
 放在独立的 `quality_warnings` 中，仅为软提示、补采触发和风险解释，不要求重拍后才能评分。
 上表关于旧图片/quick/full 的质量处理建议不能直接用作 presence 的拒绝规则。
 
@@ -1040,6 +1074,9 @@ const previewUrl = URL.createObjectURL(blob);
 | `placement` | `{scale,translate_x,translate_y:number, affine:number[2][3]}` 或 `null` |
 | `matting_quality` | `{face_mean,face_coverage,subject_area_ratio,shoulder_depth_ratio,shoulder_band_coverage:number}` 或 `null` |
 | `image_base64?` | `string`；仅成功生成派生图时存在 |
+
+portrait 的 `success=true` 同时允许 `PASS + []` 或 `REVIEW + 软提醒码`；都有派生图。
+肩部指标可能为 0，并非失败。所有字段形状不变，新增两种 reason_codes 枚举。
 
 ### 13.3 人证虚化字段
 

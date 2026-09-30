@@ -10,7 +10,7 @@ from .conftest import config_with
 def test_presence_revision_version_and_trial_contract(algorithm_config):
     schema = create_app(config=algorithm_config, services=DefaultAlgorithmServices(
         config=algorithm_config, registry=object())).openapi()
-    assert schema["info"]["version"] == "2.2.0"
+    assert schema["info"]["version"] == "2.3.0"
     props = schema["components"]["schemas"]["VideoPresenceResult"]["properties"]
     assert props["calibration_status"]["enum"] == ["UNCALIBRATED", "CONFIGURED_UNVALIDATED"]
     assert {"threshold", "comparison_status", "compared_candidates", "base_frames"} <= set(props)
@@ -66,3 +66,22 @@ def test_portrait_and_witness_schema_match_wire_fields_not_internal_image(algori
         props = schema["components"]["schemas"].get(name, {}).get("properties", {})
         assert "image_base64" in props and "image" not in props
     assert "feature_version" not in schema["components"]["schemas"]["PortraitResponse"]["properties"]
+
+
+def test_portrait_archive_keeps_request_and_response_fields(algorithm_config):
+    schema = create_app(config=algorithm_config, services=DefaultAlgorithmServices(
+        config=algorithm_config, registry=object())).openapi()
+    operation = schema["paths"]["/api/v2/portrait/generate"]["post"]
+    request = operation["requestBody"]["content"]["multipart/form-data"]["schema"]
+    request_model = schema["components"]["schemas"][request["$ref"].rsplit("/", 1)[-1]]
+    assert set(request_model["properties"]) == {"image"}
+    assert request_model["required"] == ["image"]
+    response = schema["components"]["schemas"]["PortraitResponse"]["properties"]
+    assert set(response) == {
+        "success", "suggestion", "reason_codes", "model_versions", "config_version",
+        "processing_time_ms", "trace_id", "template_version", "output_width", "output_height",
+        "output_format", "jpeg_quality", "original_width", "original_height",
+        "rotation_quarter_turns", "placement", "matting_quality", "image_base64",
+    }
+    assert "REVIEW" in operation["description"]
+    assert "肩" in operation["description"]

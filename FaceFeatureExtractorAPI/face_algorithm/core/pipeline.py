@@ -44,6 +44,16 @@ from face_algorithm.schemas import (
 __all__ = ["FacePipeline", "FaceQualityAnalysis", "TrustedFaceAnalysis"]
 
 
+_PORTRAIT_SOFT_QUALITY_REASONS = frozenset(
+    {
+        ReasonCode.TOO_DARK,
+        ReasonCode.TOO_BRIGHT,
+        ReasonCode.TOO_BLURRY,
+        ReasonCode.BAD_POSE,
+    }
+)
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class FaceQualityAnalysis:
     """Internal image-quality result with no biometric feature field."""
@@ -122,12 +132,32 @@ class FacePipeline:
             aligned_face=trusted.aligned_face,
         )
 
+    def analyze_portrait_quality(
+        self, image: np.ndarray, profile: Any
+    ) -> FaceQualityAnalysis:
+        """Analyze source pixels for portrait generation, never identity.
+
+        Valid in-bounds border contacts and aesthetic quality failures are
+        warnings only here. Selection, geometry and inference failures remain
+        blocking; ``analyze_quality`` and biometric paths stay strict.
+        """
+
+        trusted = self._analyze_trusted(
+            image, profile, extract_embedding=False, portrait_quality=True
+        )
+        return FaceQualityAnalysis(
+            public=trusted.public,
+            corrected_image=trusted.corrected_image,
+            aligned_face=trusted.aligned_face,
+        )
+
     def _analyze_trusted(
         self,
         image: np.ndarray,
         profile: Any,
         *,
         extract_embedding: bool,
+        portrait_quality: bool = False,
     ) -> TrustedFaceAnalysis:
 
         started = time.perf_counter()
@@ -234,7 +264,8 @@ class FacePipeline:
         # Preserve strict-mode short-circuiting: size and border failures are
         # decided before the single candidate reaches landmark inference.
         if (
-            getattr(profile.face_selection, "mode", None) == "exact_one"
+            not portrait_quality
+            and getattr(profile.face_selection, "mode", None) == "exact_one"
             and len(boxes) == 1
             and not getattr(boxes, "saturated", False)
         ):
@@ -386,17 +417,20 @@ class FacePipeline:
                 corrected=corrected,
             )
 
+        portrait_warnings: list[ReasonCode] = []
         if _box_touches_margin(
             raw_box,
             corrected.shape,
             profile.border_margin_ratio,
         ):
-            return finish(
-                (ReasonCode.FACE_CROPPED,),
-                box=clipped_box,
-                quarter_turns=quarter_turns,
-                corrected=corrected,
-            )
+            if not portrait_quality or not _box_inside_image(raw_box, corrected.shape):
+                return finish(
+                    (ReasonCode.FACE_CROPPED,),
+                    box=clipped_box,
+                    quarter_turns=quarter_turns,
+                    corrected=corrected,
+                )
+            portrait_warnings.append(ReasonCode.PORTRAIT_SOURCE_LIMITED)
 
         public_landmarks = FaceLandmarks(
             points=tuple(
@@ -409,13 +443,18 @@ class FacePipeline:
             corrected.shape,
             profile.border_margin_ratio,
         ):
-            return finish(
-                (ReasonCode.FACE_CROPPED,),
-                box=clipped_box,
-                landmarks=public_landmarks,
-                quarter_turns=quarter_turns,
-                corrected=corrected,
-            )
+            if not portrait_quality or not _landmarks_inside_image(
+                landmark_array, corrected.shape
+            ):
+                return finish(
+                    (ReasonCode.FACE_CROPPED,),
+                    box=clipped_box,
+                    landmarks=public_landmarks,
+                    quarter_turns=quarter_turns,
+                    corrected=corrected,
+                )
+            if ReasonCode.PORTRAIT_SOURCE_LIMITED not in portrait_warnings:
+                portrait_warnings.append(ReasonCode.PORTRAIT_SOURCE_LIMITED)
         try:
             aligned = self.aligner.align(corrected, landmark_array)
             steps.append("alignment")
@@ -483,8 +522,16 @@ class FacePipeline:
                 completed=False,
             )
         if not quality.passed:
+            soft_quality = portrait_quality and bool(quality.reason_codes) and all(
+                reason in _PORTRAIT_SOFT_QUALITY_REASONS
+                for reason in quality.reason_codes
+            )
             return finish(
-                quality.reason_codes,
+                (
+                    tuple(dict.fromkeys((*portrait_warnings, *quality.reason_codes)))
+                    if soft_quality
+                    else quality.reason_codes
+                ),
                 box=clipped_box,
                 landmarks=public_landmarks,
                 quality=quality,
@@ -492,11 +539,12 @@ class FacePipeline:
                 quarter_turns=quarter_turns,
                 corrected=corrected,
                 aligned=aligned,
+                suggestion=Suggestion.REVIEW if soft_quality else None,
             )
 
         if not extract_embedding:
             return finish(
-                (),
+                tuple(portrait_warnings),
                 box=clipped_box,
                 landmarks=public_landmarks,
                 quality=quality,
@@ -504,6 +552,7 @@ class FacePipeline:
                 quarter_turns=quarter_turns,
                 corrected=corrected,
                 aligned=aligned,
+                suggestion=Suggestion.REVIEW if portrait_warnings else None,
             )
 
         try:
@@ -589,6 +638,28 @@ def _box_touches_margin(
         or box.y1 <= margin
         or box.x2 >= width - margin
         or box.y2 >= height - margin
+    )
+
+
+def _box_inside_image(box: FaceBox, shape: tuple[int, ...]) -> bool:
+    """Boxes use exclusive right/bottom edges, so equality is in bounds."""
+
+    height, width = shape[:2]
+    return bool(
+        0.0 <= box.x1 < box.x2 <= width
+        and 0.0 <= box.y1 < box.y2 <= height
+    )
+
+
+def _landmarks_inside_image(landmarks: np.ndarray, shape: tuple[int, ...]) -> bool:
+    """Landmark coordinates must identify pixels, unlike box end edges."""
+
+    height, width = shape[:2]
+    return bool(
+        np.all(landmarks[:, 0] >= 0.0)
+        and np.all(landmarks[:, 0] < width)
+        and np.all(landmarks[:, 1] >= 0.0)
+        and np.all(landmarks[:, 1] < height)
     )
 
 

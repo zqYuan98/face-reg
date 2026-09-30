@@ -16,8 +16,8 @@ import {
 const CONTENT = Object.freeze({
   portrait: {
     eyebrow: "PORTRAIT GENERATION",
-    title: "人脸白底头肩照生成",
-    description: "上传一张清晰正面照，检查人像质量并生成标准白色背景头肩照。",
+    title: "白底人脸照生成",
+    description: "上传已选定目标的考勤照片，保留真实人脸并将背景换白；不强制完整头顶、颈部或肩部。质量提醒不等于出图失败。",
     action: "生成白底照",
   },
   witness: {
@@ -532,7 +532,7 @@ function renderDerivedImage(payload) {
   const blob = dataUrlToBlob(`data:${mime};base64,${payload.image_base64}`);
   state.derivedUrl = URL.createObjectURL(blob);
   nodes.derivedImage.src = state.derivedUrl;
-  nodes.derivedImage.alt = state.capabilityId === "portrait" ? "生成的白底头肩照" : "背景虚化后的见证照";
+  nodes.derivedImage.alt = state.capabilityId === "portrait" ? "生成的白底人脸照" : "背景虚化后的见证照";
   nodes.downloadResult.href = state.derivedUrl;
   nodes.downloadResult.download = state.capabilityId === "portrait" ? `portrait-result.${format === "png" ? "png" : "jpg"}` : "witness-blur-result.jpg";
   nodes.downloadResult.hidden = false;
@@ -548,7 +548,7 @@ function renderResult(payload, httpStatus, elapsedMs) {
     ...(httpStatus && (httpStatus < 200 || httpStatus >= 300) ? { success: false } : {}) };
   const view = getSuggestionView(interpretedResult, state.capabilityId);
   const suggestion = String(payload.suggestion ?? "ERROR").toUpperCase();
-  const displaySuggestion = presence ? view.decision
+  const displaySuggestion = presence ? view.decision : view.generated ? suggestion
     : suggestion === "PASS" && !view.canTreatAsPass ? "REVIEW" : ["PASS", "RECAPTURE", "REVIEW"].includes(suggestion) ? suggestion : "ERROR";
   if (nodes.resultSummary) nodes.resultSummary.dataset.suggestion = presence ? "REVIEW" : displaySuggestion;
   if (nodes.resultStatus) {

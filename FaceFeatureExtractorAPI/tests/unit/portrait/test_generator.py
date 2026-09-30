@@ -46,7 +46,11 @@ LANDMARKS = FaceLandmarks(
 
 def _template(**updates):
     template = load_config(PROJECT_ROOT / "config" / "algorithm.yaml").portrait_template
-    return template.model_copy(update=updates)
+    return template.model_copy(update={
+        "mode": "head_shoulders",
+        "version": "head-shoulders-480x640-v1",
+        **updates,
+    })
 
 
 def _image() -> np.ndarray:
@@ -139,8 +143,7 @@ def _runtime(
     template=None,
 ) -> PortraitGeneratorRuntime:
     config = load_config(PROJECT_ROOT / "config" / "algorithm.yaml")
-    if template is not None:
-        config = config.model_copy(update={"portrait_template": template})
+    config = config.model_copy(update={"portrait_template": template or _template()})
     return _bind_portrait_generator(
         face_pipeline=face_pipeline or FakeFacePipeline(),
         matting_runtime=matting or FakeMatting(alpha),

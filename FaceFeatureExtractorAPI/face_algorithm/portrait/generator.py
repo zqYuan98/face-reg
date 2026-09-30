@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -19,7 +19,7 @@ from face_algorithm.core.contracts import (
     validate_image_input,
 )
 from face_algorithm.core.pipeline import FaceQualityAnalysis
-from face_algorithm.portrait.contracts import PortraitResult
+from face_algorithm.portrait.contracts import PORTRAIT_SOFT_REASONS, PortraitResult
 from face_algorithm.portrait.runtime import build_portrait_matting_runtime
 from face_algorithm.portrait.template import (
     _PortraitGenerationError,
@@ -63,10 +63,15 @@ class PortraitGeneratorRuntime:
         matting_runtime: object,
         config: AlgorithmConfig,
     ) -> PortraitGeneratorRuntime:
-        analyze = getattr(face_pipeline, "analyze_quality", None)
+        analysis_method = (
+            "analyze_portrait_quality"
+            if config.portrait_template.mode == "face_archive"
+            else "analyze_quality"
+        )
+        analyze = getattr(face_pipeline, analysis_method, None)
         matte = getattr(matting_runtime, "matte", None)
         if not callable(analyze):
-            raise TypeError("face pipeline must provide analyze_quality")
+            raise TypeError(f"face pipeline must provide {analysis_method}")
         if not callable(matte):
             raise TypeError("matting runtime must provide matte")
         model_info = getattr(matting_runtime, "model_info", None)
@@ -160,15 +165,32 @@ class PortraitGeneratorRuntime:
                 reasons=(ReasonCode.INFERENCE_ERROR,),
             )
         rotation_quarter_turns = analysis.public.rotation_quarter_turns
-        if (
+        archive = self._template.mode == "face_archive"
+        quality_soft_reasons = PORTRAIT_SOFT_REASONS - {
+            ReasonCode.PORTRAIT_UPSCALE_LIMITED,
+        }
+        quality_reasons = analysis.public.reason_codes
+        soft_quality = (
+            archive
+            and bool(quality_reasons)
+            and set(quality_reasons).issubset(quality_soft_reasons)
+            and analysis.public.success
+        )
+        if not soft_quality and (
             analysis.public.suggestion is not Suggestion.PASS
             or not analysis.public.success
-            or analysis.public.reason_codes
+            or quality_reasons
         ):
             suggestion = analysis.public.suggestion
             if suggestion is Suggestion.PASS:
                 suggestion = Suggestion.REVIEW
-            reasons = analysis.public.reason_codes or (ReasonCode.INFERENCE_ERROR,)
+            reasons = quality_reasons or (ReasonCode.INFERENCE_ERROR,)
+            if archive:
+                hard = tuple(reason for reason in reasons if reason not in PORTRAIT_SOFT_REASONS)
+                soft = tuple(reason for reason in reasons if reason in quality_soft_reasons)
+                # A soft-only failure indicates an incomplete quality operation,
+                # not permission to emit a partial derived image.
+                reasons = (hard or (ReasonCode.INFERENCE_ERROR,)) + soft
             return finish(suggestion=suggestion, reasons=reasons)
         if (
             analysis.corrected_image is None
@@ -188,7 +210,7 @@ class PortraitGeneratorRuntime:
                 reasons=(ReasonCode.INFERENCE_ERROR,),
             )
 
-        required_face_height = int(
+        required_face_height = 0 if archive else int(
             np.ceil(
                 float(self._template.output_height)
                 * float(self._template.face_height_ratio)
@@ -245,8 +267,11 @@ class PortraitGeneratorRuntime:
                 reasons=(ReasonCode.INFERENCE_ERROR,),
             )
         return finish(
-            suggestion=Suggestion.PASS,
-            reasons=(),
+            suggestion=(
+                Suggestion.REVIEW
+                if quality_reasons or generated.reason_codes else Suggestion.PASS
+            ),
+            reasons=tuple(dict.fromkeys((*quality_reasons, *generated.reason_codes))),
             generated=generated,
         )
 

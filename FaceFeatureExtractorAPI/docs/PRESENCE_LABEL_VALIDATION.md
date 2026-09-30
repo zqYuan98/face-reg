@@ -1,10 +1,15 @@
 # Presence 匿名标签与试用阈值验证
 
-适用已部署 API `2.2.0`。2026-09-28 服务器 37 的 `18002/18003` 已更新且均 healthy，
-发布代码提交为 `d78e723b8fb8737b09e12859e57aa9856a640db6`；部署证据与回滚入口见
-[本轮发布验收记录](reports/2026-09-28-presence-best-effort-release.md)。37 随后按用户指定仅将
+本文方法适用于 2.3.0 沿用的 presence 契约，不因白底人脸照策略变化而改变标签或阈值规则。
+2026-09-30 源码处于 2.3.0 构建/候选验证阶段；本次部署状态及回滚入口见
+[白底人脸照发布记录](reports/2026-09-30-attendance-face-portrait-release.md)，本文不代表已上线。
+
+升级前基线：2026-09-28 服务器 37 的 `18002/18003` 发布 API `2.2.0`，当时均 healthy，
+发布代码为 `d78e723b8fb8737b09e12859e57aa9856a640db6`；该次证据见
+[2.2.0 历史发布记录](reports/2026-09-28-presence-best-effort-release.md)。37 在同日后续按用户指定仅将
 presence 运行配置设为试用阈值 `0.5`（`configured`），返回 `CONFIGURED_UNVALIDATED`，业务仍需人工 REVIEW；
-源码默认无阈值、代码版本、images/quick/full、18001 和测试台不变。详见
+该次阈值调整未改源码默认无阈值、代码版本、images/quick/full、18001 或测试台。
+本次 2.3.0 升级保留 `0.5` 及原阈值 ID。配置依据见
 [0.5 试用阈值记录](reports/2026-09-28-presence-threshold-050.md)。
 本文提供离线标注/汇总方法；用户指定试用点不代表人工标签已齐、生产阈值已验证或识别精度已验证。
 完整响应契约见 [API 联调文档](TASK-2026-001-API-DEBUGGING.md)。

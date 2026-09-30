@@ -1,4 +1,4 @@
-"""Local head-and-shoulder completeness checks for portrait generation."""
+"""Measure local visible head/shoulders and apply the selected portrait policy."""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ class PortraitSubjectValidation:
     shoulder_left_coverage: float
     shoulder_right_coverage: float
     shoulder_valid_row_ratio: float
+    reason_codes: tuple[ReasonCode, ...] = ()
 
 
 class PortraitSubjectValidationError(ValueError):
@@ -58,7 +59,7 @@ def validate_portrait_subject(
     face: FaceBox,
     template: Any,
 ) -> PortraitSubjectValidation:
-    """Validate only the source regions required for a head-shoulders output.
+    """Measure local subject regions, requiring completeness only in strict mode.
 
     ``core`` is the selected hard person component. Sparse matte tails and
     pixels outside the local head/shoulder ROIs deliberately do not affect the
@@ -74,6 +75,8 @@ def validate_portrait_subject(
         raise TypeError("core must be a non-empty 2D array and face a FaceBox")
     hard = np.asarray(core > 0, dtype=np.uint8)
     height, width = hard.shape
+    archive = getattr(template, "mode", "head_shoulders") == "face_archive"
+    reasons: tuple[ReasonCode, ...] = ()
 
     head_expansion = _setting(template, "head_roi_expansion_ratio", 0.25)
     head_x1 = max(0, min(width, int(np.floor(face.x1 - head_expansion * face.width))))
@@ -124,16 +127,16 @@ def validate_portrait_subject(
         and top_edge_core_coverage >= min_top_coverage
         and available_headroom < required_headroom
     ):
-        raise PortraitSubjectValidationError(ReasonCode.SUBJECT_CROPPED)
+        if not archive:
+            raise PortraitSubjectValidationError(ReasonCode.SUBJECT_CROPPED)
+        reasons = (ReasonCode.PORTRAIT_SOURCE_LIMITED,)
 
     shoulder_depth_ratio = _setting(template, "min_shoulder_depth_ratio", 0.60)
     shoulder_y1 = max(0, min(height, int(np.floor(face.y2))))
     required_shoulder_y2 = face.y2 + shoulder_depth_ratio * face.height
-    # Do not shrink the required shoulder band to the source image and then
-    # recompute coverage over the shorter denominator.  That would let a face
-    # near the bottom edge pass even though most required shoulder depth is
-    # outside the photograph.
-    if required_shoulder_y2 > float(height):
+    # Strict mode must not accept a shortened shoulder band. Archive mode
+    # measures only the visible region and never invents missing shoulders.
+    if not archive and required_shoulder_y2 > float(height):
         raise PortraitSubjectValidationError(ReasonCode.SHOULDERS_NOT_VISIBLE)
     shoulder_y2 = max(0, min(height, int(np.ceil(required_shoulder_y2))))
     shoulder_width = _setting(template, "shoulder_roi_width_ratio", 1.30) * face.width
@@ -146,7 +149,7 @@ def validate_portrait_subject(
         0,
         min(width, int(np.ceil(face_center_x + shoulder_width / 2.0))),
     )
-    if shoulder_y2 <= shoulder_y1 or shoulder_x2 - shoulder_x1 < 2:
+    if not archive and (shoulder_y2 <= shoulder_y1 or shoulder_x2 - shoulder_x1 < 2):
         raise PortraitSubjectValidationError(ReasonCode.SHOULDERS_NOT_VISIBLE)
 
     shoulder = hard[shoulder_y1:shoulder_y2, shoulder_x1:shoulder_x2]
@@ -156,18 +159,21 @@ def validate_portrait_subject(
     shoulder_band_coverage = _coverage(shoulder)
     shoulder_left_coverage = _coverage(left)
     shoulder_right_coverage = _coverage(right)
-    row_coverage = np.count_nonzero(shoulder, axis=1) / float(shoulder.shape[1])
+    row_coverage = (
+        np.count_nonzero(shoulder, axis=1) / float(shoulder.shape[1])
+        if shoulder.shape[1] else np.zeros(shoulder.shape[0])
+    )
     shoulder_valid_row_ratio = float(
         np.count_nonzero(
             row_coverage
             >= _setting(template, "min_shoulder_row_coverage", 0.25)
         )
-    ) / float(shoulder.shape[0])
+    ) / float(shoulder.shape[0]) if shoulder.shape[0] else 0.0
 
     min_band = _setting(template, "min_shoulder_band_coverage", 0.35)
     min_half = _setting(template, "min_shoulder_half_coverage", 0.20)
     min_valid_rows = _setting(template, "min_shoulder_valid_row_ratio", 0.60)
-    if (
+    if not archive and (
         shoulder_band_coverage < min_band
         or shoulder_left_coverage < min_half
         or shoulder_right_coverage < min_half
@@ -193,4 +199,5 @@ def validate_portrait_subject(
         shoulder_left_coverage=shoulder_left_coverage,
         shoulder_right_coverage=shoulder_right_coverage,
         shoulder_valid_row_ratio=shoulder_valid_row_ratio,
+        reason_codes=reasons,
     )

@@ -4,13 +4,18 @@
 [TASK-2026-001 新算法 API 联调文档](TASK-2026-001-API-DEBUGGING.md)。本文侧重安全边界、
 部署约束和生产接入责任。
 
-版本状态（2026-09-28）：本文描述已部署 API `2.2.0` 契约。
-服务器 37 的 `http://<server-37>:18002` 与测试台 `http://<server-37>:18003` 已更新且均 healthy，
+源码契约为 API `2.3.0`（2026-09-30 构建/候选验证阶段，不代表已上线）：新增白底人脸照策略，
+请求和响应字段不变，仅新增两种原因枚举；成功有图可带 REVIEW 提醒。
+发布实时状态及回滚入口见 [白底人脸照发布记录](reports/2026-09-30-attendance-face-portrait-release.md)。
+
+升级前基线（2026-09-28）：API `2.2.0`。
+服务器 37 的 `http://<server-37>:18002` 与测试台 `http://<server-37>:18003` 在该次发布后均 healthy，
 发布代码提交为 `d78e723b8fb8737b09e12859e57aa9856a640db6`，历史 `18001` 未改动。
-部署证据和当前回滚入口见 [本轮发布验收记录](reports/2026-09-28-presence-best-effort-release.md)。
-37 随后按用户指定仅将 presence 运行配置设为 `configured`、试用阈值 `0.5`，返回
+该次部署证据与历史回滚记录见 [2.2.0 历史发布记录](reports/2026-09-28-presence-best-effort-release.md)。
+37 在 2026-09-28 随后按用户指定仅将 presence 运行配置设为 `configured`、试用阈值 `0.5`，返回
 `CONFIGURED_UNVALIDATED`，业务仍需人工 REVIEW；源码默认无阈值、代码版本、images/quick/full、
-18001 和测试台均不变。配置 ID、验证和回退见 [0.5 试用阈值记录](reports/2026-09-28-presence-threshold-050.md)。
+18001 和测试台在该次阈值调整中均不变。2.3.0 升级保留该阈值与 ID；配置依据见
+[0.5 试用阈值记录](reports/2026-09-28-presence-threshold-050.md)。
 功能上线或指定试用阈值不表示人工标签、生产阈值或识别精度已验收。
 
 ## 1. 边界与责任
@@ -36,7 +41,7 @@ HTTP 长连接。算法建议不等于合同审批结果。
 | `GET /health/live` | 进程事件循环可响应，不代表模型可用 | 200 |
 | `GET /health/ready` | 必需模型完成哈希、契约及 Provider 检查；artifact 模式还完成签名校准绑定 | ready 时 200，否则 503 |
 | `GET /health` | 兼容别名，语义同 ready | 200/503 |
-| `GET /openapi.json` | 类型化请求/响应与错误契约；线上已为 2.2.0，接入须重新导入并核对 info.version | 200 |
+| `GET /openapi.json` | 类型化请求/响应与错误契约；本次期望 2.3.0，接入须重新导入并核对 info.version | 200 |
 
 `degraded + ready=true` 表示核心人脸能力可用、某个可选能力（例如 MODNet）不可用；
 调用不可用能力仍返回 503，不能只看 liveness 接流量。
@@ -49,7 +54,7 @@ presence 对应 `capabilities.video_presence`；quick/full 共用 `video_verific
 
 | 路由 | 字段 | 截止时间 | 说明 |
 |---|---|---:|---|
-| `POST /api/v2/portrait/generate` | `image` | 30 秒 | 生成白底头肩照，成功响应含派生图 `image_base64` |
+| `POST /api/v2/portrait/generate` | `image` | 30 秒 | 生成白底人脸照，不强制肩部；成功含 `image_base64`，有质量提醒时仍成功并为 REVIEW |
 | `POST /api/v2/witness/blur-background` | `image` | 30 秒 | 人物优先保持清晰、可信证卡可选增强、虚化背景，成功响应含 JPEG 派生图 `image_base64` |
 | `POST /api/v2/verify/images` | `reference_image`, `probe_image` | 30 秒 | 工资卡见证照与入场照 1:1 |
 | `POST /api/v2/verify/video/quick` | `reference_image`, `video` | 60 秒 | 抽样持续一致性检查，不是目标出现 |
@@ -91,7 +96,7 @@ processing_time_ms,trace_id`。新增 `mode=presence`、`decision`、可空 `fou
 完整字段、三个合法 synthetic-only JSON、curl 与 Python 调用见联调文档第 8A/13.6 节；
 不返回任何原始帧、embedding、路径或内部人脸对象。
 
-2.2.0 presence 服务端显式 `configured` 时返回 `CONFIGURED_UNVALIDATED`，完整成功扫描、
+沿用 2.2.0 presence 契约：服务端显式 `configured` 时返回 `CONFIGURED_UNVALIDATED`，完整成功扫描、
 有比对且分数达到阈值可为 `FOUND/true`；全部低于阈值且没有候选截断或局部失败才为
 `NOT_FOUND_IN_SCAN/false`。其余为 `INCONCLUSIVE/null`，尤其扫描不完整时即便已有高分也不能
 给出肯定/否定结论。普通解码/推理失败的算法 DTO 可保留 partial 数字证据，并为
@@ -111,6 +116,13 @@ processing_time_ms,trace_id`。新增 `mode=presence`、`decision`、可空 `fou
 `liveness_evaluated=false`：未执行且本接口不要求，不是失败门禁；无活体/反翻拍或真人在场保证。
 
 ## 4. 兼容路由与安全
+
+2.3.0 portrait 保留原路由、multipart `image` 和全部响应字段，仅新增
+`PORTRAIT_SOURCE_LIMITED` / `PORTRAIT_UPSCALE_LIMITED` 两种提醒枚举。
+业务根据 `success=true && image_base64` 判断出图，不能只接受 PASS；REVIEW 可表示已出图但有质量提醒。
+`PASS` 仅表示图像处理完成，不是身份通过。归档由业务在考勤后触发，保存原始依据、选择目标、关联人员和幂等重试；
+生成失败不推翻已有考勤。仓库交付配置显式设为 `face_archive`，不强制头顶/颈部/肩部，保留真实像素和有效脸部校验；
+旧 YAML 缺 mode 则保持 `head_shoulders`，必须显式迁移。更多状态及示例见联调文档第 4 节。
 
 - `POST /api/detect_face` 仅在 `legacy.detect_face_enabled=true` 时注册（候选默认 true），保持旧字段：`image`、可选 `expand_scale`；该值必须有限且位于
   `[0, 2]`，接口不返回特征。
@@ -133,7 +145,7 @@ processing_time_ms,trace_id`。新增 `mode=presence`、`decision`、可空 `fou
 
 | HTTP | 典型原因码 | 处理 |
 |---:|---|---|
-| 200 | `NO_FACE`, `MULTIPLE_FACES`、旧接口 `THRESHOLD_UNCALIBRATED`、presence `THRESHOLD_NOT_CONFIGURED`、预算/局部失败原因 | presence 读取 decision/found，其余读取 suggestion |
+| 200 | `NO_FACE`, `MULTIPLE_FACES`、旧接口 `THRESHOLD_UNCALIBRATED`、presence `THRESHOLD_NOT_CONFIGURED`、预算/局部失败原因 | presence 读取 decision/found；portrait 先看 success 与 image_base64，再看提醒；其余读取 suggestion |
 | 400 | `INVALID_IMAGE`, `UNSUPPORTED_FORMAT`, `INVALID_VIDEO` | 修正上传 |
 | 403 | `ACCESS_DENIED` | 检查 legacy 网关、令牌和代理链 |
 | 413 | `IMAGE_TOO_LARGE`, `VIDEO_TOO_LARGE`, `VIDEO_TOO_LONG`, `VIDEO_SCAN_LIMIT_REACHED` | presence 输入解码预算超限或上传资源超限，按采集规格重传 |

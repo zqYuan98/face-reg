@@ -15,8 +15,10 @@ from face_algorithm.schemas import FaceBox, ReasonCode
 FACE = FaceBox(x1=50.0, y1=40.0, x2=150.0, y2=100.0, confidence=0.99)
 
 
-def _settings(**updates: float | int) -> SimpleNamespace:
-    values: dict[str, float | int] = {
+def _settings(**updates: float | int | str) -> SimpleNamespace:
+    values: dict[str, float | int | str] = {
+        "mode": "head_shoulders",
+        "version": "head-shoulders-480x640-v1",
         "alpha_threshold": 0.50,
         "min_shoulder_depth_ratio": 0.60,
         "min_shoulder_band_coverage": 0.35,

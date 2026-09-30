@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from face_algorithm.runtime.model_registry import ModelUnavailableError
 from face_algorithm.runtime.calibration import CalibrationLoadError
-from face_algorithm.schemas import ImageVerificationResult, ReasonCode
+from face_algorithm.schemas import ImageVerificationResult, ReasonCode, Suggestion
 
 from .conftest import (
     FakeServices,
@@ -274,6 +274,26 @@ def test_witness_route_returns_only_encoded_blurred_image_and_safe_summary(
     assert len(body["card_regions"]) == 1
     assert body["coordinate_space"] == "original_image"
     assert "/api/v2/witness/blur-background" in paths
+    _assert_no_private_payload(body)
+
+
+def test_portrait_review_success_keeps_encoded_image_and_existing_fields(
+    algorithm_config, fake_services, monkeypatch,
+) -> None:
+    result = replace(portrait_result(np.full((12, 10, 3), 255, dtype=np.uint8)),
+                     suggestion=Suggestion.REVIEW, reason_codes=(ReasonCode.TOO_DARK,))
+    monkeypatch.setattr(fake_services, "generate_portrait", lambda *args, **kwargs: result)
+    with _client(algorithm_config, fake_services) as client:
+        response = client.post("/api/v2/portrait/generate", files={"image": _image_file()})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True and body["suggestion"] == "REVIEW"
+    assert body["reason_codes"] == ["TOO_DARK"]
+    decoded = cv2.imdecode(np.frombuffer(base64.b64decode(body["image_base64"], validate=True),
+                                        dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert decoded.shape == (12, 10, 3)
+    assert "quality_warnings" not in body
+    assert {"shoulder_depth_ratio", "shoulder_band_coverage"} <= body["matting_quality"].keys()
     _assert_no_private_payload(body)
 
 

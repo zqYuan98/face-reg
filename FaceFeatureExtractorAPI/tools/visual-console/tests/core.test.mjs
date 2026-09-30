@@ -21,6 +21,35 @@ import {
 
 const MIB = 1024 * 1024;
 
+test("portrait success with warnings remains a generated image, not identity approval", () => {
+  const result = { success: true, suggestion: "REVIEW", reason_codes: ["TOO_DARK", "PORTRAIT_SOURCE_LIMITED"],
+    image_base64: "/9j/", output_format: "jpeg" };
+  const view = getSuggestionView(result, "portrait");
+  assert.equal(view.label, "已生成，存在质量提醒");
+  assert.equal(view.generated, true);
+  assert.equal(view.canTreatAsPass, false);
+  assert.doesNotMatch(view.message, /标定|可靠通过|重新采集/);
+  assert.equal(buildResultDetails("portrait", result).find(item => item.key === "suggestion").value, view.label);
+  assert.equal(getCapability("portrait").label, "白底人脸照");
+  assert.deepEqual(getCapability("portrait").fields.map(field => field.name), ["image"]);
+  assert.match(translateReasons(["PORTRAIT_SOURCE_LIMITED", "PORTRAIT_UPSCALE_LIMITED"]).join(" "), /源图.*放大/);
+});
+
+test("portrait clean success means image processing only; invalid warning results fail closed", () => {
+  const clean = { success: true, suggestion: "PASS", reason_codes: [], image_base64: "/9j/" };
+  assert.equal(getSuggestionView(clean, "portrait").label, "白底人脸照已生成");
+  assert.equal(getSuggestionView(clean, "portrait").canTreatAsPass, false);
+  for (const invalid of [
+    { ...clean, image_base64: null }, { ...clean, suggestion: "REVIEW" },
+    { ...clean, suggestion: "REVIEW", reason_codes: ["FACE_CROPPED"] },
+    { ...clean, reason_codes: ["TOO_DARK"] },
+  ]) assert.notEqual(getSuggestionView(invalid, "portrait").generated, true);
+  assert.notEqual(getSuggestionView({ ...clean, success: false, suggestion: "RECAPTURE",
+    reason_codes: ["MATTING_FAILED"], image_base64: null }, "portrait").generated, true);
+  assert.equal(getSuggestionView({ ...clean, suggestion: "REVIEW", reason_codes: ["TOO_DARK"] }, "witness").label,
+    "需要人工复核");
+});
+
 function media(name, size, type, metadata = {}) {
   return {
     file: { name, size, type },

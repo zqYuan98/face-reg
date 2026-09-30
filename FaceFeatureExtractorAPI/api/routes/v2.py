@@ -36,7 +36,17 @@ def create_v2_router(
         config.witness.max_witness_pixels,
     )
 
-    @router.post("/portrait/generate", operation_id="generate_standard_portrait")
+    @router.post(
+        "/portrait/generate", operation_id="generate_standard_portrait",
+        summary="生成考勤归档用白底人脸照",
+        description=(
+            "上传业务已选定的目标照片，使用真实像素抠图换白底；默认不强制完整头顶、颈部或肩部。"
+            "成功时 success=true 并返回 image_base64；无质量提醒为 PASS，带质量提醒为 REVIEW，"
+            "提醒保存在 reason_codes，不能仅凭 REVIEW 判断生成失败。"
+            "不可用人脸、目标歧义或抠图失败不输出图片。PASS 仅表示图像处理成功，不表示身份核验通过。"
+            "接口仍只接收 multipart image；模式由服务端配置，旧配置缺省保持严格头肩模式。"
+        ),
+    )
     async def generate_portrait(
         request: Request,
         image: UploadFile = File(...),

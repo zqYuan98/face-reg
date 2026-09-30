@@ -241,6 +241,7 @@ class QualityProfiles(_StrictModel):
 
 
 class PortraitTemplate(_StrictModel):
+    mode: Literal["face_archive", "head_shoulders"] = "head_shoulders"
     version: str = Field(min_length=1)
     output_width: int = Field(gt=0, le=8192)
     output_height: int = Field(gt=0, le=8192)

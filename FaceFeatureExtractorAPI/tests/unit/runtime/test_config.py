@@ -502,6 +502,45 @@ def test_portrait_geometry_and_alpha_quality_limits_are_explicit() -> None:
     assert not hasattr(template, "shoulder_margin_ratio")
 
 
+def test_portrait_delivery_uses_explicit_face_archive_mode() -> None:
+    template = load_config(DEFAULT_CONFIG).portrait_template
+
+    assert getattr(template, "mode", None) == "face_archive"
+    assert template.version == "face-archive-480x640-v1"
+
+
+def test_legacy_portrait_yaml_without_mode_keeps_head_shoulders(tmp_path: Path) -> None:
+    payload = deepcopy(_default_payload())
+    payload["portrait_template"].pop("mode", None)
+    payload["portrait_template"]["version"] = "head-shoulders-480x640-v1"
+
+    config = load_config(_write_config(tmp_path / "legacy-portrait.yaml", payload))
+
+    assert getattr(config.portrait_template, "mode", None) == "head_shoulders"
+    assert config.portrait_template.version == "head-shoulders-480x640-v1"
+
+
+@pytest.mark.parametrize("mode", ["head_shoulders", "face_archive"])
+def test_portrait_mode_accepts_only_explicit_supported_strategies(
+    tmp_path: Path, mode: str,
+) -> None:
+    payload = deepcopy(_default_payload())
+    payload["portrait_template"]["mode"] = mode
+
+    config = load_config(_write_config(tmp_path / "portrait-mode.yaml", payload))
+
+    assert config.portrait_template.mode == mode
+
+
+@pytest.mark.parametrize("mode", ["portrait", "FACE_ARCHIVE", "", None, 1])
+def test_portrait_mode_rejects_unknown_values(tmp_path: Path, mode: object) -> None:
+    payload = deepcopy(_default_payload())
+    payload["portrait_template"]["mode"] = mode
+
+    with pytest.raises(ValidationError):
+        load_config(_write_config(tmp_path / "invalid-portrait-mode.yaml", payload))
+
+
 @pytest.mark.parametrize(
     ("field", "invalid_value"),
     [

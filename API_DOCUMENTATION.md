@@ -185,12 +185,15 @@
 
 ## 2. 当前算法服务（模块化 v2）
 
-本节对应已部署的 API 2.2.0。2026-09-28 服务器 37 的 `18002/18003` 已更新且均 healthy，
-发布代码提交为 `d78e723b8fb8737b09e12859e57aa9856a640db6`。
-本轮发布测试和回滚见 [发布验收记录](FaceFeatureExtractorAPI/docs/reports/2026-09-28-presence-best-effort-release.md)；
-37 的 presence 运行配置随后已按用户指定设为试用阈值 `0.5`（`configured`），返回
+本节对应 API `2.3.0` 源码契约（2026-09-30 构建/候选验证阶段，尚不表示已上线）。
+本次部署状态、验收及回滚入口以 [白底人脸照发布记录](FaceFeatureExtractorAPI/docs/reports/2026-09-30-attendance-face-portrait-release.md) 为准。
+升级前基线：2026-09-28 服务器 37 的 `18002/18003` 发布 `2.2.0`，当时均 healthy，
+发布代码为 `d78e723b8fb8737b09e12859e57aa9856a640db6`；
+该次证据见 [2.2.0 历史发布记录](FaceFeatureExtractorAPI/docs/reports/2026-09-28-presence-best-effort-release.md)。
+37 在同日后续按用户指定将 presence 运行配置设为试用阈值 `0.5`（`configured`），返回
 `CONFIGURED_UNVALIDATED`，业务仍需人工 REVIEW；不表示生产精度已验证。
-本次只改 presence 运行配置，源码默认仍无阈值，images/quick/full、18001 和测试台未改动；
+该次阈值调整只改 presence 运行配置，未改源码默认无阈值配置、images/quick/full、18001 或测试台；
+本次 2.3.0 升级保留视频 `0.5` 与原阈值 ID，
 详见 [0.5 试用阈值记录](FaceFeatureExtractorAPI/docs/reports/2026-09-28-presence-threshold-050.md)。
 内网 Base URL：`http://<server-37>:18002`；人工测试台：`http://<server-37>:18003`。
 新开发不要调用历史服务 `18001`，本次未改动该服务。算法不访问业务库、不保存合同状态或持久化客户媒体。
@@ -203,7 +206,7 @@
 | `GET /health/ready` | 无 | 200/503，模型与五个能力 readiness，需检查目标能力 |
 | `GET /health` | 无 | ready 的兼容别名，不是仅检查存活 |
 | `GET /openapi.json` | 无 | 类型化请求/响应契约；`/docs`、`/redoc` 关闭 |
-| `POST /api/v2/portrait/generate` | multipart `image` | 白底头肩照，30 秒 |
+| `POST /api/v2/portrait/generate` | multipart `image` | 白底人脸照，30 秒；成功图片可带 REVIEW 质量提醒 |
 | `POST /api/v2/witness/blur-background` | multipart `image` | 人物优先背景虚化，30 秒 |
 | `POST /api/v2/verify/images` | multipart `reference_image,probe_image` | 两图比对，30 秒 |
 | `POST /api/v2/verify/video/quick` | multipart `reference_image,video` | 持续身份一致性快检，60 秒 |
@@ -215,14 +218,19 @@
 ### 2.2 结果、资源与安全边界
 
 先检查 HTTP；200 不等于身份通过。旧图片/quick/full 看标定后的 suggestion；presence 的
-匹配结论只读 `decision/found`，不把 `success` 或分数当同一人结论。2.2.0 presence 服务端显式
+匹配结论只读 `decision/found`，不把 `success` 或分数当同一人结论。沿用 2.2.0 presence 契约：服务端显式
 `configured` 阈值与 ID 返回 `CONFIGURED_UNVALIDATED`，可产生 `FOUND/true`、
 `NOT_FOUND_IN_SCAN/false`、`INCONCLUSIVE/null`；使用源码默认无阈值配置时仍计算证据，附
 `THRESHOLD_NOT_CONFIGURED`，判定为 INCONCLUSIVE/null。没有默认身份阈值，请求不接受调用方阈值。
 扫描不完整、参考无效、无可比脸或全局失败都不给肯定/否定结果；低于阈值但有候选截断/局部失败
 也为 null。试用 `suggestion=REVIEW` 不能遮盖 FOUND，更不能转成业务自动 PASS。
 
-暗/糊/侧脸/小脸/贴边为软提示；能形成有效 1024 维特征就比对，视频 64px 不是硬下限。
+2.3.0 portrait 的请求 `image` 和全部响应字段保持不变，仅新增 `PORTRAIT_SOURCE_LIMITED` /
+`PORTRAIT_UPSCALE_LIMITED` 原因枚举。以 `success=true && image_base64` 判断出图；成功 `REVIEW`
+仍显示/下载图片并展示 `reason_codes`，不表示身份或考勤通过。仓库显式配置 `face_archive`，
+不强制完整头顶/颈部/肩部；旧 YAML 缺 mode 保持 `head_shoulders`，上线须显式迁移。
+
+presence 的暗/糊/侧脸/小脸/贴边为软提示；能形成有效 1024 维特征就比对，视频 64px 不是硬下限。
 默认 0.5 秒基础采样、每窗口最多 2 帧按需补采，总 1200 分析帧预算包含首尾和补采；长视频
 必要时增大实际基础间隔。响应区分比较状态、请求/实际间隔、基础/补采/成功与失败候选计数、
 阈值/ID/指纹及每帧 candidate_index/quality_warnings。输入资源超限仍为 400/413/504。

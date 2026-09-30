@@ -1,16 +1,21 @@
 # 人脸算法可视化测试台
 
+2026-09-30 源码已同步 API `2.3.0` 白底人脸照，处于构建/候选验证阶段，不表示已完成线上切换。
+不强制肩部，按 `success=true && image_base64` 判断出图；成功 REVIEW 显示质量提醒但保留图片与下载。
+部署状态以 [白底人脸照发布记录](../../docs/reports/2026-09-30-attendance-face-portrait-release.md) 为准；下述为升级前基线。
+
 这是独立于 `face_algorithm` 和 FastAPI 适配层的内网测试工具。浏览器只访问本测试台；
 测试台通过固定白名单把六条公开 v2 请求流式转发给算法服务。服务端仅使用 Python
 标准库，不写入上传媒体，也不接受浏览器指定的上游地址。
 
-测试台已按 API `2.2.0` presence 契约同步并部署。2026-09-28 算法入口
-`http://<server-37>:18002` 与测试台 `http://<server-37>:18003` 已更新且均 healthy，
+升级前基线：测试台在 2026-09-28 按 API `2.2.0` presence 契约发布，当时算法入口
+`http://<server-37>:18002` 与测试台 `http://<server-37>:18003` 均 healthy，
 发布代码提交为 `d78e723b8fb8737b09e12859e57aa9856a640db6`；发布证据、浏览器验收状态与回滚入口见
-[本轮发布验收记录](../../docs/reports/2026-09-28-presence-best-effort-release.md)。
+[2.2.0 历史发布记录](../../docs/reports/2026-09-28-presence-best-effort-release.md)。
 37 的 presence 上游运行配置随后已按用户指定设为试用阈值 `0.5`（`configured`），返回
 `CONFIGURED_UNVALIDATED`，业务仍需人工 REVIEW；显示匹配结论不等于生产精度已经验收。
-本次未改测试台、18001 或 images/quick/full，源码默认无阈值不变；详见
+该次阈值调整未改测试台、18001 或 images/quick/full，源码默认无阈值不变。
+本次 2.3.0 更新白底人脸照展示，保留 presence `0.5` 与原阈值 ID；配置依据见
 [0.5 试用阈值记录](../../docs/reports/2026-09-28-presence-threshold-050.md)。
 完整请求响应见 [API 联调文档](../../docs/TASK-2026-001-API-DEBUGGING.md)。
 
@@ -78,7 +83,7 @@ python3 server.py
 
 - “视频目标出现”使用 `video_presence` readiness，提交 `reference_image + video`，检查目标
   候选是否曾出现在采样范围；quick/full 保留，仍是持续身份一致性，不是此需求。
-- 2.2.0 presence 以 `decision/found` 为主标题：`FOUND/true`、`NOT_FOUND_IN_SCAN/false`、
+- 沿用 2.2.0 presence 契约，以 `decision/found` 为主标题：`FOUND/true`、`NOT_FOUND_IN_SCAN/false`、
   `INCONCLUSIVE/null`。正常试用结果 `suggestion=REVIEW` 是次级业务审核提示，不覆盖 FOUND，
   也不能把 FOUND 渲染成业务自动 PASS。
 - 服务端 `configured` 返回 `CONFIGURED_UNVALIDATED`、显式阈值/ID 与策略指纹；页面显示

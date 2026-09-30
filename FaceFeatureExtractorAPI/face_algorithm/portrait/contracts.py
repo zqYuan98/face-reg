@@ -1,4 +1,4 @@
-"""Privacy-safe contracts for derived head-and-shoulders portraits."""
+"""Privacy-safe contracts for derived white-background portraits."""
 
 from __future__ import annotations
 
@@ -15,6 +15,22 @@ __all__ = [
     "PortraitPlacement",
     "PortraitResult",
 ]
+
+PORTRAIT_SOFT_REASONS = frozenset({
+    ReasonCode.TOO_DARK,
+    ReasonCode.TOO_BRIGHT,
+    ReasonCode.TOO_BLURRY,
+    ReasonCode.BAD_POSE,
+    ReasonCode.PORTRAIT_SOURCE_LIMITED,
+    ReasonCode.PORTRAIT_UPSCALE_LIMITED,
+})
+
+# The older quality codes remain valid recapture reasons in strict mode.
+# These two new codes, unlike those codes, are never a reason to fail alone.
+_ARCHIVE_ONLY_WARNINGS = frozenset({
+    ReasonCode.PORTRAIT_SOURCE_LIMITED,
+    ReasonCode.PORTRAIT_UPSCALE_LIMITED,
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,15 +92,34 @@ class PortraitResult:
             raise ValueError("portrait output dimensions must be positive")
         if self.success:
             if (
-                self.suggestion is not Suggestion.PASS
-                or self.reason_codes
-                or self.image is None
+                self.image is None
                 or self.placement is None
                 or self.matting_quality is None
             ):
                 raise ValueError("successful portrait result is incomplete")
-        elif self.suggestion is Suggestion.PASS or not self.reason_codes:
-            raise ValueError("failed portrait result requires a reason and action")
+            expected_suggestion = (
+                Suggestion.REVIEW if self.reason_codes else Suggestion.PASS
+            )
+            if (
+                self.suggestion is not expected_suggestion
+                or not set(self.reason_codes).issubset(PORTRAIT_SOFT_REASONS)
+            ):
+                raise ValueError("successful portrait result has invalid quality warnings")
+        elif (
+            self.suggestion is Suggestion.PASS
+            or not self.reason_codes
+            or (
+                set(self.reason_codes).issubset(PORTRAIT_SOFT_REASONS)
+                and not (
+                    self.suggestion is Suggestion.RECAPTURE
+                    and set(self.reason_codes).isdisjoint(_ARCHIVE_ONLY_WARNINGS)
+                )
+            )
+            or self.image is not None
+            or self.placement is not None
+            or self.matting_quality is not None
+        ):
+            raise ValueError("failed portrait result requires a rejection reason and no derived artifacts")
         if self.image is not None and not (
             isinstance(self.image, np.ndarray)
             and self.image.dtype == np.uint8

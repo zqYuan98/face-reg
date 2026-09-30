@@ -32,6 +32,7 @@ class _GeneratedPortrait:
     image: np.ndarray = field(repr=False, compare=False)
     placement: PortraitPlacement
     matting_quality: PortraitMattingQuality
+    reason_codes: tuple[ReasonCode, ...] = ()
 
 
 def _generate_portrait_pixels(
@@ -42,14 +43,21 @@ def _generate_portrait_pixels(
     template: Any,
 ) -> _GeneratedPortrait:
     source = np.ascontiguousarray(image.copy())
-    cleaned, quality, bounds = _select_subject_matte(matte, face, template)
-    placement = _compute_placement(face, landmarks, template)
+    cleaned, quality, bounds, reasons = _select_subject_matte(matte, face, template)
+    placement = _compute_placement(face, landmarks, template, bounds)
     _validate_placed_geometry(bounds, face, placement, template)
+    if (
+        template.mode == "face_archive"
+        and placement.scale + 1e-9
+        < float(template.output_height) * float(template.face_height_ratio) / face.height
+    ):
+        reasons += (ReasonCode.PORTRAIT_UPSCALE_LIMITED,)
     output = _composite_on_background(source, cleaned, placement, template)
     return _GeneratedPortrait(
         image=output,
         placement=placement,
         matting_quality=quality,
+        reason_codes=reasons,
     )
 
 
@@ -68,7 +76,10 @@ def _select_subject_matte(
     matte: np.ndarray,
     face: FaceBox,
     template: Any,
-) -> tuple[np.ndarray, PortraitMattingQuality, tuple[int, int, int, int]]:
+) -> tuple[
+    np.ndarray, PortraitMattingQuality, tuple[int, int, int, int],
+    tuple[ReasonCode, ...],
+]:
     if not (
         isinstance(matte, np.ndarray)
         and matte.dtype == np.float32
@@ -137,6 +148,24 @@ def _select_subject_matte(
         core_x + core_width,
         core_y + core_height,
     )
+    if template.mode == "face_archive":
+        # Only the local visible head is a preservation preference. Broad
+        # shoulders, hands, and torso must not shrink the face to fit their box.
+        expansion = float(template.head_roi_expansion_ratio) * face.width
+        head_x1 = max(0, int(np.floor(face.x1 - expansion)))
+        head_x2 = min(width, int(np.ceil(face.x2 + expansion)))
+        head_y2 = min(height, int(np.ceil(face.y2)))
+        head_columns = np.flatnonzero(np.any(
+            core[subject_validation.robust_core_top:head_y2, head_x1:head_x2],
+            axis=0,
+        ))
+        if head_columns.size:
+            bounds = (
+                head_x1 + int(head_columns.min()),
+                subject_validation.robust_core_top,
+                head_x1 + int(head_columns.max()) + 1,
+                head_y2,
+            )
 
     radius = int(template.feather_radius_pixels)
     closed = core
@@ -208,15 +237,16 @@ def _select_subject_matte(
         shoulder_depth_ratio=subject_validation.shoulder_depth_ratio,
         shoulder_band_coverage=subject_validation.shoulder_band_coverage,
     )
-    return cleaned, quality, bounds
+    return cleaned, quality, bounds, subject_validation.reason_codes
 
 
 def _compute_placement(
     face: FaceBox,
     landmarks: FaceLandmarks,
     template: Any,
+    head_bounds: tuple[int, int, int, int] | None = None,
 ) -> PortraitPlacement:
-    if len(landmarks.points) != 5 or face.height <= 0:
+    if len(landmarks.points) != 5 or face.height <= 0 or face.width <= 0:
         raise _PortraitGenerationError(ReasonCode.PORTRAIT_GEOMETRY_INVALID)
     left_eye, right_eye = landmarks.points[:2]
     eye_x = (left_eye.x + right_eye.x) / 2.0
@@ -225,11 +255,31 @@ def _compute_placement(
         template.face_height_ratio
     )
     scale = target_face_height / face.height
+    archive = template.mode == "face_archive"
+    left, top, right, bottom = face.x1, face.y1, face.x2, face.y2
+    if archive:
+        if head_bounds is not None:
+            left = min(left, float(head_bounds[0]))
+            top = min(top, float(head_bounds[1]))
+            right = max(right, float(head_bounds[2]))
+        scale = min(
+            scale,
+            float(template.max_upscale_ratio),
+            float(template.output_width) / (right - left),
+            float(template.output_height) / (bottom - top),
+        )
     translate_x = float(template.output_width) / 2.0 - scale * eye_x
     translate_y = (
         float(template.output_height) * float(template.eye_line_y_ratio)
         - scale * eye_y
     )
+    if archive:
+        translate_x = float(np.clip(
+            translate_x, -scale * left, float(template.output_width) - scale * right,
+        ))
+        translate_y = float(np.clip(
+            translate_y, -scale * top, float(template.output_height) - scale * bottom,
+        ))
     values = np.asarray((scale, translate_x, translate_y), dtype=np.float64)
     if (
         not np.all(np.isfinite(values))
@@ -280,8 +330,13 @@ def _validate_placed_geometry(
         or transformed_face[1] < -tolerance
         or transformed_face[2] > width + tolerance
         or transformed_face[3] > height + tolerance
-        or transformed_subject[1] < top_margin - tolerance
-        or required_shoulder_y > height + tolerance
+        or (
+            template.mode == "head_shoulders"
+            and (
+                transformed_subject[1] < top_margin - tolerance
+                or required_shoulder_y > height + tolerance
+            )
+        )
     ):
         raise _PortraitGenerationError(ReasonCode.PORTRAIT_GEOMETRY_INVALID)
 
