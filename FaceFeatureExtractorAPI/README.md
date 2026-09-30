@@ -5,11 +5,14 @@
 
 ## 接口入口（API 2.3.0）
 
-2026-09-30 源码候选处于构建/验证阶段，不表示已上线：白底人脸照默认不强制完整头顶/颈部/肩部；
+2026-09-30 服务器 37 的 `18002/18003` 已正式发布 API `2.3.0`（代码 `2557e17`），均 healthy，
+8/8 模型就绪。白底人脸照已启用 `face_archive`，不强制完整头顶/颈部/肩部；
 保持原接口、`image` 上传字段和响应字段，仅新增 `PORTRAIT_SOURCE_LIMITED` / `PORTRAIT_UPSCALE_LIMITED` 原因枚举。
 成功出图可为 `success=true + REVIEW`，提醒在 `reason_codes`；客户端按 `success=true && image_base64`
 判断出图，不能仅凭 REVIEW 判定失败。
-本次构建/部署状态和回滚入口以 [白底人脸照发布记录](docs/reports/2026-09-30-attendance-face-portrait-release.md) 为准。
+本次部署证据和回滚入口以 [白底人脸照发布记录](docs/reports/2026-09-30-attendance-face-portrait-release.md) 为准。
+正式切换后复核 presence `0.5` 与原阈值 ID、MODNet 启用状态均保持不变，临时文件为 0；
+`18001` 身份、启动时间与重启数未变，旧 d78 API/测试台容器已保留用于回滚。
 下面 2026-09-28 记录是本次升级前基线，视频 0.5 配置本轮保留。
 
 公司内网 API：`http://<server-37>:18002`；人工测试台：`http://<server-37>:18003`。
@@ -22,7 +25,7 @@
 本次 2.3.0 升级保留 `0.5` 及原阈值 ID，不用仓库默认 null 覆盖运行配置。
 配置 ID、验证与配置回退见 [0.5 试用阈值记录](docs/reports/2026-09-28-presence-threshold-050.md)，生产精度未验证。
 2026-09-28 历史本地/匿名现场功能验证及验收边界另见
-[2.2.0 本地验证记录](docs/reports/2026-09-28-presence-best-effort-validation.md)，不代表 2.3.0 上线或人工标签和阈值验收。
+[2.2.0 本地验证记录](docs/reports/2026-09-28-presence-best-effort-validation.md)，不能充作 2.3.0 或人工标签和阈值验收证据。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|

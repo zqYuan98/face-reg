@@ -6,7 +6,8 @@
 和 [安全边界说明](FaceFeatureExtractorAPI/docs/ALGORITHM_API_INTEGRATION.md)。公司内网 API 为
 `http://<server-37>:18002`，测试台为 `http://<server-37>:18003`；历史 `18001` 未改动，不供新开发接入。
 
-2026-09-30 源码契约为 API `2.3.0`，处于构建/候选验证阶段，不代表已完成线上切换。
+2026-09-30 服务器 37 的 `18002/18003` 已正式发布 API `2.3.0`（代码 `2557e17`），
+算法服务与测试台均 healthy，8/8 模型就绪；portrait 已启用 `face_archive`。
 本次部署状态、验收证据与回滚入口统一见
 [白底人脸照发布记录](FaceFeatureExtractorAPI/docs/reports/2026-09-30-attendance-face-portrait-release.md)。
 六个 v2 路由不变：portrait、witness、images、video/quick、video/full、video/presence。
@@ -32,7 +33,7 @@
 [匿名标签说明](FaceFeatureExtractorAPI/docs/PRESENCE_LABEL_VALIDATION.md)，生产精度尚未验证。
 2026-09-28 历史本地与匿名现场功能/覆盖结果见
 [2.2.0 本地验证记录](FaceFeatureExtractorAPI/docs/reports/2026-09-28-presence-best-effort-validation.md)；
-这些历史统计不代表 2.3.0 已上线，也不替代人工标签和生产精度验收。
+这些历史统计不能充作 2.3.0 的验收证据，也不替代人工标签和生产精度验收。
 
 `GET /health/live` 只查存活；`GET /health/ready`（`/health` 别名）按能力检查模型；
 `GET /openapi.json` 导入契约。legacy `/api/detect_face` 按开关注册，
