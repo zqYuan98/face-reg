@@ -19,6 +19,7 @@ from face_algorithm.core.contracts import (
     validate_image_input,
 )
 from face_algorithm.core.face_selection import FaceCandidateSelector
+from face_algorithm.core.portrait_bounds import portrait_box_within_overflow_budget
 from face_algorithm.core.protocols import (
     FaceAligner,
     FaceDetector,
@@ -137,9 +138,10 @@ class FacePipeline:
     ) -> FaceQualityAnalysis:
         """Analyze source pixels for portrait generation, never identity.
 
-        Valid in-bounds border contacts and aesthetic quality failures are
-        warnings only here. Selection, geometry and inference failures remain
-        blocking; ``analyze_quality`` and biometric paths stay strict.
+        Valid border contacts, bounded detector overflow and aesthetic quality
+        failures are warnings only here. Selection, geometry and inference
+        failures remain blocking; ``analyze_quality`` and biometric paths stay
+        strict.
         """
 
         trusted = self._analyze_trusted(
@@ -406,13 +408,16 @@ class FacePipeline:
                     suggestion=Suggestion.REVIEW,
                     completed=False,
                 )
+        # Selection has already validated finite five-point shape and geometry.
+        # Portrait resolution must count only the selector's visible source box.
+        source_size_box = clipped_box if portrait_quality else raw_box
         if (
-            raw_box.width < profile.resolution.width
-            or raw_box.height < profile.resolution.height
+            source_size_box.width < profile.resolution.width
+            or source_size_box.height < profile.resolution.height
         ):
             return finish(
                 (ReasonCode.FACE_TOO_SMALL,),
-                box=_clip_box(raw_box, corrected.shape),
+                box=clipped_box,
                 quarter_turns=quarter_turns,
                 corrected=corrected,
             )
@@ -423,7 +428,9 @@ class FacePipeline:
             corrected.shape,
             profile.border_margin_ratio,
         ):
-            if not portrait_quality or not _box_inside_image(raw_box, corrected.shape):
+            if not portrait_quality or not portrait_box_within_overflow_budget(
+                raw_box, corrected.shape
+            ):
                 return finish(
                     (ReasonCode.FACE_CROPPED,),
                     box=clipped_box,
@@ -506,7 +513,7 @@ class FacePipeline:
             face_region = corrected[y1:y2, x1:x2]
             quality = evaluate_quality(
                 face_region,
-                original_face_size=(raw_box.width, raw_box.height),
+                original_face_size=(source_size_box.width, source_size_box.height),
                 pose=pose,
                 profile=profile,
             )
@@ -638,16 +645,6 @@ def _box_touches_margin(
         or box.y1 <= margin
         or box.x2 >= width - margin
         or box.y2 >= height - margin
-    )
-
-
-def _box_inside_image(box: FaceBox, shape: tuple[int, ...]) -> bool:
-    """Boxes use exclusive right/bottom edges, so equality is in bounds."""
-
-    height, width = shape[:2]
-    return bool(
-        0.0 <= box.x1 < box.x2 <= width
-        and 0.0 <= box.y1 < box.y2 <= height
     )
 
 

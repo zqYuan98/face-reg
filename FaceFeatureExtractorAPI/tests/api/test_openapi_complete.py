@@ -10,7 +10,7 @@ from .conftest import config_with
 def test_presence_revision_version_and_trial_contract(algorithm_config):
     schema = create_app(config=algorithm_config, services=DefaultAlgorithmServices(
         config=algorithm_config, registry=object())).openapi()
-    assert schema["info"]["version"] == "2.3.0"
+    assert schema["info"]["version"] == "2.3.1"
     props = schema["components"]["schemas"]["VideoPresenceResult"]["properties"]
     assert props["calibration_status"]["enum"] == ["UNCALIBRATED", "CONFIGURED_UNVALIDATED"]
     assert {"threshold", "comparison_status", "compared_candidates", "base_frames"} <= set(props)

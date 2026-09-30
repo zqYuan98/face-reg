@@ -115,11 +115,15 @@ def _quality_image(kind):
 
 
 @pytest.mark.parametrize("kind,angles,expected", _SOFT_CASES)
-@pytest.mark.parametrize("source_limited", [False, True])
+@pytest.mark.parametrize("source_kind", ["normal", "margin", "overflow"])
 def test_each_quality_warning_and_combination_completes_with_review(
-    kind, angles, expected, source_limited
+    kind, angles, expected, source_kind
 ) -> None:
-    box = FaceBox(x1=1, y1=100, x2=201, y2=300) if source_limited else GOOD_BOX
+    box = {
+        "normal": GOOD_BOX,
+        "margin": FaceBox(x1=1, y1=100, x2=201, y2=300),
+        "overflow": FaceBox(x1=-1, y1=100, x2=199, y2=300),
+    }[source_kind]
     image = _quality_image(kind)
     embedder = FakeEmbedder()
     pipeline = _pipeline(
@@ -131,11 +135,12 @@ def test_each_quality_warning_and_combination_completes_with_review(
 
     result = pipeline.analyze_portrait_quality(image, _portrait_profile())
 
-    expected_reasons = (("PORTRAIT_SOURCE_LIMITED",) if source_limited else ()) + expected
+    expected_reasons = (("PORTRAIT_SOURCE_LIMITED",) if source_kind != "normal" else ()) + expected
     assert _reason_values(result) == expected_reasons
     assert result.public.success is True
     assert result.public.suggestion is Suggestion.REVIEW
-    assert result.public.box == box and result.public.landmarks is not None
+    assert result.public.box == box.model_copy(update={"x1": max(0, box.x1)})
+    assert result.public.landmarks is not None
     assert result.public.pose is not None
     assert result.public.quality is not None
     assert tuple(reason.value for reason in result.public.quality.reason_codes) == expected
@@ -209,10 +214,10 @@ def test_valid_landmarks_alone_touching_margin_warn_without_reclassifying_bad_ge
 @pytest.mark.parametrize("mode", ["exact_one", "dominant_primary"])
 @pytest.mark.parametrize(
     "coordinates",
-    [(-0.01, 100, 200, 300), (200, 100, 400.01, 300),
-     (100, -0.01, 300, 200), (100, 200, 300, 400.01)],
+    [(-11, 100, 189, 300), (211, 100, 411, 300),
+     (100, -11, 300, 189), (100, 211, 300, 411)],
 )
-def test_actual_raw_box_overflow_remains_hard_cropped(mode, coordinates):
+def test_severe_raw_box_overflow_remains_hard_cropped(mode, coordinates):
     box = FaceBox(**dict(zip(("x1", "y1", "x2", "y2"), coordinates)))
     pipeline = _pipeline(detector=FakeDetector([box]), landmarker=FaceAwareLandmarker())
 
@@ -223,11 +228,127 @@ def test_actual_raw_box_overflow_remains_hard_cropped(mode, coordinates):
     assert result.aligned_face is None and pipeline.aligner.calls == 0
 
 
+@pytest.mark.parametrize("mode", ["exact_one", "dominant_primary"])
+@pytest.mark.parametrize(
+    "coordinates",
+    [(-0.01, 100, 200, 300), (200, 100, 400.01, 300),
+     (100, -0.01, 300, 200), (100, 200, 300, 400.01),
+     (-10, 100, 190, 300), (210, 100, 410, 300),
+     (100, -10, 300, 190), (100, 210, 300, 410),
+     (-10, -10, 190, 190)],
+)
+def test_minor_raw_box_overflow_warns_only_in_portrait(mode, coordinates):
+    box = FaceBox(**dict(zip(("x1", "y1", "x2", "y2"), coordinates)))
+    pipeline = _pipeline(detector=FakeDetector([box]), landmarker=FaceAwareLandmarker())
+    profile = _portrait_profile(mode=mode)
+    image = _textured_image()
+
+    result = pipeline.analyze_portrait_quality(image, profile)
+
+    assert result.public.reason_codes == (ReasonCode.PORTRAIT_SOURCE_LIMITED,)
+    assert result.public.success and result.public.suggestion is Suggestion.REVIEW
+    assert result.public.box == FaceBox(
+        x1=max(0, box.x1), y1=max(0, box.y1),
+        x2=min(400, box.x2), y2=min(400, box.y2),
+    )
+    assert result.public.quality.passed
+    resolution = next(metric for metric in result.public.quality.metrics if metric.name == "resolution")
+    assert resolution.value == pytest.approx(
+        min(result.public.box.width, result.public.box.height) / 112
+    )
+    assert result.aligned_face is not None
+    assert "feature_extraction" not in result.public.processing_steps
+    assert pipeline.embedder.calls == 0
+    for strict in (pipeline.analyze_quality, pipeline.analyze_trusted):
+        strict_result = strict(image, profile)
+        assert strict_result.public.reason_codes == (ReasonCode.FACE_CROPPED,)
+        assert strict_result.public.suggestion is Suggestion.RECAPTURE
+        assert strict_result.aligned_face is None
+    assert pipeline.embedder.calls == 0
+
+
+def test_reported_717_by_720_source_uses_visible_box_with_source_warning():
+    image = np.tile(_textured_image(), (2, 2, 1))[:720, :717].copy()
+    box = FaceBox(x1=58.450283, y1=31.375793, x2=610.558960, y2=737.061401)
+    pipeline = _pipeline(detector=FakeDetector([box]), landmarker=FaceAwareLandmarker())
+
+    result = pipeline.analyze_portrait_quality(image, _portrait_profile())
+
+    assert result.public.reason_codes == (ReasonCode.PORTRAIT_SOURCE_LIMITED,)
+    assert result.public.success and result.public.suggestion is Suggestion.REVIEW
+    assert result.public.box == FaceBox(
+        x1=box.x1, y1=box.y1, x2=box.x2, y2=720,
+    )
+    assert result.public.quality.passed and result.aligned_face is not None
+    assert all(0 <= point.x < 717 and 0 <= point.y < 720
+               for point in result.public.landmarks.points)
+    np.testing.assert_array_equal(result.corrected_image, image)
+    assert box.y2 == 737.061401
+    assert pipeline.embedder.calls == 0
+
+
+@pytest.mark.parametrize("height,accepted", [(200, True), (199, False)])
+def test_visible_area_ninety_percent_is_inclusive_but_combined_overflow_can_fail(height, accepted):
+    image = _textured_image()[:height, :180].copy()
+    box = FaceBox(x1=-10, y1=0, x2=190, y2=200)
+    pipeline = _pipeline(detector=FakeDetector([box]), landmarker=FaceAwareLandmarker())
+
+    result = pipeline.analyze_portrait_quality(image, _portrait_profile())
+
+    assert result.public.reason_codes == (
+        ReasonCode.PORTRAIT_SOURCE_LIMITED if accepted else ReasonCode.FACE_CROPPED,
+    )
+    assert result.public.suggestion is (Suggestion.REVIEW if accepted else Suggestion.RECAPTURE)
+    assert (result.aligned_face is not None) is accepted
+    assert pipeline.embedder.calls == 0
+
+
+@pytest.mark.parametrize(
+    "coordinates",
+    [(-1, 100, 111.9, 300), (288.1, 100, 401, 300),
+     (100, -1, 300, 111.9), (100, 288.1, 300, 401)],
+)
+def test_minor_overflow_cannot_count_invisible_pixels_towards_minimum(coordinates):
+    box = FaceBox(**dict(zip(("x1", "y1", "x2", "y2"), coordinates)))
+    pipeline = _pipeline(detector=FakeDetector([box]), landmarker=FaceAwareLandmarker())
+
+    result = pipeline.analyze_portrait_quality(_textured_image(), _portrait_profile())
+
+    assert result.public.reason_codes == (ReasonCode.FACE_TOO_SMALL,)
+    assert result.public.suggestion is Suggestion.RECAPTURE
+    assert result.aligned_face is None and pipeline.aligner.calls == 0
+    assert pipeline.embedder.calls == 0
+
+
+@pytest.mark.parametrize(
+    "coordinates",
+    [(-1, 100, 112, 300), (288, 100, 401, 300),
+     (100, -1, 300, 112), (100, 288, 300, 401)],
+)
+def test_minor_overflow_at_visible_profile_minimum_is_allowed(coordinates):
+    box = FaceBox(**dict(zip(("x1", "y1", "x2", "y2"), coordinates)))
+    pipeline = _pipeline(detector=FakeDetector([box]), landmarker=FaceAwareLandmarker())
+
+    result = pipeline.analyze_portrait_quality(_textured_image(), _portrait_profile())
+
+    assert result.public.reason_codes == (ReasonCode.PORTRAIT_SOURCE_LIMITED,)
+    assert result.public.suggestion is Suggestion.REVIEW
+    assert result.public.quality.passed and result.aligned_face is not None
+    assert pipeline.embedder.calls == 0
+
+
 @pytest.mark.parametrize("coordinate", [-0.01, 400.0, 400.01])
-def test_actual_landmark_overflow_is_not_a_source_margin_warning(coordinate):
-    box = FaceBox(x1=0, y1=100, x2=400, y2=300)
+@pytest.mark.parametrize("overflow", [False, True])
+@pytest.mark.parametrize("axis", [0, 1])
+def test_actual_landmark_overflow_is_not_a_source_margin_warning(coordinate, overflow, axis):
+    start = -0.01 if overflow else 0
+    box = (FaceBox(x1=start, y1=100, x2=400, y2=300) if axis == 0
+           else FaceBox(x1=100, y1=start, x2=300, y2=400))
     points = GOOD_LANDMARKS.copy()
-    points[0 if coordinate < 0 else 1, 0] = coordinate
+    if axis == 0:
+        points[0 if coordinate < 0 else 1, 0] = coordinate
+    else:
+        points[[0, 1] if coordinate < 0 else [3, 4], 1] = coordinate
     pipeline = _pipeline(detector=FakeDetector([box]), landmarker=FakeLandmarker(points))
 
     result = pipeline.analyze_portrait_quality(_textured_image(), _portrait_profile())
@@ -244,8 +365,10 @@ def test_actual_landmark_overflow_is_not_a_source_margin_warning(coordinate):
      (np.full((5, 2), np.inf), ReasonCode.INFERENCE_ERROR),
      (np.zeros((4, 2)), ReasonCode.INFERENCE_ERROR)],
 )
-def test_invalid_landmarks_cannot_be_softened(points, expected):
-    pipeline = _pipeline(landmarker=FakeLandmarker(points))
+@pytest.mark.parametrize("overflow", [False, True])
+def test_invalid_landmarks_cannot_be_softened(points, expected, overflow):
+    box = FaceBox(x1=-0.01, y1=100, x2=400, y2=300) if overflow else GOOD_BOX
+    pipeline = _pipeline(detector=FakeDetector([box]), landmarker=FakeLandmarker(points))
 
     result = pipeline.analyze_portrait_quality(_textured_image(), _portrait_profile())
 
@@ -290,10 +413,12 @@ def test_profile_sized_faces_do_not_gain_a_template_derived_minimum(size):
 
 
 @pytest.mark.parametrize("mode", ["exact_one", "dominant_primary"])
-def test_ambiguous_targets_remain_hard_failure(mode):
+@pytest.mark.parametrize("overflow", [False, True])
+def test_ambiguous_targets_remain_hard_failure(mode, overflow):
+    primary = FaceBox(x1=-1, y1=100, x2=210, y2=300) if overflow else GOOD_BOX
     second = FaceBox(x1=20, y1=100, x2=210, y2=290)
     pipeline = _pipeline(
-        detector=FakeDetector([GOOD_BOX, second]), landmarker=FaceAwareLandmarker()
+        detector=FakeDetector([primary, second]), landmarker=FaceAwareLandmarker()
     )
 
     result = pipeline.analyze_portrait_quality(_textured_image(), _portrait_profile(mode=mode))
@@ -313,6 +438,19 @@ def test_no_face_remains_hard_failure():
     assert result.aligned_face is None
 
 
+@pytest.mark.parametrize("mode", ["exact_one", "dominant_primary"])
+def test_fully_outside_face_remains_blocked_before_landmark_inference(mode):
+    pipeline = _pipeline(detector=FakeDetector([FaceBox(x1=401, y1=100, x2=601, y2=300)]))
+
+    result = pipeline.analyze_portrait_quality(_textured_image(), _portrait_profile(mode=mode))
+
+    expected = ReasonCode.FACE_CROPPED if mode == "exact_one" else ReasonCode.NO_FACE
+    assert result.public.reason_codes == (expected,)
+    assert result.public.suggestion is Suggestion.RECAPTURE
+    assert result.aligned_face is None
+    assert pipeline.landmarker.calls == pipeline.aligner.calls == pipeline.embedder.calls == 0
+
+
 @pytest.mark.parametrize("coordinates", [(np.nan, 100, 300, 300), (100, 100, np.inf, 300), (300, 100, 100, 300)])
 def test_invalid_detector_boxes_remain_inference_failures(coordinates):
     box = SimpleNamespace(**dict(zip(("x1", "y1", "x2", "y2"), coordinates)))
@@ -330,8 +468,10 @@ def test_invalid_detector_boxes_remain_inference_failures(coordinates):
     [("rotator", "correct"), ("detector", "detect"), ("landmarker", "detect"),
      ("aligner", "align"), ("pose_estimator", "estimate")],
 )
-def test_model_exceptions_remain_incomplete_reviews(component, method, monkeypatch):
-    pipeline = _pipeline()
+@pytest.mark.parametrize("overflow", [False, True])
+def test_model_exceptions_remain_incomplete_reviews(component, method, monkeypatch, overflow):
+    box = FaceBox(x1=-0.01, y1=100, x2=400, y2=300) if overflow else GOOD_BOX
+    pipeline = _pipeline(detector=FakeDetector([box]))
 
     def fail(*args):
         raise RuntimeError("private model diagnostics must not escape")

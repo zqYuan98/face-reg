@@ -17,13 +17,17 @@ from scripts import deploy_presence_release as release
 
 
 COMMIT = 'a' * 40
-BASELINE_COMMIT = 'd78e723b8fb8737b09e12859e57aa9856a640db6'
+BASELINE_COMMIT = '2557e1707eb77b7cf7a077541030d7ec64f5ae84'
 BASELINE_SHORT = BASELINE_COMMIT[:12]
 BASELINE_IDS = {
-    release.API: 'cf671e39ce84b74ecbd4acd0679e76e5090070ea67daba006fb647d77edb0c76',
-    release.CONSOLE: '65eaacd8f838d0f02c2a271ed0969321ceb8601391d8ccd24e4b11de240872a5',
+    release.API: '9eb1ce46e1f6523e2a022c772016be3aff3857b9e99f9f11fb1d384fad89d622',
+    release.CONSOLE: 'a4d07dc28b2af9b1e05e416ae0e2205d36c9c605472e24491f733c1c2fc8482a',
 }
-BASELINE_CONFIG_SHA256 = 'c0d27189eb153cedb0b4d81890b18e2b99a88f5cedec0ba2a63785a882be0287'
+BASELINE_CONFIG_SHA256 = '6d300c20cac3158ce1c5a720eb92f6a9231e3915e2a81e90bfe2653226cf7b5d'
+READY_MODEL_NAMES = (
+    'face_detector', 'face_landmark_primary', 'face_landmark_secondary',
+    'face_recognizer', 'rotation_classifier', 'pose_var', 'pose_conv', 'portrait_matting',
+)
 PORTRAIT_FIELDS = {
     'success', 'suggestion', 'reason_codes', 'model_versions', 'config_version',
     'processing_time_ms', 'trace_id', 'template_version', 'output_width', 'output_height',
@@ -49,7 +53,7 @@ def presence_schema() -> dict:
         'PORTRAIT_SOURCE_LIMITED', 'PORTRAIT_UPSCALE_LIMITED',
     })
     return {
-        'info': {'version': '2.3.0'},
+        'info': {'version': '2.3.1'},
         'paths': {'/api/v2/verify/video/presence': {'post': {'responses': {'200': {
             'content': {'application/json': {'schema': {'$ref': '#/components/schemas/VideoPresenceResult'}}},
         }}}}, '/api/v2/portrait/generate': {'post': {
@@ -91,7 +95,7 @@ def deploy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> release.Release:
     return release.Release(COMMIT)
 
 
-def approved_config() -> str:
+def legacy_portrait_config() -> str:
     return ('models:\n  portrait_matting: {enabled: true}\n'
             'video_presence:\n  mode: configured\n  threshold: 0.5\n'
             '  threshold_id: TASK-2026-001-presence-trial-050-20260928\n'
@@ -102,6 +106,17 @@ def approved_config() -> str:
             'resources: {max_video_bytes: 99}\n')
 
 
+def approved_config() -> str:
+    return legacy_portrait_config().replace(
+        'portrait_template:\n', 'portrait_template:\n  mode: face_archive\n',
+    ).replace('head-shoulders-480x640-v1', 'face-archive-480x640-v1')
+
+
+def restored_readiness() -> dict:
+    return {'ready': True, 'models': [{'name': name, 'state': 'ready'} for name in READY_MODEL_NAMES],
+            'capabilities': {'portrait': 'ready', 'video_presence': 'ready'}}
+
+
 def test_commit_must_be_full_unambiguous_lowercase_sha() -> None:
     assert release.full_commit(COMMIT) == COMMIT
     for invalid in ('a' * 12, '../escape', 'A' * 40, 'a' * 39 + 'x'):
@@ -109,7 +124,7 @@ def test_commit_must_be_full_unambiguous_lowercase_sha() -> None:
             release.full_commit(invalid)
 
 
-def test_release_baseline_is_the_deployed_presence_revision() -> None:
+def test_release_baseline_is_the_deployed_230_portrait_revision() -> None:
     assert release.OLD_COMMIT == BASELINE_COMMIT
     assert release.OLD_REVISION == BASELINE_SHORT
     assert release.OLD_SOURCE == release.ROOT / ('source-' + BASELINE_COMMIT) / 'FaceFeatureExtractorAPI'
@@ -124,8 +139,10 @@ def test_presence_defaults_match_the_new_source_policy() -> None:
 
 
 @pytest.mark.parametrize('custom_interval', [False, True])
+@pytest.mark.parametrize('newline', ['\n', '\r\n'])
+@pytest.mark.parametrize('existing_config', [False, True])
 def test_build_uses_current_baseline_validator_and_never_overwrites_custom_policy(
-    deploy, monkeypatch, tmp_path, custom_interval,
+    deploy, monkeypatch, tmp_path, custom_interval, newline, existing_config,
 ) -> None:
     source_config = yaml.safe_load((Path(__file__).parents[2] / 'config/algorithm.yaml').read_text(encoding='utf-8'))
     new_policy = source_config['video_presence']
@@ -135,7 +152,10 @@ def test_build_uses_current_baseline_validator_and_never_overwrites_custom_polic
         old_policy['sample_interval_seconds'] = 0.75
     old_config = {'models': {'portrait_matting': {'enabled': True}}, 'video_presence': old_policy,
                   'resources': {'max_video_bytes': 99},
-                  'portrait_template': {'version': 'head-shoulders-480x640-v1', 'output_width': 480}}
+                  'portrait_template': {'mode': 'face_archive', 'version': 'face-archive-480x640-v1',
+                                        'output_width': 480}}
+    # Aliased data is deliberately shared in YAML; no migration may mutate it.
+    old_config['retained_template_alias'] = old_config['portrait_template']
     old_source = tmp_path / 'old-source'
     old_source.mkdir()
     (old_source / 'requirements-cpu.txt').write_bytes(b'unchanged requirements\n')
@@ -143,7 +163,10 @@ def test_build_uses_current_baseline_validator_and_never_overwrites_custom_polic
     runtime = tmp_path / 'runtime'
     runtime.mkdir()
     old_path = runtime / 'old.yaml'
-    old_path.write_text(yaml.safe_dump(old_config), encoding='utf-8')
+    original_bytes = ('# keep formatting and comments\n' + yaml.safe_dump(old_config)).replace(
+        '\n', newline,
+    ).encode('utf-8')
+    old_path.write_bytes(original_bytes)
     checkpoint = runtime / 'checkpoint'
     checkpoint.write_bytes(b'checkpoint')
     monkeypatch.setattr(release, 'OLD_SOURCE', old_source)
@@ -180,6 +203,16 @@ def test_build_uses_current_baseline_validator_and_never_overwrites_custom_polic
         return ''
 
     monkeypatch.setattr(release, 'docker', fake_docker)
+    monkeypatch.setattr(release, 'portrait_config', lambda _: pytest.fail('Legacy migration called'))
+    monkeypatch.setattr(release, 'merged_config', lambda _: pytest.fail('Legacy migration called'))
+    if existing_config:
+        deploy.config.write_bytes(b'existing runtime config must not be overwritten\r\n')
+        with pytest.raises(release.ReleaseError, match='overwrite'):
+            deploy.build()
+        assert deploy.config.read_bytes() == b'existing runtime config must not be overwritten\r\n'
+        assert old_path.read_bytes() == original_bytes
+        assert calls == []
+        return
     deploy.build()
     assert deploy.state['stage'] == 'built'
     assert calls[0][-4] == 'face-algorithm:task-2026-001-' + BASELINE_SHORT
@@ -187,15 +220,15 @@ def test_build_uses_current_baseline_validator_and_never_overwrites_custom_polic
     assert merged['models']['portrait_matting']['enabled'] is True
     assert merged['resources'] == old_config['resources']
     assert merged['video_presence'] == old_policy
-    expected = copy.deepcopy(old_config)
-    expected['portrait_template'].update(mode='face_archive', version='face-archive-480x640-v1')
-    assert merged == expected
+    assert merged == old_config
+    assert old_path.read_bytes() == deploy.config.read_bytes() == original_bytes
+    assert release.sha256(deploy.config) == release.sha256(old_path) == deploy.state['config_sha256']
 
 
 @pytest.mark.parametrize('newline', ['\n', '\r\n'])
 @pytest.mark.parametrize('mode', ['', '  mode: head_shoulders # strict compatibility\n'])
 def test_portrait_migration_changes_only_mode_and_version(newline, mode) -> None:
-    original = approved_config().replace('portrait_template:\n', 'portrait_template:\n' + mode)
+    original = legacy_portrait_config().replace('portrait_template:\n', 'portrait_template:\n' + mode)
     original = original.replace('\n', newline)
     migrated = release.portrait_config(original)
     expected = yaml.safe_load(original)
@@ -236,14 +269,14 @@ def run_config_validation(tmp_path, original, migrated):
 
 def test_container_semantic_validation_preserves_all_data_and_custom_presence(tmp_path) -> None:
     original = approved_config()
-    run_config_validation(tmp_path, original, release.portrait_config(original))
+    run_config_validation(tmp_path, original, original)
 
 
 @pytest.mark.parametrize('defect', ['presence', 'modnet', 'resource', 'width', 'version', 'mode',
                                   'duplicate-original', 'duplicate-migrated', 'presence-baseline'])
 def test_container_semantic_validation_rejects_unapproved_changes(tmp_path, defect) -> None:
     original = approved_config()
-    migrated = release.portrait_config(original)
+    migrated = original
     if defect == 'presence':
         migrated = migrated.replace('threshold: 0.5', 'threshold: null')
     elif defect == 'modnet':
@@ -265,6 +298,29 @@ def test_container_semantic_validation_rejects_unapproved_changes(tmp_path, defe
         migrated = migrated.replace('threshold: 0.5', 'threshold: 0.6')
     with pytest.raises((AssertionError, ValueError, yaml.YAMLError)):
         run_config_validation(tmp_path, original, migrated)
+
+
+@pytest.mark.parametrize('old,new', [
+    ('mode: face_archive', 'mode: head_shoulders'),
+    ('face-archive-480x640-v1', 'head-shoulders-480x640-v1'),
+    ('enabled: true', 'enabled: false'),
+    ('mode: configured', 'mode: uncalibrated'),
+    ('threshold: 0.5', 'threshold: 0.6'),
+    ('TASK-2026-001-presence-trial-050-20260928', 'another-trial'),
+])
+def test_semantic_validation_rejects_unapproved_values_even_when_both_copies_match(tmp_path, old, new) -> None:
+    changed = approved_config().replace(old, new)
+    with pytest.raises((AssertionError, ValueError, yaml.YAMLError)):
+        run_config_validation(tmp_path, changed, changed)
+
+
+def test_semantic_validation_preserves_shared_yaml_values_without_mutation(tmp_path) -> None:
+    original = approved_config().replace('portrait_template:\n', 'portrait_template: &template\n')
+    original += 'retained_template_alias: *template\n'
+    run_config_validation(tmp_path, original, original)
+    changed = original.replace('output_width: 480', 'output_width: 481')
+    with pytest.raises(AssertionError):
+        run_config_validation(tmp_path, original, changed)
 
 
 @pytest.mark.parametrize('target', [release.API, release.CONSOLE])
@@ -445,13 +501,18 @@ def test_readiness_requires_boolean_and_capability(monkeypatch, ready, expected)
             release.wait_http('http://127.0.0.1:18012', presence=True, timeout=1)
 
 
-@pytest.mark.parametrize('defect', ['old-version', 'wrong-response', 'old-calibration',
+@pytest.mark.parametrize('defect', ['old-version', 'baseline-version', 'future-version',
+                                   'wrong-response', 'old-calibration',
                                    'old-evidence', *sorted(NEW_DTO_FIELDS)])
 def test_readiness_rejects_old_or_incomplete_presence_contract(monkeypatch, defect) -> None:
     schema = presence_schema()
     properties = schema['components']['schemas']['VideoPresenceResult']['properties']
     if defect == 'old-version':
         schema['info']['version'] = '2.1.0'
+    elif defect == 'baseline-version':
+        schema['info']['version'] = '2.3.0'
+    elif defect == 'future-version':
+        schema['info']['version'] = '2.3.2'
     elif defect == 'wrong-response':
         schema['paths']['/api/v2/verify/video/presence']['post']['responses']['200']['content']['application/json']['schema']['$ref'] = '#/components/schemas/OldResult'
     elif defect == 'old-calibration':
@@ -674,8 +735,13 @@ def test_rollback_restores_partial_switch_and_leaves_older_backup(deploy, monkey
         release.API: item('new-api', owned=True),
         release.API + '-prev-' + release.OLD_REVISION: item('original-api'),
         release.CONSOLE: item('original-console'),
-        release.API + '-prev-6200689': item('ancient-api'),
     }
+    older = {name + '-prev-' + revision: item('ancient-' + name + '-' + revision)
+             for name in (release.API, release.CONSOLE)
+             for revision in ('d78e723b8fb8', '1e6b57b5b1dd')}
+    containers.update(copy.deepcopy(older))
+    containers[release.PROTECTED] = item(release.PROTECTED_ID)
+    protected = copy.deepcopy(containers[release.PROTECTED])
     calls = []
     monkeypatch.setattr(release, 'inspect', lambda name: copy.deepcopy(containers.get(name)))
     monkeypatch.setattr(release, 'wait_http', lambda *args, **kwargs: None)
@@ -695,9 +761,11 @@ def test_rollback_restores_partial_switch_and_leaves_older_backup(deploy, monkey
     deploy.rollback()
     assert containers[release.API]['Id'] == 'original-api'
     assert containers[release.CONSOLE]['Id'] == 'original-console'
-    assert containers[release.API + '-prev-6200689']['Id'] == 'ancient-api'
+    assert {name: containers[name] for name in older} == older
+    assert containers[release.PROTECTED] == protected
     assert deploy.state['stage'] == 'rolled-back'
     assert all(release.PROTECTED not in call for call in calls)
+    assert all(not any(value['Id'] in call for value in older.values()) for call in calls)
 
 
 def test_promotion_failure_always_calls_rollback(deploy, monkeypatch) -> None:
@@ -723,9 +791,13 @@ def test_promotion_failure_always_calls_rollback(deploy, monkeypatch) -> None:
 def test_promotion_preserves_older_backups_and_uses_current_baseline(deploy, monkeypatch) -> None:
     deploy.state = {'stage': 'candidate', 'config_sha256': 'config-hash'}
     containers = {deploy.candidate: item('candidate', owned=True),
-                  release.API: item('original-api'), release.CONSOLE: item('original-console'),
-                  release.API + '-prev-872c969': item('ancient-api'),
-                  release.CONSOLE + '-prev-872c969': item('ancient-console')}
+                  release.API: item('original-api'), release.CONSOLE: item('original-console')}
+    older = {name + '-prev-' + revision: item('ancient-' + name + '-' + revision)
+             for name in (release.API, release.CONSOLE)
+             for revision in ('d78e723b8fb8', '1e6b57b5b1dd')}
+    containers.update(copy.deepcopy(older))
+    containers[release.PROTECTED] = item(release.PROTECTED_ID)
+    protected = copy.deepcopy(containers[release.PROTECTED])
     containers[release.API]['Config']['Image'] = 'face-algorithm:task-2026-001-' + BASELINE_SHORT
     containers[release.CONSOLE]['Config']['Image'] = 'face-algorithm-visual-console:task-2026-001-' + BASELINE_SHORT
     monkeypatch.setattr(release, 'inspect', lambda name: copy.deepcopy(containers.get(name)))
@@ -754,9 +826,10 @@ def test_promotion_preserves_older_backups_and_uses_current_baseline(deploy, mon
     assert deploy.state['stage'] == 'promoted'
     assert containers[release.API + '-prev-' + BASELINE_SHORT]['Id'] == 'original-api'
     assert containers[release.CONSOLE + '-prev-' + BASELINE_SHORT]['Id'] == 'original-console'
-    assert containers[release.API + '-prev-872c969']['Id'] == 'ancient-api'
-    assert containers[release.CONSOLE + '-prev-872c969']['Id'] == 'ancient-console'
-    assert all('ancient-api' not in call and 'ancient-console' not in call for call in calls)
+    assert {name: containers[name] for name in older} == older
+    assert containers[release.PROTECTED] == protected
+    assert all(not any(value['Id'] in call for value in older.values()) for call in calls)
+    assert all(release.PROTECTED not in call for call in calls)
 
 
 @pytest.mark.parametrize('target', [release.API, release.CONSOLE])
@@ -876,8 +949,10 @@ def test_readiness_accepts_actual_public_openapi(monkeypatch) -> None:
     release.wait_http('http://127.0.0.1:18012', presence=True, timeout=1)
 
 
-@pytest.mark.parametrize('defect', [None, 'ready-503', 'ready-false', 'wrong-version',
-                                  'portrait-unavailable', 'presence-unavailable', 'console-503'])
+@pytest.mark.parametrize('defect', [None, 'ready-503', 'ready-false', 'wrong-version', 'older-version',
+                                  'portrait-unavailable', 'presence-unavailable', 'console-503',
+                                  'models-missing', 'models-empty', 'models-malformed',
+                                  *READY_MODEL_NAMES])
 def test_rollback_records_success_only_after_old_api_ready_version_and_console(
     deploy, monkeypatch, capsys, defect,
 ) -> None:
@@ -887,11 +962,21 @@ def test_rollback_records_success_only_after_old_api_ready_version_and_console(
     monkeypatch.setattr(release, 'inspect', containers.get)
     actions = []
     monkeypatch.setattr(release, 'docker', lambda *args, **kwargs: actions.append(args))
-    ready = {'ready': defect != 'ready-false',
-             'capabilities': {'portrait': 'ready', 'video_presence': 'ready'}}
+    ready = restored_readiness()
+    ready['ready'] = defect != 'ready-false'
     if defect in ('portrait-unavailable', 'presence-unavailable'):
         ready['capabilities']['portrait' if defect == 'portrait-unavailable' else 'video_presence'] = 'unavailable'
-    schema = {'info': {'version': '2.3.0' if defect == 'wrong-version' else '2.2.0'}}
+    if defect == 'models-missing':
+        del ready['models']
+    elif defect == 'models-empty':
+        ready['models'] = []
+    elif defect == 'models-malformed':
+        ready['models'] = None
+    elif defect in READY_MODEL_NAMES:
+        next(model for model in ready['models'] if model['name'] == defect)['state'] = 'unavailable'
+    schema = {'info': {'version': {
+        'wrong-version': '2.3.1', 'older-version': '2.2.0',
+    }.get(defect, '2.3.0')}}
     urls = []
 
     class Response(io.BytesIO):
@@ -931,3 +1016,70 @@ def test_rollback_records_success_only_after_old_api_ready_version_and_console(
         assert json.loads(deploy.state_path.read_text())['stage'] == 'promoting'
         assert 'Original API and console restored' not in capsys.readouterr().out
     assert actions == [('start', 'original-api'), ('start', 'original-console')]
+
+
+@pytest.mark.parametrize('restored_models_ready', [True, False])
+def test_failed_promotion_runs_real_rollback_and_requires_restored_230_models(
+    deploy, monkeypatch, restored_models_ready,
+) -> None:
+    deploy.state = {'stage': 'candidate', 'config_sha256': 'config-hash'}
+    containers = {deploy.candidate: item('candidate', owned=True),
+                  release.API: item('original-api'), release.CONSOLE: item('original-console')}
+    monkeypatch.setattr(release, 'inspect', lambda name: copy.deepcopy(containers.get(name)))
+    monkeypatch.setattr(release, 'sha256', lambda path: 'config-hash' if path == deploy.config else release.OLD_CONFIG_SHA256)
+    monkeypatch.setattr(deploy, 'verify_images', lambda: None)
+    monkeypatch.setattr(release, 'wait_port_free', lambda *args: None)
+    monkeypatch.setattr(release.time, 'sleep', lambda _: None)
+    ticks = iter(range(1000))
+    monkeypatch.setattr(release.time, 'monotonic', lambda: next(ticks))
+    actions = []
+
+    def fake_docker(*args, **kwargs):
+        actions.append(args)
+        if args[0] == 'rm':
+            name = next(name for name, value in containers.items() if value['Id'] == args[2])
+            del containers[name]
+        elif args[0] == 'rename':
+            name = next(name for name, value in containers.items() if value['Id'] == args[1])
+            containers[args[2]] = containers.pop(name)
+        elif args[0] in ('start', 'stop'):
+            container = next(value for value in containers.values() if value['Id'] == args[-1])
+            container['State']['Running'] = args[0] == 'start'
+        return ''
+
+    monkeypatch.setattr(release, 'docker', fake_docker)
+    monkeypatch.setattr(deploy, 'run_container', lambda name, **kwargs: containers.update({
+        name: item('new-' + name, owned=True),
+    }))
+
+    class Response(io.BytesIO):
+        status = 200
+
+    class Opener:
+        def open(self, url, timeout):
+            if url.endswith('/health/ready'):
+                ready = restored_readiness()
+                if ':18002/' in url and containers[release.API]['Id'] == 'original-api':
+                    if not restored_models_ready:
+                        ready['models'][-1]['state'] = 'unavailable'
+                payload = ready
+            elif url.endswith('/openapi.json'):
+                payload = presence_schema()
+                if ':18002/' in url:
+                    # Wrong-version formal service triggers rollback; 2.3.0 is only
+                    # accepted again after the original pinned container is restored.
+                    payload['info']['version'] = '2.3.0'
+            else:
+                payload = {'status': 'live'}
+            return Response(json.dumps(payload).encode())
+
+    monkeypatch.setattr(release.urllib.request, 'build_opener', lambda *_: Opener())
+    with pytest.raises(release.ReleaseError, match='timeout'):
+        deploy.promote()
+    assert containers[release.API]['Id'] == 'original-api'
+    assert containers[release.CONSOLE]['Id'] == 'original-console'
+    assert all(containers[name]['State']['Running'] for name in (release.API, release.CONSOLE))
+    expected_stage = 'rolled-back' if restored_models_ready else 'promoting'
+    assert deploy.state['stage'] == expected_stage
+    assert json.loads(deploy.state_path.read_text())['stage'] == expected_stage
+    assert ('rm', '-f', 'new-' + release.API) in actions

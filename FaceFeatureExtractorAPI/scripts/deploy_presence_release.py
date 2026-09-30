@@ -27,14 +27,14 @@ API = 'face-algorithm-task-2026-001'
 CONSOLE = 'face-algorithm-visual-console-task-2026-001'
 PROTECTED = 'face-algorithm'
 PROTECTED_ID = 'd6773816222a2200ee76b0b23f35af51786cc64a46147e04933ff7d3281ece7f'
-OLD_COMMIT = 'd78e723b8fb8737b09e12859e57aa9856a640db6'
+OLD_COMMIT = '2557e1707eb77b7cf7a077541030d7ec64f5ae84'
 OLD_REVISION = OLD_COMMIT[:12]
 OLD_SOURCE = ROOT / ('source-' + OLD_COMMIT) / 'FaceFeatureExtractorAPI'
 OLD_CONFIG = ROOT / 'runtime' / ('algorithm-' + OLD_COMMIT + '.yaml')
-OLD_CONFIG_SHA256 = 'c0d27189eb153cedb0b4d81890b18e2b99a88f5cedec0ba2a63785a882be0287'
+OLD_CONFIG_SHA256 = '6d300c20cac3158ce1c5a720eb92f6a9231e3915e2a81e90bfe2653226cf7b5d'
 OLD_CONTAINER_IDS = {
-    API: 'cf671e39ce84b74ecbd4acd0679e76e5090070ea67daba006fb647d77edb0c76',
-    CONSOLE: '65eaacd8f838d0f02c2a271ed0969321ceb8601391d8ccd24e4b11de240872a5',
+    API: '9eb1ce46e1f6523e2a022c772016be3aff3857b9e99f9f11fb1d384fad89d622',
+    CONSOLE: 'a4d07dc28b2af9b1e05e416ae0e2205d36c9c605472e24491f733c1c2fc8482a',
 }
 CHECKPOINT = ROOT / 'runtime/checkpoints/modnet_photographic_portrait_matting.ckpt'
 REVISION_LABEL = 'org.opencontainers.image.revision'
@@ -250,9 +250,8 @@ def portrait_config(old: str) -> str:
 
 
 def config_validation_script() -> str:
-    """Run in the existing API image: strict load and exact allowed delta."""
-    return '''import copy
-import json
+    """Run in the existing API image: strict load and no configuration delta."""
+    return '''import json
 from pathlib import Path
 import yaml
 
@@ -274,11 +273,9 @@ assert a['models']['portrait_matting']['enabled'] is True
 assert a['video_presence']['mode'] == 'configured'
 assert type(a['video_presence']['threshold']) is float and a['video_presence']['threshold'] == 0.5
 assert a['video_presence']['threshold_id'] == 'TASK-2026-001-presence-trial-050-20260928'
-assert a['portrait_template'].get('mode', 'head_shoulders') == 'head_shoulders'
-assert a['portrait_template']['version'] == 'head-shoulders-480x640-v1'
-expected = copy.deepcopy(a)
-expected['portrait_template'].update(mode='face_archive', version='face-archive-480x640-v1')
-assert json.dumps(b, sort_keys=True, allow_nan=False) == json.dumps(expected, sort_keys=True, allow_nan=False)
+assert a['portrait_template']['mode'] == 'face_archive'
+assert a['portrait_template']['version'] == 'face-archive-480x640-v1'
+assert json.dumps(b, sort_keys=True, allow_nan=False) == json.dumps(a, sort_keys=True, allow_nan=False)
 '''
 
 
@@ -327,7 +324,7 @@ def wait_http(base: str, *, presence: bool, timeout: float = 180) -> None:
                     schema = json.load(response)
                 require('/api/v2/verify/video/presence' in schema['paths'],
                         'New presence route is absent')
-                require(schema['info']['version'] == '2.3.0', 'Expected API 2.3.0 is absent')
+                require(schema['info']['version'] == '2.3.1', 'Expected API 2.3.1 is absent')
                 response = schema['paths']['/api/v2/verify/video/presence']['post']['responses']['200']
                 require(response['content']['application/json']['schema']['$ref'] ==
                         '#/components/schemas/VideoPresenceResult', 'Presence response contract differs')
@@ -380,7 +377,7 @@ def wait_http(base: str, *, presence: bool, timeout: float = 180) -> None:
 
 
 def wait_restored_api(base: str, *, timeout: float = 180) -> None:
-    """Verify the restored d78 API without requiring the new portrait contract."""
+    """Verify the restored 2557 API against its approved 2.3.0 baseline."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -392,9 +389,14 @@ def wait_restored_api(base: str, *, timeout: float = 180) -> None:
                         all(ready.get('capabilities', {}).get(name) == 'ready'
                             for name in ('video_presence', 'portrait')),
                         'Restored presence or portrait capability is not ready')
+                model_states = {model['name']: model['state'] for model in ready['models']}
+                require(all(model_states.get(name) == 'ready' for name in (
+                    'face_detector', 'face_landmark_primary', 'face_landmark_secondary',
+                    'face_recognizer', 'rotation_classifier', 'pose_var', 'pose_conv', 'portrait_matting',
+                )), 'Restored API models are not ready')
             with opener.open(base + '/openapi.json', timeout=4) as response:
                 require(response.status == 200, 'Restored API schema is not available')
-                require(json.load(response)['info']['version'] == '2.2.0',
+                require(json.load(response)['info']['version'] == '2.3.0',
                         'Restored API version differs from approved baseline')
             return
         except (OSError, ValueError, KeyError, TypeError, ReleaseError):
@@ -455,11 +457,12 @@ class Release:
                 path = self.source / model['path']
                 require(path.resolve().is_relative_to(self.source.resolve()), 'Model path escapes source')
                 require(path.is_file() and sha256(path) == model['sha256'], 'Model integrity check failed')
-        old_text = OLD_CONFIG.read_text(encoding='utf-8')
         require(not self.config.exists(), 'Refusing to overwrite an existing runtime config')
-        with self.config.open('x', encoding='utf-8', newline='') as stream:
-            stream.write(portrait_config(old_text))
+        with OLD_CONFIG.open('rb') as source, self.config.open('xb') as target:
+            shutil.copyfileobj(source, target)
         self.config.chmod(OLD_CONFIG.stat().st_mode & 0o777)
+        require(sha256(self.config) == sha256(OLD_CONFIG) == OLD_CONFIG_SHA256,
+                'Copied runtime config differs from approved baseline')
         # Use the already installed PyYAML, without depending on host Python packages.
         validation = config_validation_script()
         docker('run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL',
