@@ -76,6 +76,10 @@
                 </div>
                 <div style="font-size: 18px; opacity: 0.8; font-weight: normal;">人脸识别智能管理系统</div>
             </div>
+            <el-alert v-if="navigationWarning" :title="navigationWarning" type="warning" :closable="false" show-icon
+                style="margin-bottom: 16px"></el-alert>
+            <el-button v-if="sessionConfirmed" type="primary" plain :disabled="loading || checkingSession"
+                style="width: 100%; margin-bottom: 16px" @click="enterConfirmedIndex">进入管理后台</el-button>
             <el-alert v-if="sessionError" :title="sessionError" type="warning" :closable="false" show-icon
                 style="margin-bottom: 16px">
                 <el-button link :disabled="loading || checkingSession" @click="checkSession">重新验证登录状态</el-button>
@@ -107,9 +111,31 @@
         const { createApp, reactive, ref, onMounted, onBeforeUnmount } = Vue;
         const app = createApp({
             setup() {
+                const UI_VERSION = '20260930-auth2';
+                const INDEX_URL = `index.html?v=${UI_VERSION}`;
+                const NAVIGATION_KEY = 'face_admin_navigation';
                 const loading = ref(false);
                 const checkingSession = ref(false);
                 const sessionError = ref('');
+                const navigationWarning = ref('');
+                const sessionConfirmed = ref(false);
+                const entry = new URLSearchParams(window.location.search || '');
+                let automaticEntryBlocked = entry.get('reauth') === '1' || entry.get('logout') === '1';
+                if (entry.get('reauth') === '1') {
+                    navigationWarning.value = '管理后台未能确认登录状态，已停止自动跳转。请重新登录，或确认会话后点击进入管理后台。';
+                }
+                // This short-lived marker only stops navigation loops; the server still authenticates every request.
+                try {
+                    const pending = JSON.parse(sessionStorage.getItem(NAVIGATION_KEY) || 'null');
+                    const age = pending ? Date.now() - pending.at : -1;
+                    if (pending?.version === UI_VERSION && age >= 0 && age < 30000) {
+                        automaticEntryBlocked = true;
+                        navigationWarning.value ||= '刚才未能进入管理后台，已停止重复跳转。请重新登录，或确认会话后点击进入管理后台。';
+                    } else if (pending) sessionStorage.removeItem(NAVIGATION_KEY);
+                } catch (_) {
+                    automaticEntryBlocked = true;
+                    navigationWarning.value ||= '浏览器暂时无法记录页面跳转，已关闭自动跳转。请登录或手动进入管理后台。';
+                }
                 let csrfPromise = null;
                 let sessionSequence = 0;
                 let sessionController = null;
@@ -149,11 +175,23 @@
                     sessionTimer = null;
                     checkingSession.value = false;
                 };
-                const enterIndex = () => {
+                const enterIndex = (explicit = false) => {
                     if (disposed || navigating) return;
+                    try {
+                        sessionStorage.setItem(NAVIGATION_KEY, JSON.stringify({ version: UI_VERSION, at: Date.now() }));
+                    } catch (_) {
+                        if (!explicit) {
+                            automaticEntryBlocked = true;
+                            navigationWarning.value = '浏览器暂时无法记录页面跳转，已关闭自动跳转。请点击进入管理后台。';
+                            return;
+                        }
+                    }
                     navigating = true;
                     form.password = '';
-                    window.location.replace('index.html');
+                    window.location.replace(INDEX_URL);
+                };
+                const enterConfirmedIndex = () => {
+                    if (sessionConfirmed.value && !loading.value && !checkingSession.value) enterIndex(true);
                 };
                 const checkSession = async () => {
                     if (loading.value || checkingSession.value || navigating || disposed) return;
@@ -161,6 +199,7 @@
                     const controller = new AbortController();
                     sessionController = controller;
                     checkingSession.value = true;
+                    sessionConfirmed.value = false;
                     sessionError.value = '';
                     let timer;
                     try {
@@ -184,7 +223,10 @@
                                 sessionTimer = timer;
                             })
                         ]);
-                        if (sequence === sessionSequence && identity) enterIndex();
+                        if (sequence === sessionSequence) {
+                            sessionConfirmed.value = Boolean(identity);
+                            if (identity && !automaticEntryBlocked) enterIndex();
+                        }
                     } catch (error) {
                         if (sequence === sessionSequence && !disposed) {
                             sessionError.value = error.message || '暂时无法验证登录状态，可重新验证或直接登录';
@@ -219,7 +261,7 @@
                         csrfPromise = null;
                         form.password = '';
                         ElementPlus.ElMessage.success('登录成功');
-                        enterIndex();
+                        enterIndex(true);
                     } catch (error) {
                         csrfPromise = null;
                         ElementPlus.ElMessage.error(error.message || '网络错误，请稍后重试');
@@ -239,7 +281,10 @@
                     loading,
                     checkingSession,
                     sessionError,
+                    navigationWarning,
+                    sessionConfirmed,
                     checkSession,
+                    enterConfirmedIndex,
                     handleLogin,
                     User: ElementPlusIconsVue.User,
                     Lock: ElementPlusIconsVue.Lock,

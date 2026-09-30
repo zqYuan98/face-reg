@@ -415,10 +415,14 @@
 
             const app = createApp({
                 setup() {
+                    const UI_VERSION = '20260930-auth2';
+                    const LOGIN_URL = `login.html?v=${UI_VERSION}`;
+                    const NAVIGATION_KEY = 'face_admin_navigation';
                     const authenticated = ref(false);
                     const authError = ref('');
                     let csrfPromise = null;
                     let loggingOut = false;
+                    let redirecting = false;
 
                     const API_USER = '/api/users';
                     const API_GROUP = '/api/groups';
@@ -454,10 +458,15 @@
                     const batchResult = ref(null);
                     let previewObjectURL = null;
 
-                    const expireSession = () => {
+                    const expireSession = (reason = 'reauth') => {
                         authenticated.value = false;
                         csrfPromise = null;
-                        window.location.href = 'login.html';
+                        if (redirecting) return;
+                        redirecting = true;
+                        if (reason === 'logout') {
+                            try { sessionStorage.removeItem(NAVIGATION_KEY); } catch (_) { /* Not an auth credential. */ }
+                        }
+                        window.location.replace(`${LOGIN_URL}&${reason === 'logout' ? 'logout' : 'reauth'}=1`);
                     };
                     const readResponse = async (response, acceptedCodes = [200]) => {
                         if (response.status === 401) expireSession();
@@ -906,13 +915,14 @@
                         loggingOut = true;
                         try {
                             await requestJSON('/api/logout', { method: 'POST' });
-                            expireSession();
+                            expireSession('logout');
                         } catch (error) { reportError(error, '退出登录失败，请重试'); }
                         finally { loggingOut = false; }
                     };
                     onMounted(async () => {
                         try {
-                            await requestJSON('/api/me');
+                            await requestJSON('/api/me', { cache: 'no-store' });
+                            try { sessionStorage.removeItem(NAVIGATION_KEY); } catch (_) { /* Navigation guard is optional. */ }
                             authenticated.value = true;
                             await loadUsers();
                         } catch (error) {

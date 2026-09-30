@@ -11,6 +11,19 @@ const source = path.resolve(__dirname, '../../src/main/resources/static/index.ht
 const html = fs.readFileSync(source, 'utf8');
 const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
 assert.equal(scripts.length, 1);
+const indexURL = 'index.html?v=20260930-auth2';
+const loginURL = 'login.html?v=20260930-auth2';
+const navigationKey = 'face_admin_navigation';
+
+function memoryStorage(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    getItem: key => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: key => values.delete(key),
+    keys: () => [...values.keys()]
+  };
+}
 
 const response = (data, code = 200, status = code) => ({
   ok: status >= 200 && status < 300, status,
@@ -25,9 +38,10 @@ const deferred = () => {
 };
 const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(setImmediate); };
 
-function harness(customFetch, login = false) {
+function harness(customFetch, login = false, options = {}) {
   const calls = [], messages = [], revoked = [], replacements = [], timers = new Map();
   let mounted, unmount, exposed, timerId = 0, objectId = 0;
+  const storage = options.storage || memoryStorage();
   const context = {
     console, URLSearchParams, FormData, AbortController, Headers,
     URL: {
@@ -36,7 +50,11 @@ function harness(customFetch, login = false) {
     },
     setTimeout(callback, delay) { timers.set(++timerId, { callback, delay }); return timerId; },
     clearTimeout(id) { timers.delete(id); },
-    window: { location: { replace(url) { this.href = url; replacements.push(url); } } }, ElementPlusIconsVue: {},
+    sessionStorage: storage,
+    window: { location: {
+      search: new URL(options.url || (login ? 'login.html' : 'index.html'), 'http://fixture.invalid').search,
+      replace(url) { this.href = url; replacements.push(url); }
+    } }, ElementPlusIconsVue: {},
     ElementPlus: {
       ElMessage: Object.fromEntries(['error', 'success', 'warning'].map(type => [type, message => messages.push({ type, message })])),
       ElMessageBox: { confirm: async () => true }
@@ -64,10 +82,10 @@ function harness(customFetch, login = false) {
     }
   };
   const loginSource = path.resolve(__dirname, '../../src/main/resources/static/login.html');
-  const script = login ? [...fs.readFileSync(loginSource, 'utf8').matchAll(/<script>([\s\S]*?)<\/script>/g)][0][1] : scripts[0][1];
+  const script = options.script || (login ? [...fs.readFileSync(loginSource, 'utf8').matchAll(/<script>([\s\S]*?)<\/script>/g)][0][1] : scripts[0][1]);
   vm.runInNewContext(script, context, { filename: login ? loginSource : source });
   return {
-    app: exposed, calls, messages, revoked, replacements, location: context.window.location,
+    app: exposed, calls, messages, revoked, replacements, storage, location: context.window.location,
     mount: () => mounted(), unmount: () => unmount(),
     pendingTimerDelays: () => [...timers.values()].map(timer => timer.delay),
     flushTimers() { const scheduled = [...timers.values()]; timers.clear(); scheduled.forEach(timer => timer.callback()); }
@@ -381,7 +399,8 @@ test('startup waits for the server session and never loads admin data after 401'
   assert.equal(h.app.authenticated.value, false);
   me.resolve(response(null, 401));
   await startup;
-  assert.equal(h.location.href, 'login.html');
+  assert.equal(h.location.href, `${loginURL}&reauth=1`);
+  assert.deepEqual(h.replacements, [`${loginURL}&reauth=1`], 'HTTP and body 401 must cause only one redirect');
   assert.equal(h.calls.length, 1);
   assert.equal(h.app.authenticated.value, false);
   assert.equal(h.calls[0].options.credentials, 'same-origin');
@@ -431,7 +450,7 @@ test('logout is a CSRF-protected server mutation and only then redirects', async
   assert.equal(h.calls.filter(call => call.url === '/api/logout').length, 1);
   ending.resolve(response(null));
   await logout;
-  assert.equal(h.location.href, 'login.html');
+  assert.equal(h.location.href, `${loginURL}&logout=1`);
 });
 
 test('login prevents duplicate submissions and navigates immediately after the protected POST', async () => {
@@ -452,8 +471,8 @@ test('login prevents duplicate submissions and navigates immediately after the p
   assert.equal(h.calls.every(call => call.options.credentials === 'same-origin'), true);
   assert.equal(JSON.parse(h.calls[1].options.body).password, 'test-password');
   assert.equal(h.app.form.password, '');
-  assert.equal(h.location.href, 'index.html');
-  assert.deepEqual(h.replacements, ['index.html']);
+  assert.equal(h.location.href, indexURL);
+  assert.deepEqual(h.replacements, [indexURL]);
   await h.app.handleLogin();
   assert.equal(h.calls.filter(call => call.url === '/api/login').length, 1);
   assert.equal(h.app.loading.value, false);
@@ -480,7 +499,7 @@ test('opening login with an existing session uses an uncached same-origin probe 
   assert.deepEqual(h.calls.map(call => call.url), ['/api/me']);
   assert.equal(h.calls[0].options.credentials, 'same-origin');
   assert.equal(h.calls[0].options.cache, 'no-store');
-  assert.deepEqual(h.replacements, ['index.html']);
+  assert.deepEqual(h.replacements, [indexURL]);
   assert.equal(h.app.form.password, '');
   assert.equal(h.app.checkingSession.value, false);
   assert.equal(h.app.sessionError.value, '');
@@ -499,7 +518,7 @@ test('a 401 session probe leaves the login form available without treating it as
   h.app.form.password = 'fixture-password';
   await h.app.handleLogin();
   assert.deepEqual(h.calls.map(call => call.url), ['/api/me', '/api/csrf', '/api/login']);
-  assert.deepEqual(h.replacements, ['index.html']);
+  assert.deepEqual(h.replacements, [indexURL]);
 });
 
 test('an in-flight session probe blocks duplicate probes and login submissions, then releases the form', async () => {
@@ -553,10 +572,10 @@ test('session probe timeout releases login even when fetch ignores abort, and a 
   h.app.form.username = 'admin';
   h.app.form.password = 'fixture-password';
   await h.app.handleLogin();
-  assert.deepEqual(h.replacements, ['index.html']);
+  assert.deepEqual(h.replacements, [indexURL]);
   oldProbe.resolve(response({ username: 'stale-identity' }));
   await settle();
-  assert.deepEqual(h.replacements, ['index.html'], 'the late probe must not navigate again');
+  assert.deepEqual(h.replacements, [indexURL], 'the late probe must not navigate again');
   assert.equal(h.app.sessionError.value, '');
   assert.equal(h.app.loading.value, false);
   assert.equal(h.app.form.password, '');
@@ -591,4 +610,154 @@ test('unmount cancels the session probe and suppresses its late navigation', asy
   await probing;
   assert.equal(h.replacements.length, 0);
   assert.equal(h.app.sessionError.value, '');
+});
+
+// Execute the historical f213419 setup gate, not its retired unpaged data requests.
+const legacyIndexGate = `
+  const token = sessionStorage.getItem('admin_token');
+  if (!token) window.location.href = 'login.html';
+`;
+async function followPages({ start = 'login.html', storage = memoryStorage(), legacy = 'none', indexStatus = 200 } = {}) {
+  const visits = [];
+  let url = start;
+  for (let i = 0; i < 8; i++) {
+    const parsed = new URL(url, 'http://fixture.invalid');
+    const login = parsed.pathname.endsWith('/login.html');
+    const useLegacy = !login && (legacy === 'always' || legacy === 'unversioned' && !parsed.searchParams.has('v'));
+    const h = harness(request => request === '/api/me'
+      ? response({ username: 'fixture-admin' }, login ? 200 : indexStatus) : undefined, login, {
+      url, storage, script: useLegacy ? legacyIndexGate : undefined
+    });
+    visits.push({ url, legacy: useLegacy, h });
+    if (!useLegacy) await h.mount();
+    if (!h.location.href) return visits;
+    url = h.location.href;
+  }
+  assert.fail(`automatic navigation did not settle: ${visits.map(visit => visit.url).join(' -> ')}`);
+}
+
+test('mixed-version navigation bypasses the cached legacy index and authenticates the new page', async () => {
+  const storage = memoryStorage();
+  const visits = await followPages({ start: 'index.html', legacy: 'unversioned', storage });
+  assert.deepEqual(visits.map(visit => visit.url), ['index.html', 'login.html', indexURL]);
+  assert.equal(visits.filter(visit => visit.legacy).length, 1);
+  const index = visits.at(-1).h;
+  assert.equal(index.app.authenticated.value, true);
+  assert.equal(index.calls[0].url, '/api/me');
+  assert.equal(index.calls[0].options.cache, 'no-store');
+  assert.equal(storage.getItem(navigationKey), null, 'only successful server authentication clears the marker');
+  assert.equal(storage.getItem('admin_token'), null, 'never manufacture the retired auth token');
+});
+
+test('even a forced legacy index can return to login only once before the short-lived guard stops navigation', async () => {
+  const storage = memoryStorage();
+  const visits = await followPages({ legacy: 'always', storage });
+  assert.deepEqual(visits.map(visit => visit.url), ['login.html', indexURL, 'login.html']);
+  const stopped = visits.at(-1).h;
+  assert.ok(stopped.app.navigationWarning.value);
+  assert.equal(stopped.app.sessionConfirmed.value, true);
+  assert.equal(stopped.replacements.length, 0);
+  await stopped.app.checkSession();
+  assert.equal(stopped.replacements.length, 0, 'rechecking identity must not restart a blocked automatic loop');
+  assert.deepEqual(storage.keys(), [navigationKey]);
+  assert.deepEqual(Object.keys(JSON.parse(storage.getItem(navigationKey))).sort(), ['at', 'version']);
+});
+
+test('login 200 and index 401 settle on a persistent reauthentication page instead of bouncing', async () => {
+  const storage = memoryStorage();
+  const visits = await followPages({ indexStatus: 401, storage });
+  assert.deepEqual(visits.map(visit => visit.url), ['login.html', indexURL, `${loginURL}&reauth=1`]);
+  assert.deepEqual(visits[1].h.replacements, [`${loginURL}&reauth=1`]);
+  assert.equal(visits[1].h.calls.some(call => call.url.includes('/users/page')), false);
+  const stopped = visits.at(-1).h;
+  assert.ok(stopped.app.navigationWarning.value);
+  assert.equal(stopped.app.sessionConfirmed.value, true);
+  stopped.app.enterConfirmedIndex();
+  stopped.app.enterConfirmedIndex();
+  assert.deepEqual(stopped.replacements, [indexURL], 'a user gesture permits one fresh navigation');
+  const retryVisits = await followPages({ start: stopped.location.href, indexStatus: 401, storage });
+  assert.deepEqual(retryVisits.map(visit => visit.url), [indexURL, `${loginURL}&reauth=1`]);
+  assert.equal(retryVisits.at(-1).h.replacements.length, 0);
+});
+
+test('a reauthentication URL blocks automatic navigation even without a storage marker', async () => {
+  const h = harness(undefined, true, { url: `${loginURL}&reauth=1` });
+  await h.mount();
+  assert.equal(h.app.sessionConfirmed.value, true);
+  assert.ok(h.app.navigationWarning.value);
+  assert.equal(h.location.href, undefined);
+  h.app.form.username = 'fixture-admin';
+  h.app.form.password = 'fixture-password';
+  await h.app.handleLogin();
+  assert.deepEqual(h.replacements, [indexURL]);
+  assert.equal(h.calls.filter(call => call.url === '/api/login').length, 1);
+});
+
+test('storage read or write failures disable automatic entry but permit explicit server-confirmed entry', async () => {
+  for (const failure of ['getItem', 'setItem']) {
+    const storage = memoryStorage();
+    storage[failure] = () => { throw new Error('storage unavailable'); };
+    const h = harness(undefined, true, { storage });
+    await h.mount();
+    assert.equal(h.app.sessionConfirmed.value, true);
+    assert.ok(h.app.navigationWarning.value);
+    assert.equal(h.replacements.length, 0);
+    h.app.enterConfirmedIndex();
+    assert.deepEqual(h.replacements, [indexURL]);
+    const index = harness(undefined, false, { storage, url: h.location.href });
+    await index.mount();
+    assert.equal(index.app.authenticated.value, true, 'storage is never the source of authentication');
+  }
+});
+
+test('a marker or unavailable storage never permits entry when the server has not confirmed a session', async () => {
+  const storage = memoryStorage({ [navigationKey]: JSON.stringify({ version: '20260930-auth2', at: Date.now() }) });
+  const h = harness(url => url === '/api/me' ? response(null, 401) : undefined, true, { storage });
+  await h.mount();
+  h.app.enterConfirmedIndex();
+  assert.equal(h.app.sessionConfirmed.value, false);
+  assert.equal(h.replacements.length, 0);
+  storage.getItem = storage.removeItem = () => { throw new Error('storage disabled'); };
+  const index = harness(url => url === '/api/me' ? response(null, 401) : undefined, false, { storage });
+  await index.mount();
+  assert.equal(index.app.authenticated.value, false);
+  assert.deepEqual(index.replacements, [`${loginURL}&reauth=1`]);
+});
+
+test('expired or older-version navigation markers do not block a healthy current session', async () => {
+  for (const marker of [
+    { version: '20260930-auth2', at: Date.now() - 31000 },
+    { version: 'obsolete-ui', at: Date.now() }
+  ]) {
+    const storage = memoryStorage({ [navigationKey]: JSON.stringify(marker) });
+    const visits = await followPages({ storage });
+    assert.deepEqual(visits.map(visit => visit.url), ['login.html', indexURL]);
+    assert.equal(visits.at(-1).h.app.authenticated.value, true);
+    assert.equal(storage.getItem(navigationKey), null);
+  }
+});
+
+test('normal logout clears navigation state and supports a fresh explicit login without an anomaly warning', async () => {
+  const storage = memoryStorage({ [navigationKey]: JSON.stringify({ version: '20260930-auth2', at: Date.now() }) });
+  const index = harness(undefined, false, { storage });
+  await index.mount();
+  await index.app.handleCommand('logout');
+  assert.deepEqual(index.replacements, [`${loginURL}&logout=1`]);
+  assert.equal(storage.getItem(navigationKey), null);
+  // Even a stale 200 after logout must not send the user straight back automatically.
+  const login = harness(undefined, true, { storage, url: index.location.href });
+  await login.mount();
+  assert.equal(login.app.navigationWarning.value, '');
+  assert.equal(login.replacements.length, 0);
+  login.app.form.username = 'fixture-admin';
+  login.app.form.password = 'fixture-password';
+  await login.app.handleLogin();
+  assert.deepEqual(login.replacements, [indexURL]);
+  const freshIndex = harness(undefined, false, { storage, url: login.location.href });
+  await freshIndex.mount();
+  assert.equal(freshIndex.app.authenticated.value, true);
+  assert.equal(storage.getItem(navigationKey), null);
+  const directLogin = harness(undefined, true, { storage });
+  await directLogin.mount();
+  assert.deepEqual(directLogin.replacements, [indexURL], 'successful entry resets the temporary loop guard');
 });
