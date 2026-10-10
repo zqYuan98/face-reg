@@ -4,6 +4,8 @@
 
 算法服务通过 `feature_comparison_server.py` 启动时提供检测、特征提取和特征比对三个计算接口。新增 `POST /api/compare_feature` 接收 JSON 中的两个 1024 维特征，接口与旧服务升级方式见 [特征比对接口](FaceFeatureExtractorAPI/FEATURE_COMPARISON.md)。
 
+37 服务器已于 2026-10-10 在原 `18001` 端口上线该接口，验收与回退见 [部署记录](docs/reports/2026-10-10-feature-comparison-deployment.md)。
+
 修复结果和实际测试见 [验证记录](docs/reports/2026-09-24-backend-remediation-results.md)。本地测试通过不代表生产已部署或真机容量已验收。
 
 ## 启动前
