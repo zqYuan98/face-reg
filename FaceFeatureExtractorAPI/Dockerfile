@@ -29,4 +29,4 @@ COPY . .
 EXPOSE 8000
 
 # 启动服务
-CMD ["python", "feature_server.py", "--port", "8000"]
+CMD ["python", "feature_comparison_server.py", "--port", "8000"]

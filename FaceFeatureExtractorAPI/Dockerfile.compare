@@ -1,0 +1,19 @@
+# Build context: FaceFeatureExtractorAPI. BASE_IMAGE must be the exact deployed
+# 1.1.0 image (tag pinned to its image ID, or a registry digest).
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG VCS_REF
+LABEL org.opencontainers.image.revision="${VCS_REF}"
+LABEL org.opencontainers.image.description="Existing feature service plus vector comparison"
+WORKDIR /app
+
+# Copy only the model-free comparison dependency closure. Keep the original
+# feature_server.py, extractor, models, configuration and Python environment.
+COPY api/__init__.py api/feature_comparison.py api/body_limit.py api/deadline.py api/errors.py ./api/
+COPY face_algorithm/__init__.py face_algorithm/schemas.py ./face_algorithm/
+COPY face_algorithm/core/__init__.py face_algorithm/core/protocols.py face_algorithm/core/matcher.py ./face_algorithm/core/
+COPY feature_comparison_server.py ./
+
+RUN python -c "from feature_comparison_server import app; assert app.version == '1.2.0'; assert len(app.openapi()['paths']) == 5"
+CMD ["python", "feature_comparison_server.py", "--port", "8000"]
