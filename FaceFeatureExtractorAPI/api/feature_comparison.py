@@ -34,6 +34,22 @@ FeatureVector = Annotated[
 ]
 
 
+def require_float32_numbers(value: Any) -> Any:
+    """Shared strict JSON-vector validation for the frozen feature protocol."""
+    if type(value) is not list or len(value) != FEATURE_DIMENSION:
+        raise ValueError("feature must contain exactly 1024 numbers")
+    for item in value:
+        if type(item) not in (int, float):
+            raise ValueError("feature values must be JSON numbers")
+        try:
+            number = float(item)
+        except (OverflowError, ValueError):
+            raise ValueError("feature value is outside float32 range") from None
+        if not math.isfinite(number) or abs(number) > _FLOAT32_MAX:
+            raise ValueError("feature values must be finite float32 numbers")
+    return value
+
+
 class FeatureComparisonRequest(BaseModel):
     """Both vectors must declare the supported, shared extraction protocol."""
 
@@ -49,19 +65,7 @@ class FeatureComparisonRequest(BaseModel):
     @field_validator("reference_feature", "probe_feature", mode="before")
     @classmethod
     def require_float32_numbers(cls, value: Any) -> Any:
-        if type(value) is not list or len(value) != FEATURE_DIMENSION:
-            raise ValueError("feature must contain exactly 1024 numbers")
-        for item in value:
-            # Do not coerce JSON booleans, strings, objects, or nested arrays.
-            if type(item) not in (int, float):
-                raise ValueError("feature values must be JSON numbers")
-            try:
-                number = float(item)
-            except (OverflowError, ValueError):
-                raise ValueError("feature value is outside float32 range") from None
-            if not math.isfinite(number) or abs(number) > _FLOAT32_MAX:
-                raise ValueError("feature values must be finite float32 numbers")
-        return value
+        return require_float32_numbers(value)
 
 
 class FeatureComparisonResponse(BaseModel):
