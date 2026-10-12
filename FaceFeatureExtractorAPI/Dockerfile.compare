@@ -14,7 +14,7 @@ WORKDIR /app
 COPY api/__init__.py api/feature_comparison.py api/feature_search.py api/search_execution.py api/body_limit.py api/deadline.py api/errors.py ./api/
 COPY face_algorithm/__init__.py face_algorithm/schemas.py ./face_algorithm/
 COPY face_algorithm/core/__init__.py face_algorithm/core/protocols.py face_algorithm/core/matcher.py face_algorithm/core/search.py ./face_algorithm/core/
-COPY feature_comparison_server.py ./
+COPY feature_comparison_server.py image_runtime_options.py ./
 
 RUN python -c "from feature_comparison_server import app; assert app.version == '1.3.0'; assert set(app.openapi()['paths']) == {'/health', '/ready', '/api/detect_face', '/api/extract_feature', '/api/compare_feature', '/api/search_feature'}"
 CMD ["python", "feature_comparison_server.py", "--port", "8000"]

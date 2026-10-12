@@ -16,14 +16,21 @@ from api.feature_search import (
     create_feature_search_router,
 )
 from face_algorithm.schemas import ReasonCode
-from feature_server import app
+from feature_server import app as original_app, create_app, default_factory
+from image_runtime_options import initialize_image_worker
 
 
-if app.version != "1.1.0":
+if original_app.version != "1.1.0":
     raise RuntimeError("Comparison overlay requires the original 1.1.0 feature service")
-if {LEGACY_FEATURE_COMPARISON_PATH, FEATURE_SEARCH_PATH}.intersection(route.path for route in app.routes):
+if {LEGACY_FEATURE_COMPARISON_PATH, FEATURE_SEARCH_PATH}.intersection(route.path for route in original_app.routes):
     raise RuntimeError("Feature comparison or search is already registered")
 
+
+def bounded_factory():
+    return initialize_image_worker(default_factory)
+
+
+app = create_app(factory=bounded_factory)
 app.add_middleware(
     RequestBodyLimitMiddleware,
     limits={

@@ -122,13 +122,15 @@ except HTTPError as error:
 
 ## 启动与升级
 
-完整源码部署使用 `python feature_comparison_server.py --port 8000`；根 Compose 对应的默认 Dockerfile 已使用此入口。包装入口要求原 `feature_server.py` 版本为 1.1.0，复用其 app、生命周期和图像推理槽，追加 1:1 和 1:N 路由，公开服务版本更新为 1.3.0。直接运行原 `feature_server.py` 仍是原两接口服务。
+完整源码部署使用 `python feature_comparison_server.py --port 8000`；根 Compose 对应的默认 Dockerfile 已使用此入口。包装入口要求原 `feature_server.py` 版本为 1.1.0，调用原 create_app，保留原生命周期和图像推理槽，追加 1:1 和 1:N 路由，公开服务版本更新为 1.3.0。直接运行原 `feature_server.py` 仍是原两接口服务。
+
+包装入口在原图像工作线程内统一 ONNX 会话线程设置：会话内/间线程各为 1，关闭自旋等待，并兼容旧代码的 `session_options` 参数名。该调整适配现场 2 CPU 配额，覆盖初始化和后续旋转会话；不改模型、预处理、图优化或质量判断。其他线程保持原构造行为，纯特征搜索子进程不初始化图片模型。
 
 现有生产镜像可使用 `Dockerfile.compare` 追加接口，支持现场 Python 3.10、Pydantic 2、FastAPI 和 NumPy 环境，不安装或升级推理依赖。构建上下文为本目录：
 
 ```sh
 docker build -f Dockerfile.compare \
-  --build-arg BASE_IMAGE=<原1.1.0镜像的固定标签或摘要> \
+  --build-arg BASE_IMAGE=<保留原feature_server的已部署镜像固定标签或摘要> \
   --build-arg VCS_REF=<源码提交SHA> \
   -t face-algorithm:<发布标签> .
 ```
