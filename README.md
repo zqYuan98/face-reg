@@ -4,7 +4,7 @@
 
 算法服务通过 `feature_comparison_server.py` 启动时提供检测、特征提取、1:1 特征比对和纯特征 1:N 检索四个计算接口。`POST /api/compare_feature` 比较两个特征；`POST /api/search_feature` 将一个特征与最多 1000 个候选比较并返回 Top-K。接口与旧服务升级方式见 [特征比对与检索](FaceFeatureExtractorAPI/FEATURE_COMPARISON.md)。
 
-37 服务器已于 2026-10-10 在原 `18001` 端口上线该接口，验收与回退见 [部署记录](docs/reports/2026-10-10-feature-comparison-deployment.md)。
+37 服务器已于 2026-10-12 在原 `18001` 端口上线 1:N，服务版本为 1.3.0。1000 候选连续调用与混合图片负载均已验证；实测范围、验收和回退见 [部署记录](docs/reports/2026-10-12-feature-search-deployment.md)。
 
 修复结果和实际测试见 [验证记录](docs/reports/2026-09-24-backend-remediation-results.md)。本地测试通过不代表生产已部署或真机容量已验收。
 
