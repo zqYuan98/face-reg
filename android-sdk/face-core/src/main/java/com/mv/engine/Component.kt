@@ -4,12 +4,7 @@ package com.mv.engine
 abstract class Component {
 
     init {
-        try {
-            System.loadLibrary("engine")
-            libraryFound = true
-        } catch (e: UnsatisfiedLinkError) {
-            e.printStackTrace()
-        }
+        loadLibrary()
     }
 
     abstract fun createInstance(): Long
@@ -20,5 +15,16 @@ abstract class Component {
         var libraryFound: Boolean = false
 
         const val tag = "Component"
+
+        @JvmStatic
+        fun loadLibrary() {
+            if (libraryFound) return
+            try {
+                System.loadLibrary("engine")
+                libraryFound = true
+            } catch (e: UnsatisfiedLinkError) {
+                e.printStackTrace()
+            }
+        }
     }
 }

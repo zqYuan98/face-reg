@@ -6,6 +6,7 @@
 #include "definition.h"
 #include "detection/face_detector.h"
 #include "img_process.h"
+#include "upright_frame.h"
 #include <android/asset_manager_jni.h>
 
 
@@ -42,6 +43,9 @@ FACE_DETECTOR_METHOD(nativeDetectBitmap)(JNIEnv *env, jobject instance, jobject 
 JNIEXPORT jobject JNICALL
 FACE_DETECTOR_METHOD(nativeDetectYuv)(JNIEnv *env, jobject instance, jbyteArray yuv,
                                       jint preview_width, jint preview_height,jint orientation);
+
+JNIEXPORT jobject JNICALL
+FACE_DETECTOR_METHOD(nativeDetectFrame)(JNIEnv *env, jobject instance, jlong frame_handle);
 
 }
 
@@ -126,7 +130,17 @@ FACE_DETECTOR_METHOD(nativeDetectYuv)(JNIEnv *env, jobject instance, jbyteArray 
     std::vector<FaceBox> boxes;
     get_face_detector(env, instance)->Detect(bgr, boxes);
 
-    env->ReleaseByteArrayElements(yuv, yuv_, 0);
+    env->ReleaseByteArrayElements(yuv, yuv_, JNI_ABORT);
 
+    return ConvertFaceBoxVector2List(env, boxes);
+}
+
+JNIEXPORT jobject JNICALL
+FACE_DETECTOR_METHOD(nativeDetectFrame)(JNIEnv *env, jobject instance, jlong frame_handle) {
+    auto *frame = reinterpret_cast<UprightFrame *>(frame_handle);
+    std::vector<FaceBox> boxes;
+    if (frame != nullptr && !frame->bgr.empty()) {
+        get_face_detector(env, instance)->Detect(frame->bgr, boxes);
+    }
     return ConvertFaceBoxVector2List(env, boxes);
 }

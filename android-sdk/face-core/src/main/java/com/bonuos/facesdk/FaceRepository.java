@@ -180,6 +180,14 @@ public class FaceRepository {
         public String name;
         public Long groupId;
         public String photoPath;
+        /** Null on users held by FaceRecognizer: its gallery keeps the only (normalised) copy. */
         public float[] feature;
+
+        /** Identity is the server id, so the same person matches across dataset reloads. */
+        @Override public boolean equals(Object other) {
+            return other instanceof FaceUser && ((FaceUser) other).id == id;
+        }
+
+        @Override public int hashCode() { return Long.hashCode(id); }
     }
 }

@@ -37,6 +37,9 @@ class FaceDetector : Component() {
     }
 
 
+    /** Boxes in [frame] coordinates, largest first. */
+    fun detect(frame: UprightFrame): List<FaceBox> = nativeDetectFrame(frame.nativeHandle())
+
     override fun destroy() = deallocate()
 
     //////////////////////////////// Native ////////////////////////////////////
@@ -51,6 +54,9 @@ class FaceDetector : Component() {
 
     @Keep
     private external fun nativeDetectBitmap(bitmap: Bitmap): List<FaceBox>
+
+    @Keep
+    private external fun nativeDetectFrame(frameHandle: Long): List<FaceBox>
 
     @Keep
     private external fun nativeDetectYuv(

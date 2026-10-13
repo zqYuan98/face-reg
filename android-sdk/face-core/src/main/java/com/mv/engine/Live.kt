@@ -58,6 +58,10 @@ class Live : Component() {
         )
     }
 
+    /** Mean real-face probability of both models on a box from [FaceDetector.detect]; NaN on error. */
+    fun detect(frame: UprightFrame, faceBox: FaceBox): Float =
+        nativeDetectFrame(frame.nativeHandle(), faceBox.left, faceBox.top, faceBox.right, faceBox.bottom)
+
     private fun parseConfig(assetManager: AssetManager): List<ModelConfig> {
         val inputStream = assetManager.open("live/config.json")
         val br = BufferedReader(InputStreamReader(inputStream))
@@ -101,6 +105,9 @@ class Live : Component() {
         assetManager: AssetManager,
         configs: List<ModelConfig>
     ): Int
+
+    @Keep
+    private external fun nativeDetectFrame(frameHandle: Long, left: Int, top: Int, right: Int, bottom: Int): Float
 
     @Keep
     private external fun nativeDetectYuv(

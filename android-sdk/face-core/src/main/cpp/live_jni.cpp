@@ -3,10 +3,12 @@
 //
 
 #include <android/asset_manager_jni.h>
+#include <cmath>
 #include "jni_long_field.h"
 #include "live/live.h"
 #include "android_log.h"
 #include "img_process.h"
+#include "upright_frame.h"
 
 JniLongField live_field("nativeHandler");
 
@@ -36,6 +38,10 @@ LIVE_METHOD(nativeLoadModel)(JNIEnv *env, jobject instance, jobject asset_manage
 JNIEXPORT jfloat JNICALL
 LIVE_METHOD(nativeDetectYuv)(JNIEnv *env, jobject instance, jbyteArray yuv, jint preview_width,
                              jint preview_height, jint orientation, jint left, jint top, jint right, jint bottom);
+
+JNIEXPORT jfloat JNICALL
+LIVE_METHOD(nativeDetectFrame)(JNIEnv *env, jobject instance, jlong frame_handle,
+                               jint left, jint top, jint right, jint bottom);
 
 }
 
@@ -123,7 +129,21 @@ LIVE_METHOD(nativeDetectYuv)(JNIEnv *env, jobject instance, jbyteArray yuv, jint
     faceBox.y2 = bottom;
 
     float confidence = get_live(env, instance)->Detect(bgr, faceBox);
-    env->ReleaseByteArrayElements(yuv, yuv_, 0);
+    env->ReleaseByteArrayElements(yuv, yuv_, JNI_ABORT);
     return confidence;
+}
+
+/** Scores a box on the frame the detector already ran on; no second colour conversion. NaN on error. */
+JNIEXPORT jfloat JNICALL
+LIVE_METHOD(nativeDetectFrame)(JNIEnv *env, jobject instance, jlong frame_handle,
+                               jint left, jint top, jint right, jint bottom) {
+    auto *frame = reinterpret_cast<UprightFrame *>(frame_handle);
+    if (frame == nullptr || frame->bgr.empty() || right <= left || bottom <= top) return NAN;
+    FaceBox faceBox;
+    faceBox.x1 = left;
+    faceBox.y1 = top;
+    faceBox.x2 = right;
+    faceBox.y2 = bottom;
+    return get_live(env, instance)->Detect(frame->bgr, faceBox);
 }
 
