@@ -18,6 +18,17 @@ android {
     // Models are mapped straight from the APK by the native engine; keep them uncompressed.
     androidResources {
         noCompress += "onnx"
+        // The app runs Backend.NATIVE_INT8. The prebuilt library's models (fp32 recognizer, rotation
+        // classifier, FSANet) stay in face-core for face-bench, but are not shipped here (~113 MB).
+        ignoreAssetsPattern = "!face_recognizer.onnx:!model_gray_mobilenetv2_rotcls.onnx:!fsanet-conv.onnx:!fsanet-var.onnx:" +
+                "!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~"
+    }
+
+    packaging {
+        jniLibs {
+            // Only the prebuilt recognition library (FaceRecognizer.Backend.LEGACY_SDK) needs these.
+            excludes += listOf("**/libface_sdk_jni.so", "**/libopencv_java4.so", "**/libonnxruntime4j_jni.so")
+        }
     }
     namespace = "com.bonuos.faceapp"
     compileSdk = 34
