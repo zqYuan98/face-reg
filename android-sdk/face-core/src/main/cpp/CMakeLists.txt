@@ -17,7 +17,8 @@ add_library(opencv_codecs STATIC IMPORTED)
 set_target_properties(opencv_codecs PROPERTIES IMPORTED_LOCATION ${PROJECT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libopencv_imgcodecs.so)
 
 
-file(GLOB jni_srcs
+# CONFIGURE_DEPENDS re-runs the glob on every build; without it new .cpp files are silently left out.
+file(GLOB jni_srcs CONFIGURE_DEPENDS
         "*.cpp"
         "detection/*.cpp"
         "live/*.cpp"
@@ -26,3 +27,13 @@ file(GLOB jni_srcs
 add_library(engine SHARED ${jni_srcs})
 
 target_link_libraries(engine log jnigraphics ncnn opencv_core opencv_imgproc opencv_codecs android)
+
+# ---- faceengine: our own recognition pipeline (replaces the prebuilt libface_sdk_jni.so) ----
+add_library(onnxruntime SHARED IMPORTED)
+set_target_properties(onnxruntime PROPERTIES IMPORTED_LOCATION ${PROJECT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libonnxruntime.so)
+
+file(GLOB engine_core_srcs CONFIGURE_DEPENDS "engine/*.cpp" "engine/jni/*.cpp")
+add_library(faceengine SHARED ${engine_core_srcs})
+# C++17 for the ONNX Runtime headers; unfused float math to match the NumPy enrolment service.
+target_compile_options(faceengine PRIVATE -std=c++17 -ffp-contract=off)
+target_link_libraries(faceengine onnxruntime opencv_imgproc opencv_core log android jnigraphics)

@@ -6,6 +6,7 @@ import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
 
+import com.bonuos.facesdk.SyncConfig;
 import com.bonuos.facesdk.SyncManager;
 
 public class MainActivity extends AppCompatActivity {
@@ -19,6 +20,7 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        configureSyncFromBuild();
         syncManager = new SyncManager(this);
 
         tvSyncStatus = findViewById(R.id.tv_sync_status);
@@ -28,6 +30,20 @@ public class MainActivity extends AppCompatActivity {
             startActivity(intent);
         });
     }
+    /**
+     * Test builds take the server and device credential from local.properties (face.sync.*).
+     * Production devices must be provisioned by a secure enrolment flow instead.
+     */
+    private void configureSyncFromBuild() {
+        if (BuildConfig.SYNC_URL.isEmpty()) return;
+        try {
+            SyncManager.configure(new SyncConfig(BuildConfig.SYNC_URL, BuildConfig.SYNC_DEVICE_SN,
+                    BuildConfig.SYNC_DEVICE_SECRET, SyncConfig.Protocol.V2, BuildConfig.SYNC_ALLOW_CLEARTEXT));
+        } catch (IllegalArgumentException error) {
+            Toast.makeText(this, "同步配置无效: " + error.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
     @Override
     protected void onResume() {
         super.onResume();

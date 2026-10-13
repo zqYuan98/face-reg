@@ -108,10 +108,42 @@ FaceRecognizer(Context context)
 
 **setThreshold(float threshold)**
 - 参数: `float` - 识别阈值 (0.0-1.0)
-- 说明: 设置识别阈值，默认 0.80
+- 说明: 设置识别阈值，默认 0.65（未经校准，应按 FAR 校准后设置）
 
 **release()**
 - 说明: 释放资源
+
+**gallery()**
+- 返回: `Gallery<FaceUser>` - 当前人员库的不可变快照（归一化特征矩阵，一次扫描求 top-2）
+- 说明: 同步发布后自动重建。特征缺失、维度不符、全零或非有限值的人员会被跳过并计数，不参与比对
+
+### FaceSession（连续视频识别，推荐）
+
+相机连续识别请用 `com.bonuos.facesdk.engine.FaceSession`，不要逐帧调用 `recognize(Bitmap)`。它给每张脸一个跟踪 ID，按"大小 → 越界 → 多人 → 稳定"的顺序做廉价过滤，活体三帧投票，特征在独立线程提取、每人只提 1～3 次，处于阈值边缘时融合多帧特征后再判定。示例见 `app` 模块的 `FaceRecognitionActivity`。
+
+```java
+FaceRecognizer recognizer = new FaceRecognizer(context);
+MvEngines engines = new MvEngines(context);          // 检测 + 静默活体，共用一次原生格式转换
+SessionConfig config = new SessionConfig();          // 阈值类参数均未校准，见类注释
+FaceSession<FaceRepository.FaceUser> session = new FaceSession<>(config, engines, engines,
+        new LegacyFeatureEngine(recognizer), recognizer, listener);
+
+// CameraX 分析线程，每帧：
+session.onFrame(new CameraFrame(nv21, width, height, imageInfo.getRotationDegrees(), timestampMs));
+
+// 释放（在分析线程上，且在最后一帧之后）：
+session.close(); engines.close(); recognizer.release();
+```
+
+`Listener` 三个回调都在调用 `onFrame` 的线程上：
+
+| 回调 | 时机 |
+|---|---|
+| `onFaces(faces, frame)` | 每帧；每张脸的平滑框、活体状态、识别状态和原因码（如 `FACE_TOO_SMALL`、`NOT_STABLE`、`NOT_ALIVE`），用于画框和提示 |
+| `onRecognized(event)` | 一个跟踪识别成功；同一人在 `identityCooldownMs` 内不重复上报 |
+| `onRecognitionFailed(trackId, bestScore, reason)` | 一个跟踪用完重试次数仍未匹配，退避 `recognizeFailedRetryMs` 后重试 |
+
+`CameraFrame` 的 `nv21` 缓冲在 `onFrame` 返回后即可复用；送给识别模型的是人脸周围的裁剪图（`featureCropScale`，默认框边长 2.2 倍），只转换裁剪区域。
 
 ### SyncManager
 

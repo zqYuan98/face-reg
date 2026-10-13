@@ -2,17 +2,10 @@ package com.bonuos.faceapp;
 
 import android.Manifest;
 import android.content.pm.PackageManager;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.ImageFormat;
-import android.graphics.Matrix;
-import android.graphics.Rect;
-import android.graphics.RectF;
-import android.graphics.YuvImage;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.View;
-import android.widget.ImageView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -30,50 +23,61 @@ import androidx.core.content.ContextCompat;
 
 import com.bonuos.facesdk.FaceRecognizer;
 import com.bonuos.facesdk.FaceRepository;
-import com.bonuos.facesdk.RecognitionResult;
-import com.bonuos.facesdk.LivenessResult;
+import com.bonuos.facesdk.engine.CameraFrame;
+import com.bonuos.facesdk.engine.FaceRect;
+import com.bonuos.facesdk.engine.FaceSession;
+import com.bonuos.facesdk.engine.MvEngines;
+import com.bonuos.facesdk.engine.NativeEngine;
+import com.bonuos.facesdk.engine.NativeFeatureEngine;
+import com.bonuos.facesdk.engine.SessionConfig;
+import com.bonuos.facesdk.image.Nv21;
 import com.bonuos.faceapp.widget.RectView;
-import com.bumptech.glide.Glide;
 import com.google.common.util.concurrent.ListenableFuture;
 
-import java.io.ByteArrayOutputStream;
-import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-public class FaceRecognitionActivity extends AppCompatActivity {
+/**
+ * Camera recognition screen. All per-frame work goes through {@link FaceSession}: each person is
+ * tracked, gated, liveness-checked and recognised once, and the UI only changes when a state does.
+ */
+public class FaceRecognitionActivity extends AppCompatActivity implements FaceSession.Listener<FaceRepository.FaceUser> {
 
     private static final String TAG = "FaceActivity";
     private static final int PERMISSION_REQUEST_CODE = 10;
-    private static final long RECOGNITION_INTERVAL_MS = 1; // 500ms 识别间隔
 
     private PreviewView previewView;
     private RectView rectView;
     private TextView tvStatus;
     private View statusIndicator;
     private Group groupUserInfo;
-    // private ImageView ivAvatar;
     private TextView tvUserName;
     private TextView tvUserId;
     private TextView tvSimilarityValue;
 
-    private com.bonuos.facesdk.SyncManager syncManager; // 添加 SyncManager
+    private com.bonuos.facesdk.SyncManager syncManager;
     private FaceRecognizer faceRecognizer;
-    private com.bonuos.facesdk.LivenessDetector livenessDetector;
+    private MvEngines mvEngines;
+    private volatile FaceSession<FaceRepository.FaceUser> session;
     private ExecutorService cameraExecutor;
-    private long lastAnalysisTime = 0;
+    private ImageAnalysis imageAnalysis;
+    private byte[] nv21Buffer;
     private int cameraLensFacing = CameraSelector.LENS_FACING_FRONT;
+    /** Last status shown, so the text only changes on state changes (UI thread only). */
+    private String shownStatus;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_face_recognition);
 
+        cameraExecutor = Executors.newSingleThreadExecutor();
         initViews();
         initFaceSDK();
-        
-        syncManager = new com.bonuos.facesdk.SyncManager(this); // 初始化 SyncManager
+
+        syncManager = new com.bonuos.facesdk.SyncManager(this);
 
         if (allPermissionsGranted()) {
             startCamera();
@@ -81,8 +85,6 @@ public class FaceRecognitionActivity extends AppCompatActivity {
             ActivityCompat.requestPermissions(this,
                     new String[] { Manifest.permission.CAMERA }, PERMISSION_REQUEST_CODE);
         }
-
-        cameraExecutor = Executors.newSingleThreadExecutor();
     }
 
     private void initViews() {
@@ -91,7 +93,6 @@ public class FaceRecognitionActivity extends AppCompatActivity {
         tvStatus = findViewById(R.id.tv_status);
         statusIndicator = findViewById(R.id.status_indicator);
         groupUserInfo = findViewById(R.id.group_user_info);
-        // ivAvatar = findViewById(R.id.iv_avatar);
         tvUserName = findViewById(R.id.tv_user_name);
         tvUserId = findViewById(R.id.tv_user_id);
         tvSimilarityValue = findViewById(R.id.tv_similarity_value);
@@ -101,25 +102,23 @@ public class FaceRecognitionActivity extends AppCompatActivity {
     }
 
     private void toggleCamera() {
-        if (cameraLensFacing == CameraSelector.LENS_FACING_BACK) {
-            cameraLensFacing = CameraSelector.LENS_FACING_FRONT;
-        } else {
-            cameraLensFacing = CameraSelector.LENS_FACING_BACK;
-        }
+        cameraLensFacing = cameraLensFacing == CameraSelector.LENS_FACING_BACK
+                ? CameraSelector.LENS_FACING_FRONT : CameraSelector.LENS_FACING_BACK;
+        // Tracks from the other camera are meaningless; reset on the analysis thread that owns the session.
+        if (session != null) cameraExecutor.execute(session::reset);
         startCamera();
     }
 
     private void initFaceSDK() {
         try {
-            faceRecognizer = new FaceRecognizer(this);
-            livenessDetector = new com.bonuos.facesdk.LivenessDetector();
-            livenessDetector.init(this);
-
-            // 预加载数据
-            FaceRepository repository = new FaceRepository(this);
-            int userCount = repository.getAllUsers().size();
-            repository.close(); // 及时关闭
-            Log.i(TAG, "Loaded " + userCount + " users from database.");
+            // Our own engine (int8 recognizer, averaged landmarks) instead of the prebuilt library.
+            faceRecognizer = new FaceRecognizer(this, FaceRecognizer.Backend.NATIVE_INT8);
+            mvEngines = new MvEngines(this);
+            SessionConfig config = new SessionConfig(); // thresholds uncalibrated; see SessionConfig
+            NativeFeatureEngine features = new NativeFeatureEngine(faceRecognizer.nativeEngine(),
+                    NativeEngine.LandmarkMode.TTA, 30f, 25f);
+            session = new FaceSession<>(config, mvEngines, mvEngines, features, faceRecognizer, this);
+            Log.i(TAG, "Loaded " + faceRecognizer.gallery().size() + " users into the gallery.");
         } catch (Exception e) {
             Log.e(TAG, "Failed to initialize FaceSDK", e);
             Toast.makeText(this, "SDK初始化失败", Toast.LENGTH_LONG).show();
@@ -130,17 +129,15 @@ public class FaceRecognitionActivity extends AppCompatActivity {
         ListenableFuture<ProcessCameraProvider> cameraProviderFuture = ProcessCameraProvider.getInstance(this);
 
         cameraProviderFuture.addListener(() -> {
-
             try {
                 ProcessCameraProvider cameraProvider = cameraProviderFuture.get();
 
                 Preview preview = new Preview.Builder().build();
                 preview.setSurfaceProvider(previewView.getSurfaceProvider());
 
-                ImageAnalysis imageAnalysis = new ImageAnalysis.Builder()
+                imageAnalysis = new ImageAnalysis.Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build();
-
                 imageAnalysis.setAnalyzer(cameraExecutor, this::analyzeImage);
 
                 CameraSelector cameraSelector = new CameraSelector.Builder()
@@ -149,20 +146,16 @@ public class FaceRecognitionActivity extends AppCompatActivity {
 
                 cameraProvider.unbindAll();
                 cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis);
-
             } catch (ExecutionException | InterruptedException e) {
                 Log.e(TAG, "Camera initialization failed", e);
             }
         }, ContextCompat.getMainExecutor(this));
     }
 
-
-
     @Override
     protected void onResume() {
         super.onResume();
         if (syncManager != null) {
-            // 启动自动同步（WebSocket）
             syncManager.startAutoSync(30, new com.bonuos.facesdk.SyncManager.SyncCallback() {
                 @Override
                 public void onSuccess(int count) {
@@ -188,163 +181,138 @@ public class FaceRecognitionActivity extends AppCompatActivity {
     }
 
     private void analyzeImage(@NonNull ImageProxy image) {
-        if (isFinishing() || isDestroyed()) {
-            image.close();
-            return;
-        }
-        long currentTime = System.currentTimeMillis();
-
-        // 性能优化：控制识别频率 (500ms)
-        if (currentTime - lastAnalysisTime < RECOGNITION_INTERVAL_MS) {
-            image.close();
-            return;
-        }
-        lastAnalysisTime = currentTime;
-
-        Bitmap bitmap = imageProxyToBitmap(image);
-        if (bitmap != null) {
-            // 先进行活体检测 (同步调用)
-            LivenessResult livenessResult = livenessDetector.detect(bitmap);
-            float livenessScore = livenessResult.score;
-            boolean isLive = livenessScore > 0.7f;
-
-            // Draw face box
-            if (livenessResult.faceBox != null) {
-                int rotationDegrees = image.getImageInfo().getRotationDegrees();
-                runOnUiThread(() -> {
-                    com.mv.engine.FaceBox box = livenessResult.faceBox;
-                    
-                    Matrix matrix = new Matrix();
-                    
-                    // Image dimensions
-                    float iw = bitmap.getWidth();
-                    float ih = bitmap.getHeight();
-                    
-                    // View dimensions
-                    float vw = previewView.getWidth();
-                    float vh = previewView.getHeight();
-                    
-                    // 1. Translate to center
-                    matrix.postTranslate(-iw / 2f, -ih / 2f);
-                    
-                    // 2. Rotate
-                    matrix.postRotate(rotationDegrees);
-                    
-                    // 3. Mirror (if front)
-                    if (cameraLensFacing == CameraSelector.LENS_FACING_FRONT) {
-                        matrix.postScale(-1, 1);
-                    }
-                    
-                    // 4. Scale to fill
-                    boolean rotated = rotationDegrees == 90 || rotationDegrees == 270;
-                    float rotatedW = rotated ? ih : iw;
-                    float rotatedH = rotated ? iw : ih;
-                    
-                    float scale = Math.max(vw / rotatedW, vh / rotatedH);
-                    matrix.postScale(scale, scale);
-                    
-                    // 5. Translate to view center
-                    matrix.postTranslate(vw / 2f, vh / 2f);
-                    
-                    RectF src = new RectF(box.getLeft(), box.getTop(), box.getRight(), box.getBottom());
-                    RectF dst = new RectF();
-                    matrix.mapRect(dst, src);
-                    
-                    rectView.setX1((int) dst.left);
-                    rectView.setY1((int) dst.top);
-                    rectView.setX2((int) dst.right);
-                    rectView.setY2((int) dst.bottom);
-                    rectView.setConfidence(livenessScore);
-                    rectView.setColor(isLive ? getColor(R.color.tech_success) : getColor(android.R.color.holo_red_dark));
-                    rectView.postInvalidate();
-                });
-            } else {
-                 runOnUiThread(() -> {
-                    rectView.setX1(0);
-                    rectView.setY1(0);
-                    rectView.setX2(0);
-                    rectView.setY2(0);
-                    rectView.postInvalidate();
-                 });
+        boolean imageClosed = false;
+        FaceSession<FaceRepository.FaceUser> session = this.session;
+        try {
+            if (session == null || isFinishing() || isDestroyed() || image.getFormat() != ImageFormat.YUV_420_888) return;
+            int width = image.getWidth(), height = image.getHeight();
+            if (nv21Buffer == null || nv21Buffer.length != Nv21.size(width, height)) {
+                nv21Buffer = new byte[Nv21.size(width, height)];
             }
-
-            if (isLive) {
-                // 活体检测通过，进行人脸识别
-                // 再次检查是否已销毁，避免使用已释放的SDK
-                if (isFinishing() || isDestroyed()) return;
-                
-                try {
-                    RecognitionResult result = faceRecognizer.recognize(bitmap);
-                    runOnUiThread(() -> updateUI(result));
-                } catch (Exception e) {
-                    Log.e(TAG, "Recognition failed", e);
-                }
-            } else {
-                // 活体检测失败
-                runOnUiThread(() -> {
-                    tvStatus.setText("非活体 (分数: " + String.format("%.2f", livenessScore) + ")");
-                    tvStatus.setTextColor(getColor(android.R.color.holo_red_dark));
-                    statusIndicator.setBackgroundTintList(
-                            ContextCompat.getColorStateList(this, android.R.color.holo_red_dark));
-                    groupUserInfo.setVisibility(View.GONE);
-                });
-            }
-        }
-
-        image.close();
-    }
-
-    private void updateUI(RecognitionResult result) {
-        if (result.isSuccess()) {
-            // 识别成功
-            tvStatus.setText(R.string.status_success);
-            tvStatus.setTextColor(getColor(R.color.tech_success));
-            statusIndicator.setBackgroundTintList(ContextCompat.getColorStateList(this, R.color.tech_success));
-
-            groupUserInfo.setVisibility(View.VISIBLE);
-
-            FaceRepository.FaceUser user = result.getUser();
-            tvUserName.setText(user.name);
-            tvUserId.setText("ID: " + user.userNo);
-
-            int similarityPercent = (int) (result.getSimilarity() * 100);
-            tvSimilarityValue.setText(similarityPercent + "%");
-
-        } else {
-             // 识别失败 / 未知人员
-            tvStatus.setText("未知人员");
-            tvStatus.setTextColor(getColor(android.R.color.holo_orange_dark));
-            statusIndicator.setBackgroundTintList(ContextCompat.getColorStateList(this, android.R.color.holo_orange_dark));
-
-            groupUserInfo.setVisibility(View.GONE);
+            // Pack camera planes directly (no JPEG); rotation is applied in native code, once.
+            ImageProxy.PlaneProxy[] planes = image.getPlanes();
+            Nv21.fromYuv420(width, height, planes[0].getBuffer(), planes[0].getRowStride(),
+                    planes[1].getBuffer(), planes[2].getBuffer(), planes[1].getRowStride(),
+                    planes[1].getPixelStride(), nv21Buffer);
+            CameraFrame frame = new CameraFrame(nv21Buffer, width, height,
+                    image.getImageInfo().getRotationDegrees(), image.getImageInfo().getTimestamp() / 1_000_000L);
+            image.close(); // release the camera buffer before running the models
+            imageClosed = true;
+            session.onFrame(frame);
+        } catch (RuntimeException e) {
+            Log.e(TAG, "Frame analysis failed", e);
+        } finally {
+            if (!imageClosed) image.close();
         }
     }
 
-    private Bitmap imageProxyToBitmap(ImageProxy image) {
-        if (image.getFormat() != ImageFormat.YUV_420_888) {
-            return null;
+    // ---- FaceSession.Listener: called on the analysis thread ----
+
+    @Override
+    public void onFaces(List<FaceSession.FaceState<FaceRepository.FaceUser>> faces, CameraFrame frame) {
+        FaceSession.FaceState<FaceRepository.FaceUser> main = null;
+        for (FaceSession.FaceState<FaceRepository.FaceUser> face : faces) {
+            if (face.reason == FaceSession.Reason.LOST) continue;
+            if (main == null || face.rect.area() > main.rect.area()) main = face;
         }
-        ByteBuffer yBuffer = image.getPlanes()[0].getBuffer();
-        ByteBuffer uBuffer = image.getPlanes()[1].getBuffer();
-        ByteBuffer vBuffer = image.getPlanes()[2].getBuffer();
+        final FaceSession.FaceState<FaceRepository.FaceUser> shown = main;
+        final int frameWidth = frame.uprightWidth(), frameHeight = frame.uprightHeight();
+        runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed()) return;
+            if (shown == null) {
+                clearFaceBox();
+                showStatus("请正对摄像头", android.R.color.darker_gray, false);
+                return;
+            }
+            drawFaceBox(shown, frameWidth, frameHeight);
+            if (shown.recognition == FaceSession.Recognition.SUCCEED) showSuccess(shown.user, shown.score);
+            else showStatus(prompt(shown), colorOf(shown), false);
+        });
+    }
 
-        int ySize = yBuffer.remaining();
-        int uSize = uBuffer.remaining();
-        int vSize = vBuffer.remaining();
+    @Override
+    public void onRecognized(FaceSession.RecognitionEvent<FaceRepository.FaceUser> event) {
+        // The place to record an access event or open a door; the UI follows onFaces.
+        Log.i(TAG, "Recognised track " + event.trackId + " score " + event.score + " second " + event.secondScore
+                + " fused " + event.fusedFrames + " liveness " + event.livenessScore);
+    }
 
-        byte[] nv21 = new byte[ySize + uSize + vSize];
+    @Override
+    public void onRecognitionFailed(long trackId, float bestScore, FaceSession.Reason reason) {
+        Log.i(TAG, "Track " + trackId + " not recognised: " + reason + " best " + bestScore);
+    }
 
-        yBuffer.get(nv21, 0, ySize);
-        vBuffer.get(nv21, ySize, vSize);
-        uBuffer.get(nv21, ySize + vSize, uSize);
+    private static String prompt(FaceSession.FaceState<?> face) {
+        if (face.liveness == FaceSession.Liveness.NOT_ALIVE) return "非活体";
+        switch (face.reason) {
+            case FACE_TOO_SMALL: return "请靠近一些";
+            case BEYOND_BOUNDARY: return "请将脸移到画面中央";
+            case NOT_STABLE: case BLURRY: return "请保持不动";
+            case MULTIPLE_FACES: return "请保持画面中只有一人";
+            case TOO_DARK: return "光线太暗";
+            case TOO_BRIGHT: return "光线太强";
+            case UNKNOWN_PERSON: return "未知人员";
+            case GALLERY_EMPTY: return "本地人员库为空";
+            default: return "正在识别…";
+        }
+    }
 
-        YuvImage yuvImage = new YuvImage(nv21, ImageFormat.NV21, image.getWidth(), image.getHeight(), null);
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        yuvImage.compressToJpeg(new Rect(0, 0, image.getWidth(), image.getHeight()), 100, out);
-        byte[] imageBytes = out.toByteArray();
+    private static int colorOf(FaceSession.FaceState<?> face) {
+        if (face.liveness == FaceSession.Liveness.NOT_ALIVE) return android.R.color.holo_red_dark;
+        if (face.reason == FaceSession.Reason.UNKNOWN_PERSON) return android.R.color.holo_orange_dark;
+        return android.R.color.darker_gray;
+    }
 
-        // 注意：这里可能需要处理旋转，视设备而定
-        return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.length);
+    /** Box coordinates are in the upright frame; map them onto the FILL_CENTER preview. */
+    private void drawFaceBox(FaceSession.FaceState<?> face, int frameWidth, int frameHeight) {
+        FaceRect box = face.rect;
+        float viewWidth = previewView.getWidth(), viewHeight = previewView.getHeight();
+        float scale = Math.max(viewWidth / frameWidth, viewHeight / frameHeight);
+        float dx = (viewWidth - frameWidth * scale) / 2f, dy = (viewHeight - frameHeight * scale) / 2f;
+        float left = box.left * scale + dx, right = box.right * scale + dx;
+        if (cameraLensFacing == CameraSelector.LENS_FACING_FRONT) { // preview is mirrored
+            float mirroredLeft = viewWidth - right;
+            right = viewWidth - left;
+            left = mirroredLeft;
+        }
+        rectView.setX1((int) left);
+        rectView.setY1((int) (box.top * scale + dy));
+        rectView.setX2((int) right);
+        rectView.setY2((int) (box.bottom * scale + dy));
+        rectView.setConfidence(Float.isNaN(face.livenessScore) ? 0f : face.livenessScore);
+        boolean good = face.recognition == FaceSession.Recognition.SUCCEED || face.liveness == FaceSession.Liveness.ALIVE;
+        rectView.setColor(good ? getColor(R.color.tech_success) : getColor(android.R.color.holo_red_dark));
+        rectView.postInvalidate();
+    }
+
+    private void clearFaceBox() {
+        rectView.setX1(0);
+        rectView.setY1(0);
+        rectView.setX2(0);
+        rectView.setY2(0);
+        rectView.postInvalidate();
+    }
+
+    private void showSuccess(FaceRepository.FaceUser user, float score) {
+        String key = "ok:" + user.id;
+        if (key.equals(shownStatus)) return;
+        shownStatus = key;
+        tvStatus.setText(R.string.status_success);
+        tvStatus.setTextColor(getColor(R.color.tech_success));
+        statusIndicator.setBackgroundTintList(ContextCompat.getColorStateList(this, R.color.tech_success));
+        groupUserInfo.setVisibility(View.VISIBLE);
+        tvUserName.setText(user.name);
+        tvUserId.setText("ID: " + user.userNo);
+        tvSimilarityValue.setText((int) (score * 100) + "%");
+    }
+
+    private void showStatus(String text, int colorRes, boolean showUser) {
+        if (text.equals(shownStatus)) return;
+        shownStatus = text;
+        tvStatus.setText(text);
+        tvStatus.setTextColor(getColor(colorRes));
+        statusIndicator.setBackgroundTintList(ContextCompat.getColorStateList(this, colorRes));
+        groupUserInfo.setVisibility(showUser ? View.VISIBLE : View.GONE);
     }
 
     private boolean allPermissionsGranted() {
@@ -368,15 +336,20 @@ public class FaceRecognitionActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         if (syncManager != null) syncManager.close();
+        if (imageAnalysis != null) imageAnalysis.clearAnalyzer();
         super.onDestroy();
-        if (cameraExecutor != null) {
-            cameraExecutor.shutdown();
-        }
-        if (faceRecognizer != null) {
-            faceRecognizer.release();
-        }
-        if (livenessDetector != null) {
-            livenessDetector.release();
-        }
+        // Tear down on the analysis thread, after any frame still in flight; the native engines
+        // must not be freed under a running onFrame.
+        final FaceSession<FaceRepository.FaceUser> closingSession = session;
+        final MvEngines closingEngines = mvEngines;
+        final FaceRecognizer closingRecognizer = faceRecognizer;
+        session = null;
+        cameraExecutor.execute(() -> {
+            if (closingSession != null) closingSession.close();
+            if (closingEngines != null) closingEngines.close();
+            // Waits for an in-flight feature extraction via the dataset lock.
+            if (closingRecognizer != null) closingRecognizer.release();
+        });
+        cameraExecutor.shutdown();
     }
 }

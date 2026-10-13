@@ -1,13 +1,37 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
 
+// Test-device sync provisioning, read from the git-ignored local.properties so no server address
+// or device secret is committed. Empty values leave sync unconfigured, as before.
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.isFile) file.inputStream().use { load(it) }
+}
+fun localString(key: String): String =
+    "\"" + (localProperties.getProperty(key) ?: "").replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
 android {
+    // Models are mapped straight from the APK by the native engine; keep them uncompressed.
+    androidResources {
+        noCompress += "onnx"
+    }
     namespace = "com.bonuos.faceapp"
     compileSdk = 34
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     defaultConfig {
+        buildConfigField("String", "SYNC_URL", localString("face.sync.url"))
+        buildConfigField("String", "SYNC_DEVICE_SN", localString("face.sync.deviceSn"))
+        buildConfigField("String", "SYNC_DEVICE_SECRET", localString("face.sync.deviceSecret"))
+        buildConfigField("boolean", "SYNC_ALLOW_CLEARTEXT",
+                (localProperties.getProperty("face.sync.allowCleartext") == "true").toString())
         applicationId = "com.bonuos.faceapp"
         minSdk = 24
         targetSdk = 34
