@@ -132,6 +132,15 @@ class FaceFeatureExtractor:
                 num_threads=self.config['model_paths']['num_threads']
             )
 
+            # 旋转分类器：只建一次会话。原实现每次请求都新建 InferenceSession，占单次请求近一半耗时。
+            rotifier_path = self.config['model_paths']['rotifier']
+            self.rotation_session = None
+            if os.path.exists(rotifier_path):
+                options = ort.SessionOptions()
+                options.intra_op_num_threads = self.config['model_paths']['num_threads']
+                self.rotation_session = ort.InferenceSession(rotifier_path, sess_options=options)
+                self.rotation_input_name = self.rotation_session.get_inputs()[0].name
+
             logger.info("所有模型初始化成功")
         except Exception as e:
             logger.error(f"模型初始化失败: {e}")
@@ -172,9 +181,7 @@ class FaceFeatureExtractor:
     def correct_image_rotation(self, image: np.ndarray) -> np.ndarray:
         """图像旋转校正"""
         try:
-            # 检查是否有旋转模型
-            rotifier_path = self.config['model_paths']['rotifier']
-            if not os.path.exists(rotifier_path):
+            if self.rotation_session is None:
                 return image
 
             # 转换为灰度图像
@@ -194,9 +201,7 @@ class FaceFeatureExtractor:
             gray_3d = np.expand_dims(gray_3d, axis=0)
 
             # 旋转检测
-            rot_session = ort.InferenceSession(rotifier_path)
-            inputs = {rot_session.get_inputs()[0].name: gray_3d}
-            outputs = rot_session.run(None, inputs)
+            outputs = self.rotation_session.run(None, {self.rotation_input_name: gray_3d})
             label = np.argmax(outputs[0][0])
 
             # 应用旋转
@@ -428,23 +433,8 @@ class FaceFeatureExtractor:
                         logger.warning(f"人脸 {i+1} 对齐失败")
                         continue
 
-                    # 特征提取
-                    feature = self.extract_feature(aligned_face)
-                    if feature is None:
-                        logger.warning(f"人脸 {i+1} 特征提取失败")
-                        continue
-
-                    # 质量评估
+                    # 质量评估先于特征提取：被过滤的人脸不再跑识别模型（单次推理最贵的一步）
                     quality_scores = self.assess_quality(corrected_image, box, aligned_face)
-
-                    # 创建人脸信息
-                    face_info = FaceInfo(
-                        bbox=(box.x1, box.y1, box.x2, box.y2),
-                        landmarks=landmarks,
-                        confidence=box.score,
-                        quality_scores=quality_scores,
-                        feature=feature
-                    )
 
                     # 质量过滤
                     if quality_filter and self.config['quality']['strict_mode']:
@@ -454,7 +444,19 @@ class FaceFeatureExtractor:
                             if not return_all_faces:
                                 continue
 
-                    face_infos.append(face_info)
+                    # 特征提取
+                    feature = self.extract_feature(aligned_face)
+                    if feature is None:
+                        logger.warning(f"人脸 {i+1} 特征提取失败")
+                        continue
+
+                    face_infos.append(FaceInfo(
+                        bbox=(box.x1, box.y1, box.x2, box.y2),
+                        landmarks=landmarks,
+                        confidence=box.score,
+                        quality_scores=quality_scores,
+                        feature=feature
+                    ))
 
                 except Exception as e:
                     logger.error(f"处理人脸 {i+1} 时出错: {e}")

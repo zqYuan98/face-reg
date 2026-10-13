@@ -37,6 +37,32 @@ class HypeShape:
 
 
 def shape_index_process(feat_data, pos_data):
+    """Gathers a patch of net1 features around each landmark (SeetaFace shape-index layer).
+
+    Same output as shape_index_process_reference, which is the original per-element loop kept
+    for the equivalence test; this version copies each patch with one slice instead.
+    """
+    num, channels, feat_h, feat_w = feat_data.shape
+    patch_h = int(m_origin_patch[0] * feat_h / float(m_origin[0]) + 0.5)
+    patch_w = int(m_origin_patch[1] * feat_w / float(m_origin[1]) + 0.5)
+    r_h = (patch_h - 1) / 2.0
+    r_w = (patch_w - 1) / 2.0
+    marks = pos_data.shape[1] // 2
+    pos = pos_data.reshape(num, -1)
+    out = np.zeros((num, channels, patch_h, marks, patch_w), dtype=np.float32)
+    for i in range(marks):
+        for n in range(num):
+            # int() truncates toward zero, as in the reference implementation.
+            y = int(pos[n, 2 * i + 1] * (feat_h - 1) - r_h + 0.5)
+            x = int(pos[n, 2 * i] * (feat_w - 1) - r_w + 0.5)
+            y0, y1 = max(y, 0), min(y + patch_h, feat_h)
+            x0, x1 = max(x, 0), min(x + patch_w, feat_w)
+            if y0 < y1 and x0 < x1:
+                out[n, :, y0 - y:y1 - y, i, x0 - x:x1 - x] = feat_data[n, :, y0:y1, x0:x1]
+    return out.reshape((1, -1, 1, 1))
+
+
+def shape_index_process_reference(feat_data, pos_data):
     feat_h = feat_data.shape[2]
     feat_w = feat_data.shape[3]
 

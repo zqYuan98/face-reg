@@ -253,6 +253,10 @@ class FaceBoxesV2(BasicOrtHandler):
             [512]
         ]
         self.max_nms = 30000
+        # The input size is fixed by the model, so the ~20k anchors are built once, not per request.
+        self._anchors_f32 = np.asarray(
+            self.generate_anchors(self.input_node_dims[2], self.input_node_dims[3]), dtype=np.float64
+        ).astype(np.float32)
 
     def transform(self, mat):
         canvas = cv2.resize(mat, (self.input_node_dims[3], self.input_node_dims[2]))
@@ -281,18 +285,34 @@ class FaceBoxesV2(BasicOrtHandler):
     def generate_bboxes(self, output_tensors, score_threshold, img_height, img_width):
         bboxes = output_tensors[0]  # e.g (1,n,4)
         probs = output_tensors[1]  # e.g (1,n,2) after softmax
-        bbox_dims = self.output_node_dims[0]  # (1,n,4)
-        bbox_num = bbox_dims[1]  # n = ?
-        input_height = self.input_node_dims[2]  # e.g 640
-        input_width = self.input_node_dims[3]  # e.g 640
+        if self._anchors_f32.shape[0] != bboxes.shape[1]:
+            raise RuntimeError(f"mismatch num_anchors={self._anchors_f32.shape[0]} != bbox_num={bboxes.shape[1]}")
 
-        anchors = self.generate_anchors(input_height, input_width)
+        # Vectorized decode. Anchors are cast to float32 because the reference loop below mixes
+        # Python-float anchors with float32 model outputs, which NumPy computes in float32.
+        conf = probs[0, :, 1]
+        keep = np.flatnonzero(conf >= score_threshold)[: self.max_nms + 1]
+        if keep.size == 0:
+            return []
+        prior = self._anchors_f32[keep]
+        delta = bboxes[0, keep, :]
+        cx = prior[:, 0] + delta[:, 0] * self.variance[0] * prior[:, 2]
+        cy = prior[:, 1] + delta[:, 1] * self.variance[0] * prior[:, 3]
+        w = prior[:, 2] * np.exp(delta[:, 2] * self.variance[1])
+        h = prior[:, 3] * np.exp(delta[:, 3] * self.variance[1])
+        x1 = (cx - w / 2.0) * np.float32(img_width)
+        y1 = (cy - h / 2.0) * np.float32(img_height)
+        x2 = (cx + w / 2.0) * np.float32(img_width)
+        y2 = (cy + h / 2.0) * np.float32(img_height)
+        return [Box(x1=x1[k], y1=y1[k], x2=x2[k], y2=y2[k], score=conf[keep[k]], label=1, label_text="face", flag=True)
+                for k in range(keep.size)]
 
+    def generate_bboxes_reference(self, output_tensors, score_threshold, img_height, img_width):
+        """Original per-anchor decode, kept for the equivalence test."""
+        bboxes = output_tensors[0]
+        probs = output_tensors[1]
+        anchors = self.generate_anchors(self.input_node_dims[2], self.input_node_dims[3])
         num_anchors = len(anchors)
-        if num_anchors != bbox_num:
-            print(f"num_anchors={num_anchors} but detected bbox_num={bbox_num}")
-            raise RuntimeError("mismatch num_anchors != bbox_num")
-
         bbox_collection = []
         count = 0
         for i in range(num_anchors):

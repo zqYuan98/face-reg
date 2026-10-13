@@ -152,23 +152,17 @@ class FaceAlign:
     def align(self, image, landmarks5):  # 原图image  landmarks5
         success, transformation = transformation_maker(self.crop_width, self.crop_height, landmarks5, self.mean_face, self.mean_shape_width, self.mean_shape_height)
         if not success:
-            print("Failed to compute transformation matrix.")
-        
+            # Degenerate landmarks (all points coincide); callers treat None as "alignment failed".
+            return None
+
         img_height, img_width, img_channels = image.shape
 
         crop_data = np.zeros((self.crop_height, self.crop_width, 3), dtype=np.uint8)
-        success = spatial_transform(image,  img_width, img_height, img_channels, 
-                                    crop_data, self.crop_width, self.crop_height,
-                                    transformation,
-                                    )
-        if success:
-            if os.path.exists("./images/result1.jpg"):
-                cv2.imwrite("./images/result2.jpg", crop_data, [cv2.IMWRITE_JPEG_QUALITY, 100])
-            else: 
-                cv2.imwrite("./images/result1.jpg", crop_data, [cv2.IMWRITE_JPEG_QUALITY, 100])
-        else: 
-            print("error when spatial_transform...")
-
+        # No debug dump here: the old code wrote every aligned face to ./images/, which leaked
+        # biometric crops to disk and cost a JPEG encode per request.
+        spatial_transform(image, img_width, img_height, img_channels,
+                          crop_data, self.crop_width, self.crop_height,
+                          transformation)
         return crop_data
 
 if __name__ == "__main__":
