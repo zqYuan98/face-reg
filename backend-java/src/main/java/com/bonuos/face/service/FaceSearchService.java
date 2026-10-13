@@ -5,6 +5,7 @@ import com.bonuos.face.exception.ApiException;
 import com.bonuos.face.mapper.FaceSearchMapper;
 import com.bonuos.face.mapper.UserMapper;
 import com.bonuos.face.util.FaceUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -20,15 +21,25 @@ public class FaceSearchService {
     private final Semaphore slots;
     private final int chunkSize;
     private final long budgetNanos;
+    private final float threshold;
 
+    public FaceSearchService(FaceSearchMapper mapper, UserMapper users, int concurrency, int chunkSize, long timeoutMs) {
+        this(mapper, users, concurrency, chunkSize, timeoutMs, 0.6f);
+    }
+
+    /** {@code threshold} is uncalibrated (0.6 historically); set it from a FAR-calibrated profile. */
+    @Autowired
     public FaceSearchService(FaceSearchMapper mapper, UserMapper users,
             @Value("${face.search.concurrency:1}") int concurrency,
             @Value("${face.search.chunk-size:200}") int chunkSize,
-            @Value("${face.search.timeout-ms:5000}") long timeoutMs) {
-        if (concurrency < 1 || concurrency > 4 || chunkSize < 1 || chunkSize > 500 || timeoutMs < 1 || timeoutMs > 60000)
+            @Value("${face.search.timeout-ms:5000}") long timeoutMs,
+            @Value("${face.search.threshold:0.6}") float threshold) {
+        if (concurrency < 1 || concurrency > 4 || chunkSize < 1 || chunkSize > 500 || timeoutMs < 1 || timeoutMs > 60000
+                || !(threshold > 0f && threshold < 1f))
             throw new IllegalArgumentException("Invalid search limits");
         this.mapper = mapper; this.users = users; this.slots = new Semaphore(concurrency);
         this.chunkSize = chunkSize; this.budgetNanos = TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        this.threshold = threshold;
     }
 
     public User search(List<Float> target, long groupId) {
@@ -36,6 +47,9 @@ public class FaceSearchService {
         if (!slots.tryAcquire()) throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "SEARCH_BUSY", "检索繁忙，请稍后重试");
         long deadline = System.nanoTime() + budgetNanos;
         try {
+            // Normalise the probe once; each row then costs one streamed parse and one dot product.
+            float[] probe = FaceUtils.normalizedCopy(target);
+            if (probe == null) throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_FEATURE", "特征数据无效");
             String startingRevision = mapper.revision();
             long after = 0; Long best = null; Long bestVersion = null; float score = 0;
             while (true) {
@@ -44,16 +58,16 @@ public class FaceSearchService {
                 checkDeadline(deadline);
                 for (User row : chunk) {
                     checkDeadline(deadline);
-                    List<Float> vector = FaceUtils.parseFeatureData(row.getFeatureData());
+                    float[] vector = FaceUtils.parseFeatureArray(row.getFeatureData());
                     if (vector != null) {
-                        float similarity = FaceUtils.cosineSimilarity(target, vector);
+                        float similarity = FaceUtils.cosineToUnit(probe, vector);
                         if (Float.isFinite(similarity) && similarity > score) { score = similarity; best = row.getId(); bestVersion = row.getSyncVersion(); }
                     }
                     after = row.getId();
                 }
                 if (chunk.size() < chunkSize) break;
             }
-            if (best == null || score < 0.6f) {
+            if (best == null || score < threshold) {
                 verifyRevision(startingRevision,deadline);
                 return null;
             }

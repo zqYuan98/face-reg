@@ -1,13 +1,15 @@
 package com.bonuos.face.util;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
 
+import java.util.Arrays;
 import java.util.List;
 
 public class FaceUtils {
 
-    private static final ObjectMapper objectMapper = new ObjectMapper();
+    private static final JsonFactory JSON = new JsonFactory();
 
     /**
      * 计算两个特征向量的余弦相似度
@@ -20,22 +22,51 @@ public class FaceUtils {
         if (feature1 == null || feature2 == null || feature1.size() != feature2.size() || feature1.isEmpty()) {
             return -1f;
         }
-
-        float dotProduct = 0.0f;
-        float normA = 0.0f;
-        float normB = 0.0f;
-
+        double dot = 0, normA = 0, normB = 0;
         for (int i = 0; i < feature1.size(); i++) {
-            dotProduct += feature1.get(i) * feature2.get(i);
-            normA += Math.pow(feature1.get(i), 2);
-            normB += Math.pow(feature2.get(i), 2);
+            double a = feature1.get(i), b = feature2.get(i);
+            dot += a * b;
+            normA += a * a;
+            normB += b * b;
         }
+        if (normA == 0 || normB == 0) return 0.0f;
+        return (float) (dot / (Math.sqrt(normA) * Math.sqrt(normB)));
+    }
 
-        if (normA == 0 || normB == 0) {
-            return 0.0f;
+    /**
+     * Unit-length copy of {@code feature}, or null when it is empty, zero or not finite. Searching
+     * with a pre-normalised probe turns each comparison into one dot product and one norm.
+     */
+    public static float[] normalizedCopy(List<Float> feature) {
+        if (feature == null || feature.isEmpty()) return null;
+        float[] out = new float[feature.size()];
+        double norm = 0;
+        for (int i = 0; i < out.length; i++) {
+            Float value = feature.get(i);
+            if (value == null || !Float.isFinite(value)) return null;
+            out[i] = value;
+            norm += (double) value * value;
         }
+        if (!(norm > 0) || !Double.isFinite(norm)) return null;
+        float scale = (float) (1.0 / Math.sqrt(norm));
+        for (int i = 0; i < out.length; i++) out[i] *= scale;
+        return out;
+    }
 
-        return (float) (dotProduct / (Math.sqrt(normA) * Math.sqrt(normB)));
+    /**
+     * Cosine similarity of a unit-length probe against a raw stored vector, -1 when the
+     * dimensions differ and 0 when the stored vector is zero (same conventions as above).
+     */
+    public static float cosineToUnit(float[] unitProbe, float[] stored) {
+        if (stored == null || stored.length != unitProbe.length || stored.length == 0) return -1f;
+        double dot = 0, norm = 0;
+        for (int i = 0; i < stored.length; i++) {
+            double b = stored[i];
+            dot += unitProbe[i] * b;
+            norm += b * b;
+        }
+        if (norm == 0) return 0.0f;
+        return (float) (dot / Math.sqrt(norm));
     }
 
     /**
@@ -45,12 +76,31 @@ public class FaceUtils {
      * @return 特征列表
      */
     public static List<Float> parseFeatureData(String featureDataJson) {
-        if (featureDataJson == null || featureDataJson.isEmpty()) {
-            return null;
-        }
-        try {
-            return objectMapper.readValue(featureDataJson, new TypeReference<List<Float>>() {
-            });
+        float[] values = parseFeatureArray(featureDataJson);
+        if (values == null) return null;
+        Float[] boxed = new Float[values.length];
+        for (int i = 0; i < values.length; i++) boxed[i] = values[i];
+        return Arrays.asList(boxed);
+    }
+
+    /**
+     * Streams a JSON number array straight into a primitive array: no tree, no boxed Floats.
+     * Returns null for anything that is not a flat array of numbers.
+     */
+    public static float[] parseFeatureArray(String featureDataJson) {
+        if (featureDataJson == null || featureDataJson.isEmpty()) return null;
+        try (JsonParser parser = JSON.createParser(featureDataJson)) {
+            if (parser.nextToken() != JsonToken.START_ARRAY) return null;
+            float[] values = new float[1024];
+            int count = 0;
+            JsonToken token;
+            while ((token = parser.nextToken()) != JsonToken.END_ARRAY) {
+                if (token != JsonToken.VALUE_NUMBER_FLOAT && token != JsonToken.VALUE_NUMBER_INT) return null;
+                if (count == values.length) values = Arrays.copyOf(values, count * 2);
+                values[count++] = parser.getFloatValue();
+            }
+            if (parser.nextToken() != null) return null;
+            return count == values.length ? values : Arrays.copyOf(values, count);
         } catch (Exception e) {
             return null;
         }
