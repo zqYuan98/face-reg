@@ -13,6 +13,11 @@ struct OrtConfig {
     int threads = 2;
     /** XNNPACK execution provider; falls back to the default CPU provider when unavailable. */
     bool xnnpack = false;
+    /**
+     * Let idle pool threads spin. Off by default: in the app the analysis thread (detection,
+     * liveness) and the feature worker share four big cores, and spinning threads starve each other.
+     */
+    bool spin = false;
 };
 
 /** One model loaded from memory. Not thread safe: use one instance per thread. */

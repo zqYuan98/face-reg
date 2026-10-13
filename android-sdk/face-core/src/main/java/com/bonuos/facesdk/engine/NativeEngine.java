@@ -31,16 +31,37 @@ public final class NativeEngine implements AutoCloseable {
      */
     public static final String RECOGNIZER_INT8 = "face_recognizer_int8.onnx";
 
+    /** InsightFace SCRFD-500M detector and MobileFaceNet / IResNet-50 recognizers (research licence). */
+    public static final String INSIGHTFACE_DETECTOR = "insightface/det_500m.onnx";
+    public static final String INSIGHTFACE_MBF = "insightface/w600k_mbf.onnx";
+    public static final String INSIGHTFACE_R50 = "insightface/w600k_r50.onnx";
+    /** w600k_r50 static int8 (tools/engine-eval/quantize_arcface.py): 160 ms -> 46 ms on a Dimensity 1200. */
+    public static final String INSIGHTFACE_R50_INT8 = "insightface/w600k_r50_int8.onnx";
+
     private long handle;
 
     /**
+     * recognizer_v1_1024 pipeline.
+     *
      * @param recognizerAsset asset name of the recognizer weights
      * @param threads         intra-op threads for the recognizer (4 suits a 4+4 big.LITTLE phone)
      * @param withDetector    also load FaceBoxes, needed only for {@link #extract(Bitmap, LandmarkMode, float[])}
      */
     public NativeEngine(AssetManager assets, String recognizerAsset, int threads, boolean withDetector) {
-        handle = nativeCreate(assets, recognizerAsset, threads, withDetector);
+        this(assets, 0, recognizerAsset, withDetector ? "faceboxesv2-640x640.onnx" : null, threads);
+    }
+
+    private NativeEngine(AssetManager assets, int kind, String recognizerAsset, String detectorAsset, int threads) {
+        handle = nativeCreate(assets, kind, recognizerAsset, detectorAsset, threads);
         if (handle == 0) throw new IllegalStateException("Native face engine failed to load " + recognizerAsset);
+    }
+
+    /**
+     * InsightFace pipeline: SCRFD places the five points (on a crop around a tracked face, or on
+     * the whole still image), ArcFace template alignment, 512-d feature. Landmark modes are ignored.
+     */
+    public static NativeEngine insightFace(AssetManager assets, String recognizerAsset, int threads) {
+        return new NativeEngine(assets, 1, recognizerAsset, INSIGHTFACE_DETECTOR, threads);
     }
 
     /**
@@ -80,7 +101,7 @@ public final class NativeEngine implements AutoCloseable {
         }
     }
 
-    private static native long nativeCreate(AssetManager assets, String recognizerAsset, int threads, boolean withDetector);
+    private static native long nativeCreate(AssetManager assets, int kind, String recognizerAsset, String detectorAsset, int threads);
     private static native void nativeRelease(long handle);
     private static native boolean nativeCropBgr(byte[] nv21, int width, int height, int rotation,
                                                 int left, int top, int cropWidth, int cropHeight, byte[] out);

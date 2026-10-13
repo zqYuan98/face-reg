@@ -181,4 +181,51 @@ public class FaceSessionTest {
         assertEquals(0f, LumaQuality.laplacianVariance(flat, LumaQuality.GRID, LumaQuality.GRID), 0f);
         assertTrue(LumaQuality.laplacianVariance(textured, LumaQuality.GRID, LumaQuality.GRID) > 100f);
     }
+
+    private static float[] keypoints(float x, float y, float size, float noseShift) {
+        float cx = x + size / 2, eyeY = y + size * 0.4f, mouthY = y + size * 0.75f;
+        return new float[]{cx - size * 0.2f, eyeY, cx + size * 0.2f, eyeY, cx + noseShift * size, eyeY + 0.4609f * (mouthY - eyeY),
+                cx - size * 0.15f, mouthY, cx + size * 0.15f, mouthY};
+    }
+
+    @Test public void detectorKeypointsGatePoseBeforeAnyModel() {
+        faces = Collections.singletonList(new Detection(new FaceRect(100, 60, 200, 160), 1f, keypoints(100, 60, 100, 0.25f)));
+        FaceSession<String> session = session(Runnable::run);
+        frames(session, 30);
+        assertEquals(FaceSession.Reason.FACE_ANGLE_TOO_LARGE, lastFaces.get(0).reason);
+        assertEquals(0, livenessCalls + extractions);
+        faces = Collections.singletonList(new Detection(new FaceRect(100, 60, 200, 160), 1f, keypoints(100, 60, 100, 0f)));
+        frames(session, 20);
+        assertEquals(1, recognized.size());
+    }
+
+    @Test public void idleSessionAnalysesFewerFrames() {
+        int[] detections = {0};
+        FaceSession<String> session = new FaceSession<>(config, frame -> { detections[0]++; return faces; },
+                (frame, rect) -> livenessScore, (frame, face, crop) -> () -> ALICE.clone(), () -> gallery,
+                new FaceSession.Listener<String>() {
+                    @Override public void onFaces(List<FaceSession.FaceState<String>> states, CameraFrame frame) { lastFaces = states; }
+                    @Override public void onRecognized(FaceSession.RecognitionEvent<String> event) { recognized.add(event); }
+                    @Override public void onRecognitionFailed(long trackId, float bestScore, FaceSession.Reason reason) { }
+                }, Runnable::run);
+        frames(session, 30); // recognised by frame ~7, then idle
+        int busyAndIdle = detections[0];
+        assertEquals(1, recognized.size());
+        assertTrue("idle frames are skipped: " + busyAndIdle, busyAndIdle < 20);
+        faces = Collections.emptyList();
+        frames(session, 30);
+        assertTrue(detections[0] - busyAndIdle <= 11);
+    }
+
+    @Test public void strangerBackOffGrows() {
+        nextFeature = new float[]{0, 0, 1, 0};
+        FaceSession<String> session = session(Runnable::run);
+        frames(session, 10);
+        assertEquals(1, failures.size());
+        frames(session, 4 * 30 + 15); // second round ~1 s after the first, third ~2 s after that (+ liveness re-check)
+        assertEquals(3, failures.size());
+        int before = extractions;
+        frames(session, 3 * 30); // the next back-off is 4 s
+        assertEquals(before, extractions);
+    }
 }

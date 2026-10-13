@@ -1,5 +1,6 @@
 // JNI for com.bonuos.facesdk.engine.NativeEngine.
 #include <android/asset_manager_jni.h>
+#include <cmath>
 #include <android/bitmap.h>
 #include <android/log.h>
 #include <jni.h>
@@ -7,6 +8,7 @@
 #include <memory>
 #include <string>
 #include "../image_ops.h"
+#include "../pipeline_insightface.h"
 #include "../pipeline_v1.h"
 
 #define LOG_ERR(...) __android_log_print(ANDROID_LOG_ERROR, "FaceEngine", __VA_ARGS__)
@@ -55,22 +57,34 @@ LandmarkMode Mode(jint mode) {
 
 extern "C" {
 
+static std::string ToString(JNIEnv *env, jstring value) {
+    if (value == nullptr) return std::string();
+    const char *chars = env->GetStringUTFChars(value, nullptr);
+    std::string result(chars);
+    env->ReleaseStringUTFChars(value, chars);
+    return result;
+}
+
+/** kind 0: recognizer_v1_1024 (detector asset optional, for still images); kind 1: InsightFace. */
 JNIEXPORT jlong JNICALL
-Java_com_bonuos_facesdk_engine_NativeEngine_nativeCreate(JNIEnv *env, jclass, jobject asset_manager,
-                                                        jstring recognizer_asset, jint threads, jboolean with_detector) {
+Java_com_bonuos_facesdk_engine_NativeEngine_nativeCreate(JNIEnv *env, jclass, jobject asset_manager, jint kind,
+                                                        jstring recognizer_asset, jstring detector_asset, jint threads) {
     AAssetManager *assets = AAssetManager_fromJava(env, asset_manager);
-    const char *name = env->GetStringUTFChars(recognizer_asset, nullptr);
-    std::string recognizer(name);
-    env->ReleaseStringUTFChars(recognizer_asset, name);
+    const std::string recognizer = ToString(env, recognizer_asset), detector = ToString(env, detector_asset);
     try {
         OrtConfig config;
         config.threads = threads;
         OrtConfig small = config;
         small.threads = 1;  // the landmark nets take ~1 ms; a thread pool only adds wake-up latency
-        auto *pipeline = new PipelineV1(LoadAsset(assets, "face_landmarker_pts5_net1.onnx", small),
-                                        LoadAsset(assets, "face_landmarker_pts5_net2.onnx", small),
-                                        LoadAsset(assets, recognizer, config),
-                                        with_detector ? LoadAsset(assets, "faceboxesv2-640x640.onnx", config) : nullptr);
+        FacePipeline *pipeline;
+        if (kind == 1) {
+            pipeline = new PipelineInsightFace(LoadAsset(assets, detector, config), LoadAsset(assets, recognizer, config));
+        } else {
+            pipeline = new PipelineV1(LoadAsset(assets, "face_landmarker_pts5_net1.onnx", small),
+                                      LoadAsset(assets, "face_landmarker_pts5_net2.onnx", small),
+                                      LoadAsset(assets, recognizer, config),
+                                      detector.empty() ? nullptr : LoadAsset(assets, detector, config));
+        }
         return reinterpret_cast<jlong>(pipeline);
     } catch (const std::exception &error) {
         LOG_ERR("engine init failed: %s", error.what());
@@ -80,7 +94,7 @@ Java_com_bonuos_facesdk_engine_NativeEngine_nativeCreate(JNIEnv *env, jclass, jo
 
 JNIEXPORT void JNICALL
 Java_com_bonuos_facesdk_engine_NativeEngine_nativeRelease(JNIEnv *, jclass, jlong handle) {
-    delete reinterpret_cast<PipelineV1 *>(handle);
+    delete reinterpret_cast<FacePipeline *>(handle);
 }
 
 JNIEXPORT jboolean JNICALL
@@ -106,7 +120,7 @@ JNIEXPORT jfloatArray JNICALL
 Java_com_bonuos_facesdk_engine_NativeEngine_nativeExtractBgr(JNIEnv *env, jclass, jlong handle, jbyteArray bgr,
                                                             jint width, jint height, jfloat x1, jfloat y1, jfloat x2,
                                                             jfloat y2, jint mode, jfloatArray out_landmarks) {
-    auto *pipeline = reinterpret_cast<PipelineV1 *>(handle);
+    auto *pipeline = reinterpret_cast<FacePipeline *>(handle);
     if (pipeline == nullptr || bgr == nullptr || width <= 0 || height <= 0 ||
         env->GetArrayLength(bgr) < width * height * 3)
         return nullptr;
@@ -125,7 +139,7 @@ Java_com_bonuos_facesdk_engine_NativeEngine_nativeExtractBgr(JNIEnv *env, jclass
 JNIEXPORT jfloatArray JNICALL
 Java_com_bonuos_facesdk_engine_NativeEngine_nativeExtractBitmap(JNIEnv *env, jclass, jlong handle, jobject bitmap,
                                                                jint mode, jfloatArray out_landmarks) {
-    auto *pipeline = reinterpret_cast<PipelineV1 *>(handle);
+    auto *pipeline = reinterpret_cast<FacePipeline *>(handle);
     AndroidBitmapInfo info;
     void *pixels = nullptr;
     if (pipeline == nullptr || AndroidBitmap_getInfo(env, bitmap, &info) < 0 ||
@@ -141,6 +155,90 @@ Java_com_bonuos_facesdk_engine_NativeEngine_nativeExtractBitmap(JNIEnv *env, jcl
         LOG_ERR("extract failed: %s", error.what());
         return nullptr;
     }
+}
+
+}  // extern "C"
+
+// ---------------------------------------------------------------- NativeAnalyzer
+
+#include "../frame_analyzer.h"
+
+extern "C" {
+
+JNIEXPORT jlong JNICALL
+Java_com_bonuos_facesdk_engine_NativeAnalyzer_nativeCreate(JNIEnv *env, jclass, jobject asset_manager, jstring detector_asset,
+                                                          jint threads, jobjectArray live_names, jfloatArray live_scales,
+                                                          jintArray live_sizes) {
+    AAssetManager *assets = AAssetManager_fromJava(env, asset_manager);
+    try {
+        OrtConfig config;
+        config.threads = threads;
+        const jsize count = env->GetArrayLength(live_names);
+        std::vector<float> scales(static_cast<size_t>(count));
+        std::vector<jint> sizes(static_cast<size_t>(count));
+        env->GetFloatArrayRegion(live_scales, 0, count, scales.data());
+        env->GetIntArrayRegion(live_sizes, 0, count, sizes.data());
+        std::vector<ModelConfig> configs;
+        for (jsize i = 0; i < count; ++i) {
+            ModelConfig c;
+            c.name = ToString(env, static_cast<jstring>(env->GetObjectArrayElement(live_names, i)));
+            c.scale = scales[static_cast<size_t>(i)];
+            c.width = c.height = sizes[static_cast<size_t>(i)];
+            c.shift_x = c.shift_y = 0.f;
+            c.org_resize = false;
+            configs.push_back(c);
+        }
+        return reinterpret_cast<jlong>(new FrameAnalyzer(LoadAsset(assets, ToString(env, detector_asset), config), assets, configs));
+    } catch (const std::exception &error) {
+        LOG_ERR("analyzer init failed: %s", error.what());
+        return 0;
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_bonuos_facesdk_engine_NativeAnalyzer_nativeRelease(JNIEnv *, jclass, jlong handle) {
+    delete reinterpret_cast<FrameAnalyzer *>(handle);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_bonuos_facesdk_engine_NativeAnalyzer_nativeSetNv21(JNIEnv *env, jclass, jlong handle, jbyteArray nv21,
+                                                           jint width, jint height, jint rotation) {
+    auto *analyzer = reinterpret_cast<FrameAnalyzer *>(handle);
+    if (analyzer == nullptr || nv21 == nullptr || env->GetArrayLength(nv21) < width * height * 3 / 2) return JNI_FALSE;
+    jbyte *data = env->GetByteArrayElements(nv21, nullptr);
+    const bool ok = analyzer->SetNv21(reinterpret_cast<uint8_t *>(data), width, height, rotation);
+    env->ReleaseByteArrayElements(nv21, data, JNI_ABORT);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+/** Packed per face: x1 y1 x2 y2 score, then 10 keypoint coordinates (15 floats). */
+JNIEXPORT jfloatArray JNICALL
+Java_com_bonuos_facesdk_engine_NativeAnalyzer_nativeDetect(JNIEnv *env, jclass, jlong handle, jint long_side, jfloat threshold) {
+    auto *analyzer = reinterpret_cast<FrameAnalyzer *>(handle);
+    if (analyzer == nullptr) return nullptr;
+    std::vector<float> packed;
+    try {
+        for (const ScrfdFace &f : analyzer->Detect(long_side, threshold)) {
+            packed.insert(packed.end(), {f.box.x1, f.box.y1, f.box.x2, f.box.y2, f.box.score});
+            for (const auto &p : f.kps) {
+                packed.push_back(static_cast<float>(p.x));
+                packed.push_back(static_cast<float>(p.y));
+            }
+        }
+    } catch (const std::exception &error) {
+        LOG_ERR("detect failed: %s", error.what());
+        return nullptr;
+    }
+    jfloatArray result = env->NewFloatArray(static_cast<jsize>(packed.size()));
+    if (result != nullptr && !packed.empty()) env->SetFloatArrayRegion(result, 0, static_cast<jsize>(packed.size()), packed.data());
+    return result;
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_bonuos_facesdk_engine_NativeAnalyzer_nativeLiveness(JNIEnv *, jclass, jlong handle, jint left, jint top,
+                                                            jint right, jint bottom) {
+    auto *analyzer = reinterpret_cast<FrameAnalyzer *>(handle);
+    return analyzer == nullptr ? NAN : analyzer->Liveness(left, top, right, bottom);
 }
 
 }  // extern "C"

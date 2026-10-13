@@ -25,6 +25,18 @@ public final class SessionConfig implements Cloneable {
     public boolean keepMaxFace = false;
     /** Refuse to decide while more than one face is visible (identity verification). */
     public boolean strictSingleFace = false;
+    /**
+     * Pose gate from the detector's five points, before liveness or extraction (degrees, Pose5
+     * scale). Only applies when the detector returns keypoints; 30/25 match the enrolment service.
+     */
+    public float maxYaw = 30f, maxPitch = 25f;
+
+    // Power
+    /**
+     * When nothing needs work (no face, or every face recognised or backing off), analyse at most
+     * one frame per this interval. Detection resumes at full rate as soon as a face needs work.
+     */
+    public long idleFrameIntervalMs = 100;
 
     // Image quality, measured on the face luma before a crop goes to the recognizer
     public float minBrightness = 40f, maxBrightness = 235f;
@@ -57,6 +69,8 @@ public final class SessionConfig implements Cloneable {
     /** Failed attempts before the track backs off. */
     public int extractRetryCount = 3;
     public long recognizeFailedRetryMs = 1000;
+    /** Each further failure of the same track doubles the back-off, up to this (a stranger standing still). */
+    public long recognizeFailedRetryMaxMs = 8000;
     /** The same person is reported again only after this long, even on a new track. */
     public long identityCooldownMs = 5000;
     /** Crop sent to the recognizer: box side times this factor, clipped to the frame. 0 = whole frame. */
@@ -74,7 +88,9 @@ public final class SessionConfig implements Cloneable {
         if (minFaceSize < 1 || stableFrames < 2 || !(moveLimitRatio > 0) || livenessWindow < 1
                 || livenessRequired < 1 || livenessRequired > livenessWindow || fusionFrames < 1 || extractRetryCount < 1
                 || thresholdLow > thresholdHigh || topMargin < 0 || relativeSharpness < 0 || relativeSharpness > 1
-                || minBrightness > maxBrightness || featureCropScale < 0 || (featureCropScale > 0 && featureCropScale < 1))
+                || minBrightness > maxBrightness || !(maxYaw > 0) || !(maxPitch > 0) || idleFrameIntervalMs < 0
+                || recognizeFailedRetryMaxMs < recognizeFailedRetryMs
+                || featureCropScale < 0 || (featureCropScale > 0 && featureCropScale < 1))
             throw new IllegalArgumentException("Invalid session config");
     }
 }

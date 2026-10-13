@@ -2,28 +2,48 @@ package com.bonuos.facesdk;
 
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.util.Log;
 import com.bonuos.facesdk.engine.FaceSession;
 import com.bonuos.facesdk.engine.Gallery;
 import com.bonuos.facesdk.engine.NativeEngine;
 import com.facesdk.wrapper.FaceSDKWrapper;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
 public class FaceRecognizer implements FaceSession.GallerySource<FaceRepository.FaceUser> {
-    /** Which implementation of feature version recognizer_v1_1024 extracts features. */
+    /**
+     * Which pipeline extracts features. The first three produce feature version recognizer_v1_1024
+     * and use the features delivered by sync; the InsightFace ones are a different feature space,
+     * so their gallery is built on the device from the synced enrolment photos.
+     */
     public enum Backend {
         /** Prebuilt libface_sdk_jni.so (no source). */
         LEGACY_SDK,
         /** libfaceengine.so built from src/main/cpp/engine; same models, about half the work per call. */
         NATIVE,
         /** NATIVE with the int8 recognizer; see {@link NativeEngine#RECOGNIZER_INT8}. */
-        NATIVE_INT8
+        NATIVE_INT8,
+        /** InsightFace SCRFD-500M + MobileFaceNet (w600k_mbf), 512-d. Research licence: evaluation only. */
+        INSIGHTFACE_MBF,
+        /** InsightFace SCRFD-500M + IResNet-50 (w600k_r50), 512-d. Research licence: evaluation only. */
+        INSIGHTFACE_R50,
+        /** INSIGHTFACE_R50 with the int8 recognizer, ~3.5x faster. */
+        INSIGHTFACE_R50_INT8;
+
+        public boolean insightFace() { return this == INSIGHTFACE_MBF || this == INSIGHTFACE_R50 || this == INSIGHTFACE_R50_INT8; }
     }
 
     private static final String TAG = "FaceRecognizer";
     /** Feature dimension of the bundled recognizer (feature version recognizer_v1_1024). */
     public static final int FEATURE_DIMENSION = 1024;
+    private static final int INSIGHTFACE_DIMENSION = 512;
     /** Largest |java cosine - native compare| accepted before falling back to the native scorer. */
     private static final float SCORER_TOLERANCE = 1e-3f;
 
@@ -31,6 +51,9 @@ public class FaceRecognizer implements FaceSession.GallerySource<FaceRepository.
     private NativeEngine nativeEngine;
     private NativeEngine.LandmarkMode landmarkMode = NativeEngine.LandmarkMode.TRUNCATED;
     private FaceRepository repository;
+    private final Backend backend;
+    /** InsightFace only: per-photo feature cache, so enrolment runs once per photo and model. */
+    private final File featureCache;
     private volatile Gallery<FaceRepository.FaceUser> gallery = Gallery.empty();
     /** null until checked; true when Java cosine reproduces the native compare. */
     private Boolean javaScorerMatches;
@@ -42,7 +65,14 @@ public class FaceRecognizer implements FaceSession.GallerySource<FaceRepository.
     }
 
     public FaceRecognizer(Context context, Backend backend) {
-        if (backend != Backend.LEGACY_SDK) {
+        this.backend = backend;
+        featureCache = backend.insightFace() ? new File(context.getFilesDir(), "feature-cache/" + backend.name().toLowerCase()) : null;
+        if (backend.insightFace()) {
+            nativeEngine = NativeEngine.insightFace(context.getAssets(),
+                    backend == Backend.INSIGHTFACE_R50 ? NativeEngine.INSIGHTFACE_R50
+                            : backend == Backend.INSIGHTFACE_R50_INT8 ? NativeEngine.INSIGHTFACE_R50_INT8 : NativeEngine.INSIGHTFACE_MBF, 4);
+            javaScorerMatches = true;
+        } else if (backend != Backend.LEGACY_SDK) {
             nativeEngine = new NativeEngine(context.getAssets(),
                     backend == Backend.NATIVE_INT8 ? NativeEngine.RECOGNIZER_INT8 : NativeEngine.RECOGNIZER_FP32, 4, true);
             javaScorerMatches = true; // our engine's similarity is defined as cosine
@@ -66,17 +96,67 @@ public class FaceRecognizer implements FaceSession.GallerySource<FaceRepository.
             if (repository == null) return;
             List<FaceRepository.FaceUser> users = repository.getAllUsers();
             List<Gallery.Entry<FaceRepository.FaceUser>> entries = new ArrayList<>(users.size());
+            long started = System.currentTimeMillis();
             for (FaceRepository.FaceUser user : users) {
-                entries.add(new Gallery.Entry<>(user, user.feature));
+                entries.add(new Gallery.Entry<>(user, backend.insightFace() ? enrolFromPhoto(user) : user.feature));
             }
             Gallery.Scorer scorer = javaScorerMatches(entries) ? null : this::nativeScore;
-            Gallery<FaceRepository.FaceUser> built = Gallery.build(entries, FEATURE_DIMENSION, scorer);
+            Gallery<FaceRepository.FaceUser> built = Gallery.build(entries,
+                    backend.insightFace() ? INSIGHTFACE_DIMENSION : FEATURE_DIMENSION, scorer);
+            Log.i(TAG, backend + " gallery: " + built.size() + " users in " + (System.currentTimeMillis() - started) + " ms");
             // The gallery owns a normalised copy; drop the per-user arrays to halve resident memory.
             for (FaceRepository.FaceUser user : users) user.feature = null;
             if (built.skipped() > 0) Log.w(TAG, built.skipped() + " users skipped: missing or incompatible feature");
             gallery = built;
         } finally { FaceDatasetCoordinator.LOCK.writeLock().unlock(); }
     }
+
+    /**
+     * InsightFace feature of the user's synced enrolment photo, cached per photo file (the file
+     * name already changes with every new photo revision). Null when there is no usable face.
+     */
+    private float[] enrolFromPhoto(FaceRepository.FaceUser user) {
+        if (user.photoPath == null || user.photoPath.isEmpty()) return null;
+        File photo = new File(user.photoPath);
+        if (!photo.isFile()) return null;
+        File cached = new File(featureCache, photo.getName() + ".f32");
+        if (cached.length() == INSIGHTFACE_DIMENSION * 4L) {
+            try (DataInputStream in = new DataInputStream(new FileInputStream(cached))) {
+                float[] feature = new float[INSIGHTFACE_DIMENSION];
+                for (int i = 0; i < feature.length; i++) feature[i] = in.readFloat();
+                return feature;
+            } catch (IOException ignored) {
+                // fall through and re-extract
+            }
+        }
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        Bitmap bitmap = BitmapFactory.decodeFile(photo.getPath(), options);
+        if (bitmap == null) return null;
+        float[] feature;
+        try {
+            feature = nativeEngine.extract(bitmap, landmarkMode, null);
+        } finally {
+            bitmap.recycle();
+        }
+        if (feature == null || feature.length != INSIGHTFACE_DIMENSION) {
+            Log.w(TAG, "No usable face in enrolment photo of user " + user.id);
+            return null;
+        }
+        if (featureCache.isDirectory() || featureCache.mkdirs()) {
+            File partial = new File(featureCache, cached.getName() + ".part");
+            try (DataOutputStream out = new DataOutputStream(new FileOutputStream(partial))) {
+                for (float v : feature) out.writeFloat(v);
+            } catch (IOException error) {
+                Log.w(TAG, "Feature cache write failed", error);
+            }
+            if (!partial.renameTo(cached)) partial.delete();
+        }
+        return feature;
+    }
+
+    /** The feature space of this recognizer, for logs and reports. */
+    public Backend backend() { return backend; }
 
     /**
      * The prebuilt library's compare is assumed to be cosine on normalised features (SeetaFace

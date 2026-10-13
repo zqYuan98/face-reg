@@ -15,6 +15,7 @@ NetSession::NetSession(const void *data, size_t size, const OrtConfig &config) {
     options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
     options.SetIntraOpNumThreads(config.threads);
     options.SetInterOpNumThreads(1);
+    if (!config.spin) options.AddConfigEntry("session.intra_op.allow_spinning", "0");
     if (config.xnnpack) {
         try {
             // XNNPACK runs its own pool; ORT's pool then only handles the few unsupported nodes.

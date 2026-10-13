@@ -7,6 +7,8 @@ public final class Track {
     FaceRect rect;
     /** Exponentially smoothed box for drawing only. */
     FaceRect smoothed;
+    /** Latest detector keypoints (x0,y0..x4,y4), or null when the detector gives none. */
+    float[] keypoints;
     float score;
     int missed;
     int hits;
@@ -19,6 +21,7 @@ public final class Track {
         this.rect = detection.rect;
         this.smoothed = detection.rect;
         this.score = detection.score;
+        this.keypoints = detection.keypoints;
         this.centerX = new float[history];
         this.centerY = new float[history];
         record();
@@ -26,6 +29,7 @@ public final class Track {
 
     public FaceRect rect() { return rect; }
     public FaceRect smoothedRect() { return smoothed; }
+    public float[] keypoints() { return keypoints; }
     /** Frames this track has been matched, including the first. */
     public int hits() { return hits; }
     /** True when the track was matched in the latest frame (lost tracks are kept for a few frames). */

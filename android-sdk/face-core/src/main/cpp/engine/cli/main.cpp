@@ -17,6 +17,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include "../pipeline_insightface.h"
 #include "../pipeline_v1.h"
 
 using namespace face;
@@ -142,8 +143,69 @@ static int Bench(const std::string &dir, const std::string &image, int iteration
     return 0;
 }
 
+// InsightFace still-image path on every listed image; same output format as Golden.
+static int GoldenInsightFace(const std::string &det, const std::string &rec, const std::string &list,
+                             const std::string &out_path, int threads) {
+    OrtConfig config;
+    config.threads = threads;
+    auto load = [&](const std::string &path) {
+        std::vector<char> bytes = ReadFile(path);
+        if (bytes.empty()) throw std::runtime_error("cannot read " + path);
+        return std::unique_ptr<NetSession>(new NetSession(bytes.data(), bytes.size(), config));
+    };
+    PipelineInsightFace pipeline(load(det), load(rec));
+    std::ifstream in(list);
+    FILE *out = std::fopen(out_path.c_str(), "w");
+    if (!in || !out) return 2;
+    std::string path;
+    int faces = 0;
+    while (std::getline(in, path)) {
+        if (path.empty()) continue;
+        std::fprintf(out, "IMG %s\n", path.c_str());
+        cv::Mat img = cv::imread(path, cv::IMREAD_COLOR);
+        ExtractResult r = img.empty() ? ExtractResult{} : pipeline.FromImage(img, LandmarkMode::kTruncated);
+        if (r.feature.empty()) { std::fprintf(out, "NOFACE\n"); continue; }
+        std::fprintf(out, "BOX %.9g %.9g %.9g %.9g %.9g\nLM", r.box.x1, r.box.y1, r.box.x2, r.box.y2, r.box.score);
+        for (const auto &p : r.landmarks) std::fprintf(out, " %.9g %.9g", p.x, p.y);
+        std::fprintf(out, "\nFEAT");
+        for (float v : r.feature) std::fprintf(out, " %.9g", v);
+        std::fprintf(out, "\n");
+        ++faces;
+    }
+    std::fclose(out);
+    std::cout << faces << " features\n";
+    return 0;
+}
+
+// Median latency of one model on a random input of the given NCHW shape.
+static int BenchModel(const std::string &path, int n, int c, int h, int w, int iterations, int threads) {
+    OrtConfig config;
+    config.threads = threads;
+    std::vector<char> bytes = ReadFile(path);
+    if (bytes.empty()) throw std::runtime_error("cannot read " + path);
+    NetSession model(bytes.data(), bytes.size(), config);
+    std::vector<float> input(static_cast<size_t>(n) * c * h * w);
+    for (size_t i = 0; i < input.size(); ++i) input[i] = static_cast<float>((i * 2654435761u) % 255) / 128.f - 1.f;
+    model.Run(input.data(), {n, c, h, w});
+    std::vector<double> ms;
+    for (int i = 0; i < iterations; ++i) {
+        double t = NowMs();
+        model.Run(input.data(), {n, c, h, w});
+        ms.push_back(NowMs() - t);
+    }
+    std::sort(ms.begin(), ms.end());
+    std::printf("%s %dx%dx%dx%d threads=%d median %.2f ms p90 %.2f ms\n", path.c_str(), n, c, h, w, threads,
+                ms[ms.size() / 2], ms[ms.size() * 9 / 10]);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     try {
+        if (argc >= 6 && std::string(argv[1]) == "golden_if")
+            return GoldenInsightFace(argv[2], argv[3], argv[4], argv[5], argc > 6 ? std::atoi(argv[6]) : 4);
+        if (argc >= 9 && std::string(argv[1]) == "benchmodel")
+            return BenchModel(argv[2], std::atoi(argv[3]), std::atoi(argv[4]), std::atoi(argv[5]), std::atoi(argv[6]),
+                              std::atoi(argv[7]), std::atoi(argv[8]));
         if (argc >= 5 && std::string(argv[1]) == "golden")
             return Golden(argv[2], argv[3], argv[4],
                           argc <= 5 ? LandmarkMode::kTruncated : std::string(argv[5]) == "subpixel" ? LandmarkMode::kSubpixel

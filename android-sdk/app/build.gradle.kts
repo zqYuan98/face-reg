@@ -11,6 +11,12 @@ val localProperties = Properties().apply {
     val file = rootProject.file("local.properties")
     if (file.isFile) file.inputStream().use { load(it) }
 }
+// Research-licensed InsightFace weights for evaluation builds: a local directory containing
+// insightface/{det_500m,w600k_mbf,w600k_r50}.onnx. Never committed; see tools/engine-eval/README.md.
+val insightFaceAssets: File? = localProperties.getProperty("insightface.assets")
+    ?.takeIf { it.isNotBlank() }?.let { file(it) }
+    ?.takeIf { File(it, "insightface/det_500m.onnx").isFile }
+
 fun localString(key: String): String =
     "\"" + (localProperties.getProperty(key) ?: "").replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
@@ -20,8 +26,16 @@ android {
         noCompress += "onnx"
         // The app runs Backend.NATIVE_INT8. The prebuilt library's models (fp32 recognizer, rotation
         // classifier, FSANet) stay in face-core for face-bench, but are not shipped here (~113 MB).
+        // The fp32 IResNet-50 (174 MB) is evaluation-only; the app uses its int8 version.
         ignoreAssetsPattern = "!face_recognizer.onnx:!model_gray_mobilenetv2_rotcls.onnx:!fsanet-conv.onnx:!fsanet-var.onnx:" +
+                "!w600k_r50.onnx:" +
                 "!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~"
+    }
+
+    sourceSets {
+        getByName("main") {
+            if (insightFaceAssets != null) assets.srcDir(insightFaceAssets)
+        }
     }
 
     packaging {
@@ -41,6 +55,8 @@ android {
         buildConfigField("String", "SYNC_URL", localString("face.sync.url"))
         buildConfigField("String", "SYNC_DEVICE_SN", localString("face.sync.deviceSn"))
         buildConfigField("String", "SYNC_DEVICE_SECRET", localString("face.sync.deviceSecret"))
+        // insightface_r50_int8 (default), insightface_mbf, native_int8, native
+        buildConfigField("String", "FACE_ENGINE", localString("face.engine"))
         buildConfigField("boolean", "SYNC_ALLOW_CLEARTEXT",
                 (localProperties.getProperty("face.sync.allowCleartext") == "true").toString())
         applicationId = "com.bonuos.faceapp"

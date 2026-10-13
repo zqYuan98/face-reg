@@ -2,6 +2,7 @@ package com.bonuos.facebench.backend;
 
 import android.content.Context;
 import com.bonuos.facebench.BuildConfig;
+import com.bonuos.facesdk.engine.NativeEngine;
 import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
 import java.util.List;
@@ -16,6 +17,8 @@ public final class BackendRegistry {
     public static final String ENGINE_CROP = "engine_crop";
     public static final String ENGINE_NATIVE = "engine_native";
     public static final String ENGINE_NATIVE_INT8 = "engine_native_int8";
+    public static final String INSIGHTFACE_R50 = "insightface_r50_int8";
+    public static final String INSIGHTFACE_MBF = "insightface_mbf";
     public static final String ARCSOFT = "arcsoft";
     private static final String ARCSOFT_CLASS = "com.bonuos.facebench.arcsoft.ArcSoftBackend";
 
@@ -28,6 +31,10 @@ public final class BackendRegistry {
         names.add(ENGINE_CROP);
         names.add(ENGINE_NATIVE);
         names.add(ENGINE_NATIVE_INT8);
+        if (BuildConfig.INSIGHTFACE_AVAILABLE) {
+            names.add(INSIGHTFACE_R50);
+            names.add(INSIGHTFACE_MBF);
+        }
         if (BuildConfig.ARCSOFT_AVAILABLE) names.add(ARCSOFT);
         return names;
     }
@@ -39,6 +46,8 @@ public final class BackendRegistry {
             case ENGINE_CROP: return new EngineCropBackend(context);
             case ENGINE_NATIVE: return new NativeEngineBackend(context, false);
             case ENGINE_NATIVE_INT8: return new NativeEngineBackend(context, true);
+            case INSIGHTFACE_R50: return new InsightFaceBackend(context, INSIGHTFACE_R50, NativeEngine.INSIGHTFACE_R50_INT8);
+            case INSIGHTFACE_MBF: return new InsightFaceBackend(context, INSIGHTFACE_MBF, NativeEngine.INSIGHTFACE_MBF);
             case ARCSOFT:
                 requireArcSoft();
                 return (FaceBackend) unwrap(() -> Class.forName(ARCSOFT_CLASS)

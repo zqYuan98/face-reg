@@ -66,6 +66,12 @@ public final class FaceSession<T> implements AutoCloseable {
 
         /** A track used up its attempts without a match; it backs off and tries again later. */
         void onRecognitionFailed(long trackId, float bestScore, Reason reason);
+
+        /**
+         * Every gallery decision, for calibration logs: the probe's best score, how many frames were
+         * fused into it, and the outcome (NONE = accepted, NEED_MORE_FRAMES, UNKNOWN_PERSON, ...).
+         */
+        default void onMatchScored(long trackId, float score, float secondScore, int fusedFrames, Liveness liveness, Reason outcome) { }
     }
 
     public enum Liveness { UNKNOWN, ALIVE, NOT_ALIVE }
@@ -74,7 +80,7 @@ public final class FaceSession<T> implements AutoCloseable {
 
     /** Why a face is not progressing. NONE means it is being processed normally. */
     public enum Reason {
-        NONE, FACE_TOO_SMALL, BEYOND_BOUNDARY, NOT_STABLE, MULTIPLE_FACES, NOT_LARGEST, LOST,
+        NONE, FACE_TOO_SMALL, BEYOND_BOUNDARY, NOT_STABLE, MULTIPLE_FACES, NOT_LARGEST, LOST, FACE_ANGLE_TOO_LARGE,
         TOO_DARK, TOO_BRIGHT, BLURRY, NOT_ALIVE, NO_FEATURE, NEED_MORE_FRAMES, UNKNOWN_PERSON,
         GALLERY_EMPTY, FEATURE_ERROR
     }
@@ -132,6 +138,8 @@ public final class FaceSession<T> implements AutoCloseable {
         Recognition recognition = Recognition.PENDING;
         long retryAt;
         int tries;
+        /** Consecutive FAILED rounds; doubles the back-off. */
+        int failedRounds;
         boolean extracting;
         float[] fusedSum;
         int fusedCount;
@@ -171,6 +179,8 @@ public final class FaceSession<T> implements AutoCloseable {
     private final ConcurrentLinkedQueue<Result> results = new ConcurrentLinkedQueue<>();
     private volatile boolean busy;
     private volatile boolean closed;
+    private boolean idle;
+    private long lastAnalysedAt = Long.MIN_VALUE;
 
     /** Uses a private single-thread feature worker, shut down by {@link #close()}. */
     public FaceSession(SessionConfig config, Detector detector, LivenessScorer liveness, FeatureEngine features,
@@ -209,6 +219,9 @@ public final class FaceSession<T> implements AutoCloseable {
     public void onFrame(CameraFrame frame) {
         if (closed) return;
         long now = frame.timestampMs;
+        // Idle: nothing to recognise, so a few frames per second are enough to notice a new face.
+        if (idle && results.isEmpty() && now - lastAnalysedAt < config.idleFrameIntervalMs) return;
+        lastAnalysedAt = now;
         applyResults(now);
         List<Track> tracks = tracker.update(detector.detect(frame));
 
@@ -241,6 +254,14 @@ public final class FaceSession<T> implements AutoCloseable {
                     state.recognition, state.user, state.score, state.reason));
         }
         expireCooldowns(now);
+        idle = !busy;
+        for (FaceState<T> face : snapshot) {
+            TrackState<T> state = states.get(face.trackId);
+            if (state.recognition == Recognition.PENDING || (state.recognition == Recognition.FAILED && now >= state.retryAt)) {
+                idle = false;
+                break;
+            }
+        }
         listener.onFaces(Collections.unmodifiableList(snapshot), frame);
     }
 
@@ -254,6 +275,10 @@ public final class FaceSession<T> implements AutoCloseable {
         if (config.strictSingleFace && visible > 1) return Reason.MULTIPLE_FACES;
         if (config.keepMaxFace && track != largest) return Reason.NOT_LARGEST;
         if (track.maxRecentMove() > config.moveLimitRatio * r.width()) return Reason.NOT_STABLE;
+        if (track.keypoints != null) {
+            Pose5 pose = Pose5.estimate(track.keypoints);
+            if (!(Math.abs(pose.yaw) <= config.maxYaw && Math.abs(pose.pitch) <= config.maxPitch)) return Reason.FACE_ANGLE_TOO_LARGE;
+        }
         return Reason.NONE;
     }
 
@@ -368,6 +393,8 @@ public final class FaceSession<T> implements AutoCloseable {
                 continue;
             }
             state.match = match;
+            if (state.liveness != Liveness.ALIVE)
+                listener.onMatchScored(state.id, match.score, match.secondScore, state.fusedCount, state.liveness, Reason.NOT_ALIVE);
             decide(state, now);
         }
     }
@@ -377,6 +404,11 @@ public final class FaceSession<T> implements AutoCloseable {
         Gallery.Match<T> m = state.match;
         if (m == null || state.recognition != Recognition.PENDING || state.liveness != Liveness.ALIVE) return;
         state.match = null;
+        Reason outcome = m.best == null ? Reason.GALLERY_EMPTY
+                : m.score >= config.thresholdHigh && m.margin() >= config.topMargin ? Reason.NONE
+                : m.score >= config.thresholdLow && state.fusedCount < config.fusionFrames ? Reason.NEED_MORE_FRAMES
+                : Reason.UNKNOWN_PERSON;
+        listener.onMatchScored(state.id, m.score, m.secondScore, state.fusedCount, state.liveness, outcome);
         if (m.best == null) {
             attemptFailed(state, now, Reason.GALLERY_EMPTY, Float.NaN);
         } else if (m.score >= config.thresholdHigh && m.margin() >= config.topMargin) {
@@ -408,7 +440,9 @@ public final class FaceSession<T> implements AutoCloseable {
         if (state.tries < config.extractRetryCount) return;
         state.tries = 0;
         state.recognition = Recognition.FAILED;
-        state.retryAt = now + config.recognizeFailedRetryMs;
+        long backoff = config.recognizeFailedRetryMs << Math.min(state.failedRounds, 16);
+        state.retryAt = now + Math.min(backoff, config.recognizeFailedRetryMaxMs);
+        state.failedRounds++;
         // A face that keeps failing gets its liveness re-checked too, as ArcSoft's demo does.
         state.liveness = Liveness.UNKNOWN;
         state.votes.clear();

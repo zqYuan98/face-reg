@@ -61,6 +61,7 @@ public final class FaceTracker {
             track.rect = detection.rect;
             track.smoothed = track.smoothed.lerp(detection.rect, smoothing);
             track.score = detection.score;
+            track.keypoints = detection.keypoints;
             track.missed = 0;
             track.record();
         }

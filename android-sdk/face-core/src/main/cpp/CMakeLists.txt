@@ -32,8 +32,8 @@ target_link_libraries(engine log jnigraphics ncnn opencv_core opencv_imgproc ope
 add_library(onnxruntime SHARED IMPORTED)
 set_target_properties(onnxruntime PROPERTIES IMPORTED_LOCATION ${PROJECT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libonnxruntime.so)
 
-file(GLOB engine_core_srcs CONFIGURE_DEPENDS "engine/*.cpp" "engine/jni/*.cpp")
+file(GLOB engine_core_srcs CONFIGURE_DEPENDS "engine/*.cpp" "engine/jni/*.cpp" "live/*.cpp")
 add_library(faceengine SHARED ${engine_core_srcs})
 # C++17 for the ONNX Runtime headers; unfused float math to match the NumPy enrolment service.
 target_compile_options(faceengine PRIVATE -std=c++17 -ffp-contract=off)
-target_link_libraries(faceengine onnxruntime opencv_imgproc opencv_core log android jnigraphics)
+target_link_libraries(faceengine onnxruntime ncnn opencv_imgproc opencv_core log android jnigraphics)

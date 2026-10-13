@@ -9,7 +9,7 @@ set(CMAKE_BUILD_TYPE Release)
 set(CPP_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 set(LIB_DIR ${CPP_ROOT}/../jniLibs/${ANDROID_ABI})
 
-add_executable(face_engine_cli main.cpp ../ort_model.cpp ../v1_models.cpp ../pipeline_v1.cpp ../image_ops.cpp)
+add_executable(face_engine_cli main.cpp ../ort_model.cpp ../v1_models.cpp ../pipeline_v1.cpp ../image_ops.cpp ../insightface_models.cpp ../pipeline_insightface.cpp)
 target_include_directories(face_engine_cli PRIVATE ${CPP_ROOT}/include)
 # Bit-for-bit parity with NumPy needs unfused float arithmetic.
 target_compile_options(face_engine_cli PRIVATE -ffp-contract=off -O2)

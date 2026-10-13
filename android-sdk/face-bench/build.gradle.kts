@@ -16,6 +16,11 @@ val arcsoftLibs: File? = ((findProperty("arcsoft.sdk.libs") as String?) ?: local
     ?.let { file(it) }
     ?.takeIf { File(it, "arcsoft_face.jar").isFile && File(it, "arm64-v8a").isDirectory }
 
+// Research-licensed InsightFace weights (local only), same property as the app.
+val insightFaceAssets: File? = localProperties.getProperty("insightface.assets")
+    ?.takeIf { it.isNotBlank() }?.let { file(it) }
+    ?.takeIf { File(it, "insightface/det_500m.onnx").isFile }
+
 android {
     // Models are mapped straight from the APK by the native engine; keep them uncompressed.
     androidResources {
@@ -34,6 +39,7 @@ android {
             abiFilters.add("arm64-v8a")
         }
         buildConfigField("boolean", "ARCSOFT_AVAILABLE", (arcsoftLibs != null).toString())
+        buildConfigField("boolean", "INSIGHTFACE_AVAILABLE", (insightFaceAssets != null).toString())
     }
 
     buildFeatures {
@@ -51,6 +57,7 @@ android {
                 java.srcDir("src/arcsoft/java")
                 jniLibs.srcDir(arcsoftLibs)
             }
+            if (insightFaceAssets != null) assets.srcDir(insightFaceAssets)
         }
     }
 

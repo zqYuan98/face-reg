@@ -29,6 +29,7 @@ import com.bonuos.facesdk.engine.FaceSession;
 import com.bonuos.facesdk.engine.MvEngines;
 import com.bonuos.facesdk.engine.NativeEngine;
 import com.bonuos.facesdk.engine.NativeFeatureEngine;
+import com.bonuos.facesdk.engine.ScrfdEngines;
 import com.bonuos.facesdk.engine.SessionConfig;
 import com.bonuos.facesdk.image.Nv21;
 import com.bonuos.faceapp.widget.RectView;
@@ -59,7 +60,8 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
 
     private com.bonuos.facesdk.SyncManager syncManager;
     private FaceRecognizer faceRecognizer;
-    private MvEngines mvEngines;
+    /** Per-frame detector + liveness: ScrfdEngines with InsightFace, MvEngines with the v1 engines. */
+    private AutoCloseable frameEngines;
     private volatile FaceSession<FaceRepository.FaceUser> session;
     private ExecutorService cameraExecutor;
     private ImageAnalysis imageAnalysis;
@@ -111,17 +113,54 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
 
     private void initFaceSDK() {
         try {
-            // Our own engine (int8 recognizer, averaged landmarks) instead of the prebuilt library.
-            faceRecognizer = new FaceRecognizer(this, FaceRecognizer.Backend.NATIVE_INT8);
-            mvEngines = new MvEngines(this);
-            SessionConfig config = new SessionConfig(); // thresholds uncalibrated; see SessionConfig
+            FaceRecognizer.Backend backend = engineFromBuild();
+            faceRecognizer = new FaceRecognizer(this, backend);
+            SessionConfig config = new SessionConfig();
+            FaceSession.Detector detector;
+            FaceSession.LivenessScorer liveness;
+            if (backend.insightFace()) {
+                ScrfdEngines scrfd = new ScrfdEngines(getAssets(), 480, 0.5f);
+                frameEngines = scrfd;
+                detector = scrfd;
+                liveness = scrfd;
+                // SCRFD boxes are narrower than minivision squares (width ~0.84x); 64 px keeps the same reach.
+                config.minFaceSize = 64;
+            } else {
+                MvEngines mv = new MvEngines(this);
+                frameEngines = mv;
+                detector = mv;
+                liveness = mv;
+            }
+            if (backend.insightFace()) {
+                // InsightFace scores live on another scale. LFW all-pairs, 2026-10-13: MobileFaceNet
+                // FAR 1e-5 at 0.332, 1e-4 at 0.283; IResNet-50 fp32 and int8 0.314 / 0.257. Calibrate on site data.
+                boolean r50 = backend != FaceRecognizer.Backend.INSIGHTFACE_MBF;
+                config.thresholdHigh = r50 ? 0.31f : 0.33f;
+                config.thresholdLow = r50 ? 0.26f : 0.28f;
+            } // v1 thresholds: SessionConfig defaults, uncalibrated
             NativeFeatureEngine features = new NativeFeatureEngine(faceRecognizer.nativeEngine(),
                     NativeEngine.LandmarkMode.TTA, 30f, 25f);
-            session = new FaceSession<>(config, mvEngines, mvEngines, features, faceRecognizer, this);
+            Log.i(TAG, "Face engine " + backend + ", threshold " + config.thresholdHigh);
+            session = new FaceSession<>(config, detector, liveness, features, faceRecognizer, this);
             Log.i(TAG, "Loaded " + faceRecognizer.gallery().size() + " users into the gallery.");
         } catch (Exception e) {
             Log.e(TAG, "Failed to initialize FaceSDK", e);
             Toast.makeText(this, "SDK初始化失败", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /**
+     * local.properties face.engine: insightface_r50_int8 (default), insightface_mbf, native_int8,
+     * native. The app APK does not ship the prebuilt library (see app/build.gradle.kts).
+     */
+    private static FaceRecognizer.Backend engineFromBuild() {
+        switch (BuildConfig.FACE_ENGINE) {
+            case "native": return FaceRecognizer.Backend.NATIVE;
+            case "insightface_mbf": return FaceRecognizer.Backend.INSIGHTFACE_MBF;
+            case "insightface_r50": return FaceRecognizer.Backend.INSIGHTFACE_R50;
+            case "insightface_r50_int8": return FaceRecognizer.Backend.INSIGHTFACE_R50_INT8;
+            case "native_int8": return FaceRecognizer.Backend.NATIVE_INT8;
+            default: return FaceRecognizer.Backend.INSIGHTFACE_R50_INT8; // best measured: LFW TAR@1e-5 99.57%
         }
     }
 
@@ -242,6 +281,13 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
         Log.i(TAG, "Track " + trackId + " not recognised: " + reason + " best " + bestScore);
     }
 
+    @Override
+    public void onMatchScored(long trackId, float score, float secondScore, int fusedFrames,
+                              FaceSession.Liveness liveness, FaceSession.Reason outcome) {
+        Log.i(TAG, String.format(java.util.Locale.ROOT, "Match track %d score %.4f fused %d liveness %s -> %s",
+                trackId, score, fusedFrames, liveness, outcome == FaceSession.Reason.NOT_ALIVE ? "WAITING_LIVENESS" : outcome));
+    }
+
     private static String prompt(FaceSession.FaceState<?> face) {
         if (face.liveness == FaceSession.Liveness.NOT_ALIVE) return "非活体";
         switch (face.reason) {
@@ -341,12 +387,18 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
         // Tear down on the analysis thread, after any frame still in flight; the native engines
         // must not be freed under a running onFrame.
         final FaceSession<FaceRepository.FaceUser> closingSession = session;
-        final MvEngines closingEngines = mvEngines;
+        final AutoCloseable closingEngines = frameEngines;
         final FaceRecognizer closingRecognizer = faceRecognizer;
         session = null;
         cameraExecutor.execute(() -> {
             if (closingSession != null) closingSession.close();
-            if (closingEngines != null) closingEngines.close();
+            if (closingEngines != null) {
+                try {
+                    closingEngines.close();
+                } catch (Exception e) {
+                    Log.w(TAG, "Engine close failed", e);
+                }
+            }
             // Waits for an in-flight feature extraction via the dataset lock.
             if (closingRecognizer != null) closingRecognizer.release();
         });
