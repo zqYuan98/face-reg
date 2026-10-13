@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 rootProject.name = "FaceSDKProject"
 include(":app")
 include(":face-core")
+include(":face-bench")

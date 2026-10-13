@@ -90,6 +90,30 @@ public class LivenessDetector {
         }
     }
 
+    /**
+     * Silent liveness on an upright NV21 camera frame. Preferred over {@link #detect(Bitmap)}:
+     * no JPEG or RGB-to-YUV round trip, so screen moire and print texture survive.
+     * The returned box is in the coordinates of the given frame.
+     */
+    public LivenessResult detectNv21(byte[] nv21, int width, int height) {
+        if (!isInitialized || nv21 == null) {
+            return new LivenessResult(0.0f, null);
+        }
+        try {
+            // Orientation code 1 means "already upright" in the native converter.
+            java.util.List<com.mv.engine.FaceBox> boxes = faceDetector.detect(nv21, width, height, 1);
+            if (boxes == null || boxes.isEmpty()) {
+                return new LivenessResult(0.0f, null);
+            }
+            com.mv.engine.FaceBox box = boxes.get(0);
+            float score = liveEngine.detect(nv21, width, height, 1, box);
+            return new LivenessResult(score, box);
+        } catch (Exception e) {
+            Log.e(TAG, "活体检测出错", e);
+            return new LivenessResult(0.0f, null);
+        }
+    }
+
     public void release() {
         if (liveEngine != null) {
             liveEngine.destroy();

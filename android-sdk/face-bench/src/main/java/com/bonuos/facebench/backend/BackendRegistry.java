@@ -1,0 +1,82 @@
+package com.bonuos.facebench.backend;
+
+import android.content.Context;
+import com.bonuos.facebench.BuildConfig;
+import java.lang.reflect.InvocationTargetException;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Creates backends by name. The ArcSoft backend is compiled only when the build was given a
+ * local ArcSoft SDK path, so it is looked up reflectively and the app still builds without it.
+ */
+public final class BackendRegistry {
+    public static final String LEGACY_AS_IS = "legacy_asis";
+    public static final String LEGACY_FIXED = "legacy_fixed";
+    public static final String ENGINE_CROP = "engine_crop";
+    public static final String ENGINE_NATIVE = "engine_native";
+    public static final String ENGINE_NATIVE_INT8 = "engine_native_int8";
+    public static final String ARCSOFT = "arcsoft";
+    private static final String ARCSOFT_CLASS = "com.bonuos.facebench.arcsoft.ArcSoftBackend";
+
+    private BackendRegistry() { }
+
+    public static List<String> available() {
+        List<String> names = new ArrayList<>();
+        names.add(LEGACY_AS_IS);
+        names.add(LEGACY_FIXED);
+        names.add(ENGINE_CROP);
+        names.add(ENGINE_NATIVE);
+        names.add(ENGINE_NATIVE_INT8);
+        if (BuildConfig.ARCSOFT_AVAILABLE) names.add(ARCSOFT);
+        return names;
+    }
+
+    public static FaceBackend create(Context context, String name, BenchConfig config) throws Exception {
+        switch (name) {
+            case LEGACY_AS_IS: return new LegacyBackend(context, true);
+            case LEGACY_FIXED: return new LegacyBackend(context, false);
+            case ENGINE_CROP: return new EngineCropBackend(context);
+            case ENGINE_NATIVE: return new NativeEngineBackend(context, false);
+            case ENGINE_NATIVE_INT8: return new NativeEngineBackend(context, true);
+            case ARCSOFT:
+                requireArcSoft();
+                return (FaceBackend) unwrap(() -> Class.forName(ARCSOFT_CLASS)
+                        .getConstructor(Context.class, float[].class, boolean.class)
+                        .newInstance(context, config.arcSoftLivenessThresholds, config.arcSoftIdCardModel));
+            default: throw new IllegalArgumentException("Unknown backend " + name);
+        }
+    }
+
+    /** Returns ArcSoft's activation code; see {@link #isArcSoftActivationSuccess(int)}. */
+    public static int activateArcSoft(Context context, String appId, String sdkKey) throws Exception {
+        requireArcSoft();
+        return (Integer) unwrap(() -> Class.forName(ARCSOFT_CLASS)
+                .getMethod("activate", Context.class, String.class, String.class)
+                .invoke(null, context, appId, sdkKey));
+    }
+
+    public static boolean isArcSoftActivationSuccess(int code) throws Exception {
+        requireArcSoft();
+        return (Boolean) unwrap(() -> Class.forName(ARCSOFT_CLASS)
+                .getMethod("isActivationSuccess", int.class).invoke(null, code));
+    }
+
+    private static void requireArcSoft() {
+        if (!BuildConfig.ARCSOFT_AVAILABLE)
+            throw new IllegalStateException("This build has no ArcSoft SDK; rebuild with -Parcsoft.sdk.libs=<path to ArcSoft libs>");
+    }
+
+    private interface Reflective { Object call() throws Exception; }
+
+    private static Object unwrap(Reflective call) throws Exception {
+        try {
+            return call.call();
+        } catch (InvocationTargetException error) {
+            Throwable cause = error.getCause();
+            if (cause instanceof Exception) throw (Exception) cause;
+            if (cause instanceof Error) throw (Error) cause;
+            throw error;
+        }
+    }
+}

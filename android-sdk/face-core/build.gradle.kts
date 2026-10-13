@@ -31,6 +31,8 @@ android {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
             version = "3.22.1"
+            // Keep CMake state under build/ (ignored). The committed .cxx/ cache points at another machine's path.
+            buildStagingDirectory = file("build/cxx-staging")
         }
     }
 
