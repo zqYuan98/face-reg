@@ -25,3 +25,6 @@ output/playwright/
 
 # Licensed vendor SDKs (ArcSoft): never commit; builds point at a local copy.
 ArcSoft_*.zip
+
+# Biometric test photos and recordings: never commit.
+face_test/
