@@ -6,6 +6,8 @@
 
 37 服务器已于 2026-10-12 在原 `18001` 端口上线 1:N，服务版本为 1.3.0。1000 候选连续调用与混合图片负载均已验证；实测范围、验收和回退见 [部署记录](docs/reports/2026-10-12-feature-search-deployment.md)。
 
+交给实施人员部署时，先核对[2026-10-14 部署交接单](docs/DEPLOYMENT_HANDOFF_2026-10-14.md)中的固定源码、镜像和现场配置。
+
 修复结果和实际测试见 [验证记录](docs/reports/2026-09-24-backend-remediation-results.md)。本地测试通过不代表生产已部署或真机容量已验收。
 
 ## 启动前
@@ -19,18 +21,18 @@ Compose 必须从受保护的运行环境获得以下值，仓库没有默认密
 - `FACE_ADMIN_PASSWORD_HASH`：管理密码的 BCrypt 哈希。
 - `FACE_DEVICE_CREDENTIALS_JSON`：按需配置设备凭据，默认 `[]` 拒绝设备访问。
 
-生产 Compose 固定开启 Secure 会话 Cookie，需要同源 HTTPS 反向代理。直接 HTTP 打开页面不能作为生产登录方式；只在隔离本机验证时按安全说明单独关闭 Secure。
+仓库示例 Compose 开启 Secure 会话 Cookie，须配合同源 HTTPS 入口。37 服务器现场配置与示例不同，实际入口及 Cookie 配置以[实施交接单](docs/DEPLOYMENT_HANDOFF_2026-10-14.md)和受控现场配置为准。
 
 ## 容器部署
 
-在本目录、完成配置与迁移后执行：
+以下命令仅用于全新环境从仓库示例 Compose 构建并验证。现网或迁移已验收版本时，按[实施交接单](docs/DEPLOYMENT_HANDOFF_2026-10-14.md)使用固定镜像和现场 Compose：
 
 ```sh
 docker compose up -d --build
 docker compose ps
 ```
 
-主机发布地址仅绑定 loopback：后台 `127.0.0.1:18080`，内部算法 `127.0.0.1:18000`，MySQL `127.0.0.1:13307`。通过已配置的 HTTPS 入口访问管理页面；不要把数据库或算法端口直接暴露给设备网络。
+仓库示例 Compose 将后台、算法和 MySQL 分别绑定到 `127.0.0.1:18080`、`127.0.0.1:18000`、`127.0.0.1:13307`。37 服务器实际算法端口为 `18001`，不要用示例文件覆盖现场端口或挂载。
 
 ```sh
 docker compose logs -f face-backend
