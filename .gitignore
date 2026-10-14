@@ -22,3 +22,6 @@ output/playwright/
 **/tmp/
 **/temp/
 **/data/snapshots/
+
+# Licensed vendor SDKs (ArcSoft): never commit; builds point at a local copy.
+ArcSoft_*.zip

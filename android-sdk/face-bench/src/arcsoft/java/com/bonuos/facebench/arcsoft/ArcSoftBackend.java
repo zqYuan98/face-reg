@@ -62,9 +62,21 @@ public final class ArcSoftBackend implements FaceBackend {
                 MAX_FACES, FaceEngine.ASF_FACE_DETECT | FaceEngine.ASF_FACE_RECOGNITION), "enrollment engine init");
     }
 
-    /** Online activation; MOK and ALREADY_ACTIVATED both mean the device is licensed. */
-    public static int activate(Context context, String appId, String sdkKey) {
-        return FaceEngine.activeOnline(context.getApplicationContext(), appId, sdkKey);
+    /**
+     * Online activation; MOK and ALREADY_ACTIVATED both mean the device is licensed. ArcFacePro
+     * takes a per-device ACTIVE_KEY as well (activeOnline(context, activeKey, appId, sdkKey)); the
+     * ArcFaceS edition has no such parameter and binds the APP_ID to package name and signature.
+     * Reflection picks whichever the linked SDK provides, so the bench builds against either.
+     */
+    public static int activate(Context context, String appId, String sdkKey, String activeKey) throws Exception {
+        Context app = context.getApplicationContext();
+        try {
+            java.lang.reflect.Method pro = FaceEngine.class.getMethod("activeOnline", Context.class, String.class, String.class, String.class);
+            return (Integer) pro.invoke(null, app, activeKey, appId, sdkKey);
+        } catch (NoSuchMethodException standardEdition) {
+            java.lang.reflect.Method standard = FaceEngine.class.getMethod("activeOnline", Context.class, String.class, String.class);
+            return (Integer) standard.invoke(null, app, appId, sdkKey);
+        }
     }
 
     public static boolean isActivationSuccess(int code) {
@@ -126,7 +138,7 @@ public final class ArcSoftBackend implements FaceBackend {
             outcome.featureAttempted = true;
             FaceFeature feature = new FaceFeature();
             timer.lapMs();
-            code = recognizer.extractFaceFeature(frame.nv21, frame.width, frame.height, FaceEngine.CP_PAF_NV21, face, feature);
+            code = extract(recognizer, frame.nv21, frame.width, frame.height, FaceEngine.CP_PAF_NV21, face, false, feature);
             outcome.featureMs = timer.lapMs();
             if (code == ErrorInfo.MOK) outcome.feature = feature;
             else outcome.note = "extractFaceFeature error " + code;
@@ -135,13 +147,76 @@ public final class ArcSoftBackend implements FaceBackend {
     }
 
     private int liveness(ClipFile.Frame frame, List<FaceInfo> single, float threshold) {
-        if (liveness.setLivenessParam(new LivenessParam(threshold)) != ErrorInfo.MOK) return FrameOutcome.LIVE_ERROR;
+        if (liveness.setLivenessParam(livenessParam(threshold)) != ErrorInfo.MOK) return FrameOutcome.LIVE_ERROR;
         int code = liveness.process(frame.nv21, frame.width, frame.height, FaceEngine.CP_PAF_NV21, single, FaceEngine.ASF_LIVENESS);
         if (code != ErrorInfo.MOK) return FrameOutcome.LIVE_ERROR;
         List<LivenessInfo> result = new ArrayList<>();
         if (liveness.getLiveness(result) != ErrorInfo.MOK || result.isEmpty()) return FrameOutcome.LIVE_ERROR;
         // ArcSoft's LivenessInfo codes are the shared status codes in FrameOutcome.
         return result.get(0).getLiveness();
+    }
+
+    // ---- ArcFaceS / ArcFacePro differences, resolved once by reflection so either jar compiles ----
+
+    private static final java.lang.reflect.Method PRO_EXTRACT;
+    private static final Object PRO_REGISTER, PRO_RECOGNIZE;
+    private static final int PRO_MASK_NOT_WORN;
+    private static final java.lang.reflect.Constructor<LivenessParam> LIVENESS_PRO, LIVENESS_STANDARD;
+
+    static {
+        java.lang.reflect.Method extract = null;
+        Object register = null, recognize = null;
+        int notWorn = 0;
+        try {
+            Class<?> type = Class.forName("com.arcsoft.face.enums.ExtractType");
+            extract = FaceEngine.class.getMethod("extractFaceFeature", byte[].class, int.class, int.class, int.class,
+                    FaceInfo.class, type, int.class, FaceFeature.class);
+            register = type.getField("REGISTER").get(null);
+            recognize = type.getField("RECOGNIZE").get(null);
+            notWorn = Class.forName("com.arcsoft.face.MaskInfo").getField("NOT_WORN").getInt(null);
+        } catch (ReflectiveOperationException standardEdition) {
+            extract = null;
+        }
+        PRO_EXTRACT = extract;
+        PRO_REGISTER = register;
+        PRO_RECOGNIZE = recognize;
+        PRO_MASK_NOT_WORN = notWorn;
+        java.lang.reflect.Constructor<LivenessParam> pro = null, standard = null;
+        try {
+            pro = LivenessParam.class.getConstructor(float.class, float.class);
+        } catch (NoSuchMethodException e) {
+            try {
+                standard = LivenessParam.class.getConstructor(float.class);
+            } catch (NoSuchMethodException impossible) {
+                throw new IllegalStateException("Unsupported ArcSoft LivenessParam", impossible);
+            }
+        }
+        LIVENESS_PRO = pro;
+        LIVENESS_STANDARD = standard;
+    }
+
+    /** Pro: ExtractType REGISTER for enrolment photos, RECOGNIZE for probes, mask NOT_WORN (as its demo). */
+    private static int extract(FaceEngine engine, byte[] data, int width, int height, int format, FaceInfo face,
+                               boolean register, FaceFeature feature) {
+        try {
+            if (PRO_EXTRACT != null) {
+                return (Integer) PRO_EXTRACT.invoke(engine, data, width, height, format, face,
+                        register ? PRO_REGISTER : PRO_RECOGNIZE, PRO_MASK_NOT_WORN, feature);
+            }
+            return (Integer) FaceEngine.class.getMethod("extractFaceFeature", byte[].class, int.class, int.class, int.class,
+                    FaceInfo.class, FaceFeature.class).invoke(engine, data, width, height, format, face, feature);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException("ArcSoft extractFaceFeature unavailable", error);
+        }
+    }
+
+    /** Pro takes an IR threshold too; no IR camera here, so its own default (0.7) is passed. */
+    private static LivenessParam livenessParam(float rgbThreshold) {
+        try {
+            return LIVENESS_PRO != null ? LIVENESS_PRO.newInstance(rgbThreshold, 0.7f) : LIVENESS_STANDARD.newInstance(rgbThreshold);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException("ArcSoft LivenessParam unavailable", error);
+        }
     }
 
     private static FaceInfo largest(List<FaceInfo> faces) {
@@ -161,8 +236,8 @@ public final class ArcSoftBackend implements FaceBackend {
         if (enroller.detectFaces(bgr, aligned.getWidth(), aligned.getHeight(), FaceEngine.CP_PAF_BGR24, faces) != ErrorInfo.MOK
                 || faces.isEmpty()) return null;
         FaceFeature feature = new FaceFeature();
-        int code = enroller.extractFaceFeature(bgr, aligned.getWidth(), aligned.getHeight(), FaceEngine.CP_PAF_BGR24,
-                largest(faces), feature);
+        int code = extract(enroller, bgr, aligned.getWidth(), aligned.getHeight(), FaceEngine.CP_PAF_BGR24,
+                largest(faces), true, feature);
         return code == ErrorInfo.MOK ? feature : null;
     }
 

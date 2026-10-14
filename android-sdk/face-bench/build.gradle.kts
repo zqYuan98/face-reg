@@ -42,6 +42,12 @@ android {
         buildConfigField("boolean", "INSIGHTFACE_AVAILABLE", (insightFaceAssets != null).toString())
     }
 
+    androidResources {
+        noCompress += "onnx"
+        // Bench backends use the int8 IResNet-50 only; the 174 MB fp32 copy stays out of the APK.
+        ignoreAssetsPattern = "!w600k_r50.onnx:!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~"
+    }
+
     buildFeatures {
         buildConfig = true
     }

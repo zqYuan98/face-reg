@@ -26,7 +26,7 @@ public class MainActivity extends AppCompatActivity {
 
     private TextView summary, log;
     private final List<CheckBox> backendBoxes = new ArrayList<>();
-    private EditText featureEveryNth, appId, sdkKey;
+    private EditText featureEveryNth, appId, sdkKey, activeKey;
     private CheckBox idCardModel;
     private Button runButton, cancelButton;
     private final AtomicBoolean cancel = new AtomicBoolean();
@@ -52,6 +52,7 @@ public class MainActivity extends AppCompatActivity {
             root.addView(heading("虹软激活（只需联网一次）"));
             appId = edit(root, "APP_ID", prefs.getString("appId", ""));
             sdkKey = edit(root, "SDK_KEY", prefs.getString("sdkKey", ""));
+            activeKey = edit(root, "ACTIVE_KEY（仅 Pro 版，XXXX-XXXX-XXXX-XXXX）", prefs.getString("activeKey", ""));
             Button activate = new Button(this);
             activate.setText("激活虹软");
             activate.setOnClickListener(v -> activateArcSoft());
@@ -123,13 +124,15 @@ public class MainActivity extends AppCompatActivity {
 
     private void activateArcSoft() {
         String id = appId.getText().toString().trim(), key = sdkKey.getText().toString().trim();
+        String active = activeKey.getText().toString().trim();
         // Credentials stay in this app's private storage; they are never written to logs or result files.
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("appId", id).putString("sdkKey", key).apply();
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("appId", id).putString("sdkKey", key)
+                .putString("activeKey", active).apply();
         append("正在激活……");
         new Thread(() -> {
             String message;
             try {
-                int code = BackendRegistry.activateArcSoft(this, id, key);
+                int code = BackendRegistry.activateArcSoft(this, id, key, active);
                 message = BackendRegistry.isArcSoftActivationSuccess(code) ? "虹软已激活（返回码 " + code + "）" : "激活失败，返回码 " + code;
             } catch (Exception error) {
                 message = "激活失败：" + error.getMessage();

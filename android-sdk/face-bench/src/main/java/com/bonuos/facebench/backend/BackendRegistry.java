@@ -58,11 +58,11 @@ public final class BackendRegistry {
     }
 
     /** Returns ArcSoft's activation code; see {@link #isArcSoftActivationSuccess(int)}. */
-    public static int activateArcSoft(Context context, String appId, String sdkKey) throws Exception {
+    public static int activateArcSoft(Context context, String appId, String sdkKey, String activeKey) throws Exception {
         requireArcSoft();
         return (Integer) unwrap(() -> Class.forName(ARCSOFT_CLASS)
-                .getMethod("activate", Context.class, String.class, String.class)
-                .invoke(null, context, appId, sdkKey));
+                .getMethod("activate", Context.class, String.class, String.class, String.class)
+                .invoke(null, context, appId, sdkKey, activeKey));
     }
 
     public static boolean isArcSoftActivationSuccess(int code) throws Exception {
