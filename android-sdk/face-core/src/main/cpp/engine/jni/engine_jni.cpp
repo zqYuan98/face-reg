@@ -137,6 +137,34 @@ Java_com_bonuos_facesdk_engine_NativeEngine_nativeExtractBgr(JNIEnv *env, jclass
     return result;
 }
 
+/** InsightFace pipeline only: align on given five points (crop coordinates) and extract. */
+JNIEXPORT jfloatArray JNICALL
+Java_com_bonuos_facesdk_engine_NativeEngine_nativeExtractKeypoints(JNIEnv *env, jclass, jlong handle, jbyteArray bgr,
+                                                                  jint width, jint height, jfloatArray keypoints) {
+    auto *pipeline = dynamic_cast<PipelineInsightFace *>(reinterpret_cast<FacePipeline *>(handle));
+    if (pipeline == nullptr || bgr == nullptr || keypoints == nullptr || width <= 0 || height <= 0 ||
+        env->GetArrayLength(bgr) < width * height * 3 || env->GetArrayLength(keypoints) < 10)
+        return nullptr;
+    float points[10];
+    env->GetFloatArrayRegion(keypoints, 0, 10, points);
+    Landmarks5 kps;
+    for (int k = 0; k < 5; ++k) kps[k] = cv::Point2d(points[2 * k], points[2 * k + 1]);
+    jbyte *data = env->GetByteArrayElements(bgr, nullptr);
+    jfloatArray result = nullptr;
+    try {
+        cv::Mat image(height, width, CV_8UC3, data);
+        ExtractResult r = pipeline->FromKeypoints(image, kps);
+        if (!r.feature.empty()) {
+            result = env->NewFloatArray(static_cast<jsize>(r.feature.size()));
+            if (result != nullptr) env->SetFloatArrayRegion(result, 0, static_cast<jsize>(r.feature.size()), r.feature.data());
+        }
+    } catch (const std::exception &error) {
+        LOG_ERR("keypoint extract failed: %s", error.what());
+    }
+    env->ReleaseByteArrayElements(bgr, data, JNI_ABORT);
+    return result;
+}
+
 JNIEXPORT jfloatArray JNICALL
 Java_com_bonuos_facesdk_engine_NativeEngine_nativeExtractBitmap(JNIEnv *env, jclass, jlong handle, jobject bitmap,
                                                                jint mode, jfloatArray out_landmarks) {
@@ -303,6 +331,61 @@ Java_com_bonuos_facesdk_engine_NativeAnalyzer_nativeLiveness(JNIEnv *, jclass, j
                                                             jint right, jint bottom) {
     auto *analyzer = reinterpret_cast<FrameAnalyzer *>(handle);
     return analyzer == nullptr ? NAN : analyzer->Liveness(left, top, right, bottom);
+}
+
+}  // extern "C"
+
+// ---------------------------------------------------------------- NativeLiveness
+
+extern "C" {
+
+JNIEXPORT jlong JNICALL
+Java_com_bonuos_facesdk_engine_NativeLiveness_nativeCreate(JNIEnv *env, jclass, jobject asset_manager, jobjectArray names,
+                                                          jfloatArray scales, jintArray sizes) {
+    AAssetManager *assets = AAssetManager_fromJava(env, asset_manager);
+    try {
+        const jsize count = env->GetArrayLength(names);
+        std::vector<float> s(static_cast<size_t>(count));
+        std::vector<jint> z(static_cast<size_t>(count));
+        env->GetFloatArrayRegion(scales, 0, count, s.data());
+        env->GetIntArrayRegion(sizes, 0, count, z.data());
+        std::vector<ModelConfig> configs;
+        for (jsize i = 0; i < count; ++i) {
+            ModelConfig c;
+            c.name = ToString(env, static_cast<jstring>(env->GetObjectArrayElement(names, i)));
+            c.scale = s[static_cast<size_t>(i)];
+            c.width = c.height = z[static_cast<size_t>(i)];
+            c.shift_x = c.shift_y = 0.f;
+            c.org_resize = false;
+            configs.push_back(c);
+        }
+        return reinterpret_cast<jlong>(new StandaloneLiveness(assets, configs));
+    } catch (const std::exception &error) {
+        LOG_ERR("liveness init failed: %s", error.what());
+        return 0;
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_bonuos_facesdk_engine_NativeLiveness_nativeRelease(JNIEnv *, jclass, jlong handle) {
+    delete reinterpret_cast<StandaloneLiveness *>(handle);
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_bonuos_facesdk_engine_NativeLiveness_nativeScore(JNIEnv *env, jclass, jlong handle, jbyteArray nv21, jint width,
+                                                         jint height, jint rotation, jint left, jint top, jint right,
+                                                         jint bottom) {
+    auto *liveness = reinterpret_cast<StandaloneLiveness *>(handle);
+    if (liveness == nullptr || nv21 == nullptr || env->GetArrayLength(nv21) < width * height * 3 / 2) return NAN;
+    jbyte *data = env->GetByteArrayElements(nv21, nullptr);
+    float score = NAN;
+    try {
+        score = liveness->Score(reinterpret_cast<uint8_t *>(data), width, height, rotation, left, top, right, bottom);
+    } catch (const std::exception &error) {
+        LOG_ERR("liveness failed: %s", error.what());
+    }
+    env->ReleaseByteArrayElements(nv21, data, JNI_ABORT);
+    return score;
 }
 
 }  // extern "C"

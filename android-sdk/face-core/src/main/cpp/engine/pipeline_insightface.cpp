@@ -49,6 +49,13 @@ ExtractResult PipelineInsightFace::FromBox(const cv::Mat &bgr, const DetectedBox
     return best ? FromFace(bgr, *best) : ExtractResult{};
 }
 
+ExtractResult PipelineInsightFace::FromKeypoints(const cv::Mat &bgr, const Landmarks5 &kps) {
+    ScrfdFace face;
+    face.kps = kps;
+    face.box = DetectedBox{0.f, 0.f, 0.f, 0.f, 1.f};
+    return FromFace(bgr, face);
+}
+
 ExtractResult PipelineInsightFace::FromImage(const cv::Mat &bgr, LandmarkMode) {
     std::vector<ScrfdFace> faces = detector_.Detect(bgr, kImageInput);
     if (faces.empty()) return {};

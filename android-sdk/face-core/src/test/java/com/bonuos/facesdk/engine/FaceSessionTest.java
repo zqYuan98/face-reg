@@ -50,7 +50,7 @@ public class FaceSessionTest {
     private FaceSession<String> session(Executor executor) {
         FaceSession.Detector detector = frame -> faces;
         FaceSession.LivenessScorer liveness = (frame, rect) -> { livenessCalls++; return livenessScore; };
-        FaceSession.FeatureEngine features = (frame, face, crop) -> {
+        FaceSession.FeatureEngine features = (frame, face, keypoints, crop) -> {
             float[] feature = scriptedFeatures.isEmpty() ? nextFeature : scriptedFeatures.poll();
             return () -> { extractions++; return feature == null ? null : feature.clone(); };
         };
@@ -76,7 +76,7 @@ public class FaceSessionTest {
         assertEquals(1, recognized.size());
         assertEquals("alice", recognized.get(0).user);
         assertEquals(1, extractions);
-        assertEquals("liveness stops once decided", 3, livenessCalls);
+        assertEquals("two passing votes decide; liveness then stops", 2, livenessCalls);
         assertEquals(FaceSession.Recognition.SUCCEED, lastFaces.get(0).recognition);
     }
 
@@ -202,7 +202,7 @@ public class FaceSessionTest {
     @Test public void idleSessionAnalysesFewerFrames() {
         int[] detections = {0};
         FaceSession<String> session = new FaceSession<>(config, frame -> { detections[0]++; return faces; },
-                (frame, rect) -> livenessScore, (frame, face, crop) -> () -> ALICE.clone(), () -> gallery,
+                (frame, rect) -> livenessScore, (frame, face, keypoints, crop) -> () -> ALICE.clone(), () -> gallery,
                 new FaceSession.Listener<String>() {
                     @Override public void onFaces(List<FaceSession.FaceState<String>> states, CameraFrame frame) { lastFaces = states; }
                     @Override public void onRecognized(FaceSession.RecognitionEvent<String> event) { recognized.add(event); }
@@ -220,12 +220,42 @@ public class FaceSessionTest {
     @Test public void strangerBackOffGrows() {
         nextFeature = new float[]{0, 0, 1, 0};
         FaceSession<String> session = session(Runnable::run);
-        frames(session, 10);
-        assertEquals(1, failures.size());
-        frames(session, 4 * 30 + 15); // second round ~1 s after the first, third ~2 s after that (+ liveness re-check)
-        assertEquals(3, failures.size());
+        for (int i = 0; i < 400 && failures.size() < 3; i++) frames(session, 1);
+        assertEquals("rounds back off 1 s, then 2 s", 3, failures.size());
         int before = extractions;
         frames(session, 3 * 30); // the next back-off is 4 s
         assertEquals(before, extractions);
+        frames(session, 2 * 30);
+        assertTrue(extractions > before);
+    }
+
+    /** Liveness that runs on its own worker, like ScrfdEngines. */
+    private final class AsyncLiveness implements FaceSession.LivenessScorer, FaceSession.LivenessEngine {
+        @Override public float score(CameraFrame frame, FaceRect face) { throw new AssertionError("must run async"); }
+        @Override public java.util.concurrent.Callable<Float> captureLiveness(CameraFrame frame, FaceRect face) {
+            return () -> { livenessCalls++; return livenessScore; };
+        }
+    }
+
+    @Test public void livenessAndFeatureRunInParallelAndTheLaterOneDecidesAtOnce() {
+        List<Runnable> featureQueue = new ArrayList<>(), livenessQueue = new ArrayList<>();
+        FaceSession<String> session = new FaceSession<>(config, frame -> faces, new AsyncLiveness(),
+                (frame, face, keypoints, crop) -> () -> { extractions++; return ALICE.clone(); }, () -> gallery,
+                new FaceSession.Listener<String>() {
+                    @Override public void onFaces(List<FaceSession.FaceState<String>> states, CameraFrame frame) { lastFaces = states; }
+                    @Override public void onRecognized(FaceSession.RecognitionEvent<String> event) { recognized.add(event); }
+                    @Override public void onRecognitionFailed(long trackId, float bestScore, FaceSession.Reason reason) { }
+                }, featureQueue::add, livenessQueue::add);
+        frames(session, 6); // stable: one feature task and one liveness task are submitted together
+        assertEquals(1, featureQueue.size());
+        assertEquals(1, livenessQueue.size());
+        featureQueue.remove(0).run();            // feature first: waits for liveness
+        assertTrue(recognized.isEmpty());
+        livenessQueue.remove(0).run();           // vote 1
+        frames(session, 1);
+        livenessQueue.remove(0).run();           // vote 2: ALIVE -> decides inside this call
+        assertEquals(1, recognized.size());
+        assertEquals(1, extractions);
+        assertEquals(2, livenessCalls);
     }
 }

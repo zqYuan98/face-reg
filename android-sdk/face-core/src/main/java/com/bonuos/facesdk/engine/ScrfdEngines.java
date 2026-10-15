@@ -18,7 +18,8 @@ import org.json.JSONObject;
  * {@link RoiTracker}: a whole-frame scan every few frames, a small region around each face
  * otherwise; each scan converts only the pixels it feeds the detector. Analysis thread only.
  */
-public final class ScrfdEngines implements FaceSession.Detector, FaceSession.LivenessScorer, AutoCloseable {
+public final class ScrfdEngines implements FaceSession.Detector, FaceSession.LivenessScorer,
+        FaceSession.LivenessEngine, AutoCloseable {
     /**
      * The liveness models were trained on minivision's square boxes. Measured on 1169 faces
      * (2026-10-13): that square shares the SCRFD box centre and its side is 0.868 x the SCRFD
@@ -33,6 +34,8 @@ public final class ScrfdEngines implements FaceSession.Detector, FaceSession.Liv
     public static final int REGION_LONG_SIDE = 160;
 
     private final NativeAnalyzer analyzer;
+    /** Second copy of the liveness models for the session's liveness worker thread. */
+    private final NativeLiveness asyncLiveness;
     private final int longSide;
     private final float threshold;
     private final RoiTracker tracker;
@@ -70,6 +73,12 @@ public final class ScrfdEngines implements FaceSession.Detector, FaceSession.Liv
             throw new IllegalStateException("Cannot read live/config.json", error);
         }
         analyzer = new NativeAnalyzer(assets, NativeEngine.INSIGHTFACE_DETECTOR, 2, names, scales, sizes);
+        try {
+            asyncLiveness = new NativeLiveness(assets, names, scales, sizes);
+        } catch (RuntimeException error) {
+            analyzer.close();
+            throw error;
+        }
     }
 
     @Override
@@ -117,8 +126,24 @@ public final class ScrfdEngines implements FaceSession.Detector, FaceSession.Liv
         return analyzer.liveness(Math.round(left), Math.round(top), Math.round(left + side) - 1, Math.round(top + side) - 1);
     }
 
+    /**
+     * Copies the frame (one array clone) and scores it on the caller's worker thread with this
+     * object's second set of liveness models. One task at a time: FaceSession keeps a single
+     * liveness evaluation in flight.
+     */
+    @Override
+    public java.util.concurrent.Callable<Float> captureLiveness(CameraFrame frame, FaceRect face) {
+        final byte[] nv21 = frame.nv21.clone();
+        final int w = frame.width, h = frame.height, rotation = frame.rotationDegrees;
+        float side = face.height() * LIVENESS_SIDE_PER_HEIGHT;
+        final int left = Math.round(face.centerX() - side / 2), top = Math.round(face.centerY() - side / 2);
+        final int right = Math.round(face.centerX() - side / 2 + side) - 1, bottom = Math.round(face.centerY() - side / 2 + side) - 1;
+        return () -> asyncLiveness.score(nv21, w, h, rotation, left, top, right, bottom);
+    }
+
     @Override
     public void close() {
+        asyncLiveness.close();
         analyzer.close();
     }
 

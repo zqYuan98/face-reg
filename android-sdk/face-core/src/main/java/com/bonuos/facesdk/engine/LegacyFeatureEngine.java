@@ -19,7 +19,7 @@ public final class LegacyFeatureEngine implements FaceSession.FeatureEngine {
     }
 
     @Override
-    public Callable<float[]> capture(CameraFrame frame, FaceRect face, FaceRect crop) {
+    public Callable<float[]> capture(CameraFrame frame, FaceRect face, float[] keypoints, FaceRect crop) {
         final int left = Math.max(0, (int) Math.floor(crop.left)), top = Math.max(0, (int) Math.floor(crop.top));
         final int width = Math.min(frame.uprightWidth(), (int) Math.ceil(crop.right)) - left;
         final int height = Math.min(frame.uprightHeight(), (int) Math.ceil(crop.bottom)) - top;

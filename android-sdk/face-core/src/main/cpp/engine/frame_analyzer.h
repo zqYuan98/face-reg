@@ -50,6 +50,21 @@ private:
     cv::Mat sensor_, bgr_, sample_;
 };
 
+/**
+ * Silent liveness on its own thread: owns its models and converts the frame it is given, so it
+ * never touches the analyzer's per-frame buffers. Not thread safe; one instance per worker.
+ */
+class StandaloneLiveness {
+public:
+    StandaloneLiveness(AAssetManager *assets, std::vector<ModelConfig> configs);
+    /** Sensor-orientation NV21, upright-frame minivision box (inclusive); NaN on failure. */
+    float Score(const uint8_t *nv21, int width, int height, int rotation_degrees, int left, int top, int right, int bottom);
+
+private:
+    Live live_;
+    cv::Mat sensor_, bgr_;
+};
+
 }  // namespace face
 
 #endif  // FACE_ENGINE_FRAME_ANALYZER_H

@@ -10,7 +10,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -19,13 +18,15 @@ import java.util.concurrent.RejectedExecutionException;
 /**
  * Continuous-video recognition: one state machine per tracked face.
  *
- * <p>Per frame (analysis thread): detect, track, run the cheap filters, then liveness on faces
- * that still need it. A face that passes is cropped and handed to a single feature worker; the
- * result is merged back on the analysis thread at the next frame, so all state is touched by one
- * thread only. Once a track is recognised it never runs a model again, which is what turns
- * "every model on every frame" into "the expensive model once per person".
+ * <p>Per frame (analysis thread): detect, track and run the cheap filters. A face that passes is
+ * handed to two workers in parallel, as in ArcSoft's demo: liveness (when the scorer is a
+ * {@link LivenessEngine}) and feature extraction. Whichever finishes last decides at once, on its
+ * own thread, under the session lock; nothing waits for the next frame. Once a track is
+ * recognised it never runs a model again, which turns "every model on every frame" into "the
+ * expensive models once per person".
  *
- * <p>Not thread safe: call {@link #onFrame} from one thread. Listener callbacks run on that thread.
+ * <p>Call {@link #onFrame} from one thread. {@link Listener#onFaces} runs on that thread; the other
+ * callbacks may also run on a worker thread, with the session lock held, so keep them short.
  *
  * @param <T> gallery entry type, e.g. a user record; must implement equals/hashCode by identity
  */
@@ -46,10 +47,20 @@ public final class FaceSession<T> implements AutoCloseable {
      * returns the task that extracts a feature from that copy. The task runs on the worker thread
      * and returns null when the recognizer finds no usable face.
      *
-     * @param face the tracked face box; {@code crop} is that box enlarged by featureCropScale
+     * @param face      the tracked face box; {@code crop} is that box enlarged by featureCropScale
+     * @param keypoints the detector's five points for this frame (x0,y0..x4,y4), or null
      */
     public interface FeatureEngine {
-        Callable<float[]> capture(CameraFrame frame, FaceRect face, FaceRect crop);
+        Callable<float[]> capture(CameraFrame frame, FaceRect face, float[] keypoints, FaceRect crop);
+    }
+
+    /**
+     * Liveness that runs off the analysis thread, in parallel with feature extraction (ArcSoft's
+     * FL thread). Copies what it needs from {@code frame} now; the task returns the real-face
+     * probability, NaN on failure. A {@link LivenessScorer} that also implements this runs async.
+     */
+    public interface LivenessEngine {
+        Callable<Float> captureLiveness(CameraFrame frame, FaceRect face);
     }
 
     public interface GallerySource<T> {
@@ -149,19 +160,9 @@ public final class FaceSession<T> implements AutoCloseable {
         float score = Float.NaN;
         Reason reason = Reason.NONE;
 
+        boolean livenessPending;
+
         TrackState(long id) { this.id = id; }
-    }
-
-    private static final class Result {
-        final long trackId;
-        final float[] feature;
-        final boolean failed;
-
-        Result(long trackId, float[] feature, boolean failed) {
-            this.trackId = trackId;
-            this.feature = feature;
-            this.failed = failed;
-        }
     }
 
     private final SessionConfig config;
@@ -170,17 +171,21 @@ public final class FaceSession<T> implements AutoCloseable {
     private final FeatureEngine features;
     private final GallerySource<T> gallery;
     private final Listener<T> listener;
-    private final Executor worker;
-    private final ExecutorService ownedWorker;
+    private final LivenessEngine livenessAsync;
+    private final Executor worker, livenessWorker;
+    private final ExecutorService ownedWorker, ownedLivenessWorker;
+    /** Guards all track state: taken by onFrame after detection and by worker completions. */
+    private final Object lock = new Object();
     private final FaceTracker tracker;
     private final LumaQuality quality = new LumaQuality();
     private final Map<Long, TrackState<T>> states = new HashMap<>();
     private final Map<T, Long> lastReported = new HashMap<>();
-    private final ConcurrentLinkedQueue<Result> results = new ConcurrentLinkedQueue<>();
-    private volatile boolean busy;
+    private volatile boolean busy, livenessBusy;
     private volatile boolean closed;
     private boolean idle;
     private long lastAnalysedAt = Long.MIN_VALUE;
+    /** Session time for worker completions: the last frame's timestamp plus wall time since it. */
+    private long lastFrameMs, lastFrameNanos;
 
     /** Uses a private single-thread feature worker, shut down by {@link #close()}. */
     public FaceSession(SessionConfig config, Detector detector, LivenessScorer liveness, FeatureEngine features,
@@ -188,13 +193,24 @@ public final class FaceSession<T> implements AutoCloseable {
         this(config, detector, liveness, features, gallery, listener, null);
     }
 
-    /** {@code worker} null means a private single-thread executor; a supplied one is not shut down. */
+    /** {@code worker} runs both feature and async liveness tasks; null means private threads. */
     public FaceSession(SessionConfig config, Detector detector, LivenessScorer liveness, FeatureEngine features,
                        GallerySource<T> gallery, Listener<T> listener, Executor worker) {
+        this(config, detector, liveness, features, gallery, listener, worker, worker);
+    }
+
+    /**
+     * {@code worker} runs feature tasks and {@code livenessWorker} async liveness tasks; null means a
+     * private single-thread executor (shut down by {@link #close()}); supplied ones are not shut down.
+     * Liveness runs async only when {@code liveness} also implements {@link LivenessEngine}.
+     */
+    public FaceSession(SessionConfig config, Detector detector, LivenessScorer liveness, FeatureEngine features,
+                       GallerySource<T> gallery, Listener<T> listener, Executor worker, Executor livenessWorker) {
         this.config = config.clone();
         this.config.validate();
         this.detector = detector;
         this.liveness = liveness;
+        this.livenessAsync = liveness instanceof LivenessEngine ? (LivenessEngine) liveness : null;
         this.features = features;
         this.gallery = gallery;
         this.listener = listener;
@@ -209,6 +225,13 @@ public final class FaceSession<T> implements AutoCloseable {
             ownedWorker = null;
             this.worker = worker;
         }
+        if (livenessAsync != null && livenessWorker == null) {
+            ownedLivenessWorker = Executors.newSingleThreadExecutor(r -> new Thread(r, "face-liveness"));
+            this.livenessWorker = ownedLivenessWorker;
+        } else {
+            ownedLivenessWorker = null;
+            this.livenessWorker = livenessWorker;
+        }
         tracker = new FaceTracker(this.config.trackMinIou, this.config.trackMaxMissed, this.config.stableFrames,
                 this.config.boxSmoothing, this.config.firstTrackId);
     }
@@ -219,11 +242,23 @@ public final class FaceSession<T> implements AutoCloseable {
     public void onFrame(CameraFrame frame) {
         if (closed) return;
         long now = frame.timestampMs;
-        // Idle: nothing to recognise, so a few frames per second are enough to notice a new face.
-        if (idle && results.isEmpty() && now - lastAnalysedAt < config.idleFrameIntervalMs) return;
-        lastAnalysedAt = now;
-        applyResults(now);
+        synchronized (lock) {
+            // Idle: nothing to recognise, so a few frames per second are enough to notice a new face.
+            if (idle && now - lastAnalysedAt < config.idleFrameIntervalMs) return;
+            lastAnalysedAt = now;
+            lastFrameMs = now;
+            lastFrameNanos = System.nanoTime();
+        }
+        // Detection and tracking belong to the analysis thread alone; no lock needed.
         List<Track> tracks = tracker.update(detector.detect(frame));
+        List<FaceState<T>> faces;
+        synchronized (lock) {
+            faces = updateStates(tracks, frame, now);
+        }
+        listener.onFaces(faces, frame);
+    }
+
+    private List<FaceState<T>> updateStates(List<Track> tracks, CameraFrame frame, long now) {
 
         Set<Long> live = new HashSet<>();
         int visible = 0;
@@ -254,7 +289,7 @@ public final class FaceSession<T> implements AutoCloseable {
                     state.recognition, state.user, state.score, state.reason));
         }
         expireCooldowns(now);
-        idle = !busy;
+        idle = !busy && !livenessBusy;
         for (FaceState<T> face : snapshot) {
             TrackState<T> state = states.get(face.trackId);
             if (state.recognition == Recognition.PENDING || (state.recognition == Recognition.FAILED && now >= state.retryAt)) {
@@ -262,7 +297,12 @@ public final class FaceSession<T> implements AutoCloseable {
                 break;
             }
         }
-        listener.onFaces(Collections.unmodifiableList(snapshot), frame);
+        return Collections.unmodifiableList(snapshot);
+    }
+
+    /** Session time now, for completions that arrive between frames. Caller holds the lock. */
+    private long now() {
+        return lastFrameMs + (System.nanoTime() - lastFrameNanos) / 1_000_000L;
     }
 
     /** Filters ordered by cost; everything here is O(1) per face. */
@@ -315,18 +355,60 @@ public final class FaceSession<T> implements AutoCloseable {
             state.liveness = Liveness.ALIVE;
             return;
         }
-        if (state.liveness == Liveness.ALIVE || now < state.livenessRetryAt) return;
-        float score = liveness.score(frame, track.rect);
-        if (Float.isNaN(score)) return; // engine error: no vote
+        if (state.liveness == Liveness.ALIVE || now < state.livenessRetryAt || state.livenessPending) return;
+        if (livenessAsync == null) {
+            addVote(state, liveness.score(frame, track.rect), now);
+            return;
+        }
+        if (livenessBusy) return; // one evaluation in flight: the next one uses a fresher frame
+        final Callable<Float> task;
+        try {
+            task = livenessAsync.captureLiveness(frame, track.rect);
+        } catch (RuntimeException error) {
+            return;
+        }
+        final long id = state.id;
+        state.livenessPending = true;
+        livenessBusy = true;
+        try {
+            livenessWorker.execute(() -> {
+                float score = Float.NaN;
+                try {
+                    if (!closed) score = task.call();
+                } catch (Exception error) {
+                    // no vote
+                }
+                synchronized (lock) {
+                    livenessBusy = false;
+                    TrackState<T> current = states.get(id);
+                    if (current == null || closed) return; // the face left meanwhile
+                    current.livenessPending = false;
+                    long t = now();
+                    addVote(current, score, t);
+                    decide(current, t);
+                }
+            });
+        } catch (RejectedExecutionException error) {
+            livenessBusy = false;
+            state.livenessPending = false;
+        }
+    }
+
+    /**
+     * Records one liveness vote. Decides as soon as the outcome is certain: ALIVE once
+     * {@code livenessRequired} votes in the window say so, NOT_ALIVE once enough say otherwise
+     * that ALIVE can no longer be reached. The window need not fill first.
+     */
+    private void addVote(TrackState<T> state, float score, long now) {
+        if (Float.isNaN(score) || state.liveness == Liveness.ALIVE) return; // engine error: no vote
         state.livenessScore = score;
         state.votes.addLast(score > config.livenessThreshold);
         while (state.votes.size() > config.livenessWindow) state.votes.removeFirst();
-        if (state.votes.size() < config.livenessWindow) return;
         int alive = 0;
         for (Boolean vote : state.votes) if (vote) alive++;
         if (alive >= config.livenessRequired) {
             state.liveness = Liveness.ALIVE;
-        } else if (state.votes.size() - alive >= config.livenessRequired) {
+        } else if (state.votes.size() - alive > config.livenessWindow - config.livenessRequired) {
             state.liveness = Liveness.NOT_ALIVE;
             state.livenessRetryAt = now + config.livenessFailedRetryMs;
             state.votes.clear();
@@ -339,7 +421,7 @@ public final class FaceSession<T> implements AutoCloseable {
                 : new FaceRect(0, 0, frame.uprightWidth(), frame.uprightHeight());
         final Callable<float[]> task;
         try {
-            task = features.capture(frame, track.rect, crop);
+            task = features.capture(frame, track.rect, track.keypoints, crop);
         } catch (RuntimeException error) {
             state.reason = Reason.FEATURE_ERROR;
             return;
@@ -356,8 +438,10 @@ public final class FaceSession<T> implements AutoCloseable {
                 } catch (Exception error) {
                     failed = true;
                 } finally {
-                    results.add(new Result(id, feature, failed));
-                    busy = false;
+                    synchronized (lock) {
+                        busy = false;
+                        if (!closed) applyFeature(id, feature, failed, now());
+                    }
                 }
             });
         } catch (RejectedExecutionException error) {
@@ -366,37 +450,35 @@ public final class FaceSession<T> implements AutoCloseable {
         }
     }
 
-    private void applyResults(long now) {
-        Result result;
-        while ((result = results.poll()) != null) {
-            TrackState<T> state = states.get(result.trackId);
-            if (state == null) continue; // the face left before its feature came back
-            state.extracting = false;
-            if (result.feature == null) {
-                attemptFailed(state, now, result.failed ? Reason.FEATURE_ERROR : Reason.NO_FEATURE, Float.NaN);
-                continue;
-            }
-            float[] unit = unit(result.feature);
-            if (unit == null) {
-                attemptFailed(state, now, Reason.FEATURE_ERROR, Float.NaN);
-                continue;
-            }
-            if (state.fusedSum == null || state.fusedSum.length != unit.length) {
-                state.fusedSum = new float[unit.length];
-                state.fusedCount = 0;
-            }
-            for (int i = 0; i < unit.length; i++) state.fusedSum[i] += unit[i];
-            state.fusedCount++;
-            Gallery.Match<T> match = gallery.gallery().search(state.fusedSum);
-            if (match == null) {
-                attemptFailed(state, now, Reason.FEATURE_ERROR, Float.NaN); // dimension mismatch
-                continue;
-            }
-            state.match = match;
-            if (state.liveness != Liveness.ALIVE)
-                listener.onMatchScored(state.id, match.score, match.secondScore, state.fusedCount, state.liveness, Reason.NOT_ALIVE);
-            decide(state, now);
+    /** A feature came back (worker thread, lock held): fuse, search, decide if liveness is in. */
+    private void applyFeature(long trackId, float[] feature, boolean failed, long now) {
+        TrackState<T> state = states.get(trackId);
+        if (state == null) return; // the face left before its feature came back
+        state.extracting = false;
+        if (feature == null) {
+            attemptFailed(state, now, failed ? Reason.FEATURE_ERROR : Reason.NO_FEATURE, Float.NaN);
+            return;
         }
+        float[] unit = unit(feature);
+        if (unit == null) {
+            attemptFailed(state, now, Reason.FEATURE_ERROR, Float.NaN);
+            return;
+        }
+        if (state.fusedSum == null || state.fusedSum.length != unit.length) {
+            state.fusedSum = new float[unit.length];
+            state.fusedCount = 0;
+        }
+        for (int i = 0; i < unit.length; i++) state.fusedSum[i] += unit[i];
+        state.fusedCount++;
+        Gallery.Match<T> match = gallery.gallery().search(state.fusedSum);
+        if (match == null) {
+            attemptFailed(state, now, Reason.FEATURE_ERROR, Float.NaN); // dimension mismatch
+            return;
+        }
+        state.match = match;
+        if (state.liveness != Liveness.ALIVE)
+            listener.onMatchScored(state.id, match.score, match.secondScore, state.fusedCount, state.liveness, Reason.NOT_ALIVE);
+        decide(state, now);
     }
 
     /** Runs when both a match and liveness are available, whichever arrived last. */
@@ -472,15 +554,18 @@ public final class FaceSession<T> implements AutoCloseable {
     /** Forgets all tracks, e.g. after switching cameras. Pending results are discarded. */
     public void reset() {
         tracker.reset();
-        states.clear();
-        results.clear();
+        synchronized (lock) {
+            states.clear();
+        }
     }
 
     @Override
     public void close() {
         closed = true;
         if (ownedWorker != null) ownedWorker.shutdownNow();
-        states.clear();
-        results.clear();
+        if (ownedLivenessWorker != null) ownedLivenessWorker.shutdownNow();
+        synchronized (lock) {
+            states.clear();
+        }
     }
 }

@@ -78,6 +78,15 @@ public final class NativeEngine implements AutoCloseable {
                 mode.ordinal(), outLandmarks);
     }
 
+    /**
+     * InsightFace pipeline only: align on five points already known (crop coordinates, e.g. from
+     * the tracker's SCRFD pass) and extract, skipping detection. Null on failure or for v1.
+     */
+    public synchronized float[] extractWithKeypoints(byte[] bgr, int width, int height, float[] keypoints) {
+        if (handle == 0 || keypoints == null || keypoints.length < 10) return null;
+        return nativeExtractKeypoints(handle, bgr, width, height, keypoints);
+    }
+
     /** Still image (enrolment photo): FaceBoxes picks the highest-scoring face, like the server. */
     public synchronized float[] extract(Bitmap bitmap, LandmarkMode mode, float[] outLandmarks) {
         if (handle == 0 || bitmap == null || bitmap.getConfig() != Bitmap.Config.ARGB_8888) return null;
@@ -107,5 +116,6 @@ public final class NativeEngine implements AutoCloseable {
                                                 int left, int top, int cropWidth, int cropHeight, byte[] out);
     private static native float[] nativeExtractBgr(long handle, byte[] bgr, int width, int height,
                                                    float x1, float y1, float x2, float y2, int mode, float[] outLandmarks);
+    private static native float[] nativeExtractKeypoints(long handle, byte[] bgr, int width, int height, float[] keypoints);
     private static native float[] nativeExtractBitmap(long handle, Bitmap bitmap, int mode, float[] outLandmarks);
 }

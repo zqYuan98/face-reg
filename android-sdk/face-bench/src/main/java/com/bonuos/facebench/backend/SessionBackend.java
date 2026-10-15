@@ -41,9 +41,12 @@ public final class SessionBackend implements FaceBackend {
     private Gallery<String> gallery = Gallery.empty();
     private FaceSession<String> session;
     private List<FaceSession.FaceState<String>> faces = new ArrayList<>();
-    private final List<FaceSession.RecognitionEvent<String>> events = new ArrayList<>();
+    /** Recognition now fires on a worker thread at the moment of decision. */
+    private final List<FaceSession.RecognitionEvent<String>> events = java.util.Collections.synchronizedList(new ArrayList<>());
+    private final List<Long> eventWallMs = java.util.Collections.synchronizedList(new ArrayList<>());
     private long clipStartMs, wallStartMs;
     private boolean started;
+    private int reported;
 
     public SessionBackend(Context context, String name, String recognizerAsset) {
         this.name = name;
@@ -86,14 +89,19 @@ public final class SessionBackend implements FaceBackend {
         if (session != null) session.close();
         frames.reset();
         events.clear();
+        eventWallMs.clear();
         faces = new ArrayList<>();
         started = false;
+        reported = 0;
         final Gallery<String> clipGallery = gallery;
         session = new FaceSession<>(clipConfig, frames, frames,
                 new NativeFeatureEngine(engine, NativeEngine.LandmarkMode.SUBPIXEL, config.maxYaw, config.maxPitch),
                 () -> clipGallery, new FaceSession.Listener<String>() {
                     @Override public void onFaces(List<FaceSession.FaceState<String>> states, CameraFrame frame) { faces = states; }
-                    @Override public void onRecognized(FaceSession.RecognitionEvent<String> event) { events.add(event); }
+                    @Override public void onRecognized(FaceSession.RecognitionEvent<String> event) {
+                        eventWallMs.add(SystemClock.elapsedRealtime() - wallStartMs);
+                        events.add(event);
+                    }
                     @Override public void onRecognitionFailed(long trackId, float bestScore, FaceSession.Reason reason) { }
                 }, null); // private worker thread, as in the app
     }
@@ -117,7 +125,6 @@ public final class SessionBackend implements FaceBackend {
             outcome.note = "dropped";
             return outcome;
         }
-        int eventsBefore = events.size();
         long t0 = SystemClock.elapsedRealtimeNanos();
         session.onFrame(new CameraFrame(frame.nv21, frame.width, frame.height, 0, timestampMs));
         double ms = (SystemClock.elapsedRealtimeNanos() - t0) / 1e6;
@@ -138,9 +145,11 @@ public final class SessionBackend implements FaceBackend {
                     : main.liveness == FaceSession.Liveness.NOT_ALIVE ? FrameOutcome.LIVE_NOT_ALIVE : FrameOutcome.LIVE_UNKNOWN;
             outcome.note = "state:" + main.recognition + ":" + main.reason;
         }
-        if (events.size() > eventsBefore) {
-            FaceSession.RecognitionEvent<String> e = events.get(events.size() - 1);
-            outcome.note = String.format(java.util.Locale.ROOT, "recognized:%s:%.4f:%d", e.user, e.score, SystemClock.elapsedRealtime() - wallStartMs);
+        if (events.size() > reported) {
+            // Decided on a worker thread since the previous frame; report it with its own time.
+            FaceSession.RecognitionEvent<String> e = events.get(reported);
+            outcome.note = String.format(java.util.Locale.ROOT, "recognized:%s:%.4f:%d", e.user, e.score, eventWallMs.get(reported));
+            reported++;
         }
         return outcome;
     }

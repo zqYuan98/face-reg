@@ -17,6 +17,12 @@ public:
     PipelineInsightFace(std::unique_ptr<NetSession> detector, std::unique_ptr<NetSession> recognizer);
 
     ExtractResult FromBox(const cv::Mat &bgr, const DetectedBox &box, LandmarkMode mode) override;
+    /**
+     * Five points already known (from the tracker's SCRFD pass): align and extract directly,
+     * skipping the detection that FromBox runs on the crop.
+     */
+    ExtractResult FromKeypoints(const cv::Mat &bgr, const Landmarks5 &kps);
+
     ExtractResult FromImage(const cv::Mat &bgr, LandmarkMode mode) override;
 
 private:
