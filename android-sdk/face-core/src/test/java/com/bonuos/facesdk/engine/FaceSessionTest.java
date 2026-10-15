@@ -258,4 +258,51 @@ public class FaceSessionTest {
         assertEquals(1, extractions);
         assertEquals(2, livenessCalls);
     }
+
+    private int verifications;
+
+    private FaceSession<String> cascadeSession(float[] fastFeature, float[] slowFeature) {
+        Gallery<String> slowGallery = Gallery.build(Arrays.asList(new Gallery.Entry<>("alice", ALICE), new Gallery.Entry<>("bob", BOB)), 4);
+        FaceSession.Verifier<String> verifier = new FaceSession.Verifier<>(
+                (frame, face, keypoints, crop) -> () -> { verifications++; return slowFeature.clone(); },
+                () -> slowGallery, 0.9f, 0.3f, 0.5f);
+        return new FaceSession<>(config, frame -> faces, (frame, rect) -> livenessScore,
+                (frame, face, keypoints, crop) -> () -> { extractions++; return fastFeature.clone(); }, () -> gallery,
+                new FaceSession.Listener<String>() {
+                    @Override public void onFaces(List<FaceSession.FaceState<String>> states, CameraFrame frame) { lastFaces = states; }
+                    @Override public void onRecognized(FaceSession.RecognitionEvent<String> event) { recognized.add(event); }
+                    @Override public void onRecognitionFailed(long trackId, float bestScore, FaceSession.Reason reason) { failures.add(reason); }
+                }, Runnable::run).withVerifier(verifier);
+    }
+
+    @Test public void cascadeConfidentFirstStageSkipsTheSecond() {
+        FaceSession<String> session = cascadeSession(new float[]{0.95f, 0.31f, 0, 0}, ALICE);
+        frames(session, 20);
+        assertEquals(1, recognized.size());
+        assertEquals(0, verifications);
+    }
+
+    @Test public void cascadeBorderlineIsDecidedByTheSecondStage() {
+        // First stage cos(alice) ~0.6: between reject 0.3 and accept 0.9.
+        FaceSession<String> session = cascadeSession(new float[]{0.6f, 0, 0.8f, 0}, ALICE);
+        frames(session, 20);
+        assertEquals(1, verifications);
+        assertEquals(1, recognized.size());
+        assertEquals("alice", recognized.get(0).user);
+        assertEquals(1f, recognized.get(0).score, 1e-4f);
+    }
+
+    @Test public void cascadeSecondStageCanRejectAndClearlyLowSkipsIt() {
+        FaceSession<String> borderline = cascadeSession(new float[]{0.6f, 0, 0.8f, 0}, new float[]{0, 0, 1, 0});
+        frames(borderline, 10);
+        assertTrue(recognized.isEmpty());
+        assertTrue(verifications >= 1);
+        verifications = 0;
+        failures.clear();
+        FaceSession<String> stranger = cascadeSession(new float[]{0.1f, 0, 0.99f, 0}, ALICE);
+        frames(stranger, 10);
+        assertTrue(recognized.isEmpty());
+        assertEquals(0, verifications);
+        assertEquals(1, failures.size());
+    }
 }

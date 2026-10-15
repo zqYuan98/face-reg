@@ -61,6 +61,8 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
 
     private com.bonuos.facesdk.SyncManager syncManager;
     private FaceRecognizer faceRecognizer;
+    /** Cascade second stage (IResNet-50 int8) when face.engine is insightface_cascade, else null. */
+    private FaceRecognizer verifyRecognizer;
     /** Per-frame detector + liveness: ScrfdEngines with InsightFace, MvEngines with the v1 engines. */
     private AutoCloseable frameEngines;
     private volatile FaceSession<FaceRepository.FaceUser> session;
@@ -117,8 +119,10 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
 
     private void initFaceSDK() {
         try {
-            FaceRecognizer.Backend backend = engineFromBuild();
+            boolean cascade = cascadeFromBuild();
+            FaceRecognizer.Backend backend = cascade ? FaceRecognizer.Backend.INSIGHTFACE_MBF : engineFromBuild();
             faceRecognizer = new FaceRecognizer(this, backend);
+            if (cascade) verifyRecognizer = new FaceRecognizer(this, FaceRecognizer.Backend.INSIGHTFACE_R50_INT8);
             SessionConfig config = new SessionConfig();
             FaceSession.Detector detector;
             FaceSession.LivenessScorer liveness;
@@ -146,6 +150,13 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
                     NativeEngine.LandmarkMode.TTA, 30f, 25f);
             Log.i(TAG, "Face engine " + backend + ", threshold " + config.thresholdHigh);
             session = new FaceSession<>(config, detector, liveness, features, faceRecognizer, this);
+            if (verifyRecognizer != null) {
+                // MobileFaceNet decides clear cases; IResNet-50 int8 checks the borderline ones.
+                // Thresholds: tools/engine-eval/cascade_lfw.py (LFW all pairs, FAR 1e-5).
+                session.withVerifier(new FaceSession.Verifier<>(
+                        new NativeFeatureEngine(verifyRecognizer.nativeEngine(), NativeEngine.LandmarkMode.TTA, 30f, 25f),
+                        verifyRecognizer, 0.487f, 0.098f, 0.31f));
+            }
             Log.i(TAG, "Loaded " + faceRecognizer.gallery().size() + " users into the gallery.");
         } catch (Exception e) {
             Log.e(TAG, "Failed to initialize FaceSDK", e);
@@ -157,6 +168,11 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
      * local.properties face.engine: insightface_r50_int8 (default), insightface_mbf, native_int8,
      * native. The app APK does not ship the prebuilt library (see app/build.gradle.kts).
      */
+    /** Default engine: MobileFaceNet -> IResNet-50 int8 cascade (speed of the first, accuracy of the second). */
+    private static boolean cascadeFromBuild() {
+        return BuildConfig.FACE_ENGINE.isEmpty() || "insightface_cascade".equals(BuildConfig.FACE_ENGINE);
+    }
+
     private static FaceRecognizer.Backend engineFromBuild() {
         switch (BuildConfig.FACE_ENGINE) {
             case "native": return FaceRecognizer.Backend.NATIVE;
@@ -396,7 +412,7 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
         // must not be freed under a running onFrame.
         final FaceSession<FaceRepository.FaceUser> closingSession = session;
         final AutoCloseable closingEngines = frameEngines;
-        final FaceRecognizer closingRecognizer = faceRecognizer;
+        final FaceRecognizer closingRecognizer = faceRecognizer, closingVerifier = verifyRecognizer;
         session = null;
         cameraExecutor.execute(() -> {
             if (closingSession != null) closingSession.close();
@@ -409,6 +425,7 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
             }
             // Waits for an in-flight feature extraction via the dataset lock.
             if (closingRecognizer != null) closingRecognizer.release();
+            if (closingVerifier != null) closingVerifier.release();
         });
         cameraExecutor.shutdown();
     }

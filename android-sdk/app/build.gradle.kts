@@ -55,7 +55,7 @@ android {
         buildConfigField("String", "SYNC_URL", localString("face.sync.url"))
         buildConfigField("String", "SYNC_DEVICE_SN", localString("face.sync.deviceSn"))
         buildConfigField("String", "SYNC_DEVICE_SECRET", localString("face.sync.deviceSecret"))
-        // insightface_r50_int8 (default), insightface_mbf, native_int8, native
+        // insightface_cascade (default), insightface_r50_int8, insightface_mbf, native_int8, native
         buildConfigField("String", "FACE_ENGINE", localString("face.engine"))
         buildConfigField("boolean", "SYNC_ALLOW_CLEARTEXT",
                 (localProperties.getProperty("face.sync.allowCleartext") == "true").toString())

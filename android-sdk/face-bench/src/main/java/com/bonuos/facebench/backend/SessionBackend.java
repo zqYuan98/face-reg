@@ -31,6 +31,11 @@ public final class SessionBackend implements FaceBackend {
     private final String name, recognizer;
     private final ScrfdEngines frames;
     private final NativeEngine engine;
+    /** Cascade second stage (IResNet-50 int8), or null. Thresholds from tools/engine-eval/cascade_lfw.py. */
+    private final NativeEngine verifyEngine;
+    static final float CASCADE_ACCEPT = 0.487f, CASCADE_REJECT = 0.098f, CASCADE_THRESHOLD = 0.31f;
+    private final List<Gallery.Entry<String>> enrolledSlow = new ArrayList<>();
+    private Gallery<String> slowGallery = Gallery.empty();
     /** The app's 5 stable frames at a 30 fps camera. */
     static final long STABLE_MS = 167;
 
@@ -76,6 +81,11 @@ public final class SessionBackend implements FaceBackend {
     private int reported;
 
     public SessionBackend(Context context, String name, String recognizerAsset) {
+        this(context, name, recognizerAsset, null);
+    }
+
+    /** {@code verifierAsset} non-null: cascade, {@code recognizerAsset} first, the verifier for borderline scores. */
+    public SessionBackend(Context context, String name, String recognizerAsset, String verifierAsset) {
         this.name = name;
         this.recognizer = recognizerAsset;
         boolean r50 = !NativeEngine.INSIGHTFACE_MBF.equals(recognizerAsset);
@@ -90,6 +100,17 @@ public final class SessionBackend implements FaceBackend {
             frames.close();
             throw error;
         }
+        NativeEngine second = null;
+        if (verifierAsset != null) {
+            try {
+                second = NativeEngine.insightFace(context.getAssets(), verifierAsset, 4);
+            } catch (RuntimeException error) {
+                engine.close();
+                frames.close();
+                throw error;
+            }
+        }
+        verifyEngine = second;
     }
 
     @Override public String name() { return name; }
@@ -98,12 +119,19 @@ public final class SessionBackend implements FaceBackend {
         return "FaceSession replay with simulated KEEP_ONLY_LATEST drops: SCRFD-500M tracking (whole frame long side 320 every "
                 + ScrfdEngines.FULL_SCAN_EVERY + " frames, region " + ScrfdEngines.REGION_LONG_SIDE + " otherwise), liveness vote "
                 + config.livenessRequired + "/" + config.livenessWindow + " at " + config.livenessThreshold + ", recognizer "
-                + recognizer + ", accept >= " + config.thresholdHigh;
+                + recognizer + ", accept >= " + config.thresholdHigh
+                + (verifyEngine == null ? "" : "; cascade: first stage accept >= " + CASCADE_ACCEPT + ", reject < "
+                + CASCADE_REJECT + ", else IResNet-50 int8 >= " + CASCADE_THRESHOLD);
     }
 
     @Override public void enrolled(String subjectId, Object reference) {
-        enrolled.add(new Gallery.Entry<>(subjectId, (float[]) reference));
+        float[][] pair = reference instanceof float[][] ? (float[][]) reference : new float[][]{(float[]) reference, null};
+        enrolled.add(new Gallery.Entry<>(subjectId, pair[0]));
         gallery = Gallery.build(enrolled, 512);
+        if (pair[1] != null) {
+            enrolledSlow.add(new Gallery.Entry<>(subjectId, pair[1]));
+            slowGallery = Gallery.build(enrolledSlow, 512);
+        }
     }
 
     @Override public void clipTiming(int frameCount, long durationMs) {
@@ -139,6 +167,12 @@ public final class SessionBackend implements FaceBackend {
                     }
                     @Override public void onRecognitionFailed(long trackId, float bestScore, FaceSession.Reason reason) { }
                 }, null); // private worker thread, as in the app
+        if (verifyEngine != null) {
+            final Gallery<String> clipSlowGallery = slowGallery;
+            session.withVerifier(new FaceSession.Verifier<>(
+                    new NativeFeatureEngine(verifyEngine, NativeEngine.LandmarkMode.SUBPIXEL, config.maxYaw, config.maxPitch),
+                    () -> clipSlowGallery, CASCADE_ACCEPT, CASCADE_REJECT, CASCADE_THRESHOLD));
+        }
     }
 
     @Override
@@ -196,7 +230,10 @@ public final class SessionBackend implements FaceBackend {
 
     @Override public Object enroll(Bitmap photo) {
         Bitmap argb = photo.getConfig() == Bitmap.Config.ARGB_8888 ? photo : photo.copy(Bitmap.Config.ARGB_8888, false);
-        return engine.extract(argb, NativeEngine.LandmarkMode.SUBPIXEL, null);
+        float[] first = engine.extract(argb, NativeEngine.LandmarkMode.SUBPIXEL, null);
+        if (verifyEngine == null || first == null) return first;
+        float[] second = verifyEngine.extract(argb, NativeEngine.LandmarkMode.SUBPIXEL, null);
+        return second == null ? null : new float[][]{first, second};
     }
 
     @Override public float compare(Object probe, Object reference) {
@@ -205,6 +242,7 @@ public final class SessionBackend implements FaceBackend {
 
     @Override public void close() {
         if (session != null) session.close();
+        if (verifyEngine != null) verifyEngine.close();
         engine.close();
         frames.close();
     }
