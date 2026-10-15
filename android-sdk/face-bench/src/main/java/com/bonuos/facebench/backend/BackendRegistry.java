@@ -23,6 +23,8 @@ public final class BackendRegistry {
     public static final String SESSION_MBF = "session_mbf";
     public static final String ARCSOFT = "arcsoft";
     private static final String ARCSOFT_CLASS = "com.bonuos.facebench.arcsoft.ArcSoftBackend";
+    public static final String SESSION_ARCSOFT = "session_arcsoft";
+    private static final String ARCSOFT_SESSION_CLASS = "com.bonuos.facebench.arcsoft.ArcSoftSessionBackend";
 
     private BackendRegistry() { }
 
@@ -39,7 +41,10 @@ public final class BackendRegistry {
             names.add(SESSION_R50);
             names.add(SESSION_MBF);
         }
-        if (BuildConfig.ARCSOFT_AVAILABLE) names.add(ARCSOFT);
+        if (BuildConfig.ARCSOFT_AVAILABLE) {
+            names.add(ARCSOFT);
+            names.add(SESSION_ARCSOFT);
+        }
         return names;
     }
 
@@ -59,6 +64,11 @@ public final class BackendRegistry {
                 return (FaceBackend) unwrap(() -> Class.forName(ARCSOFT_CLASS)
                         .getConstructor(Context.class, float[].class, boolean.class)
                         .newInstance(context, config.arcSoftLivenessThresholds, config.arcSoftIdCardModel));
+            case SESSION_ARCSOFT:
+                requireArcSoft();
+                return (FaceBackend) unwrap(() -> Class.forName(ARCSOFT_SESSION_CLASS)
+                        .getConstructor(Context.class, boolean.class)
+                        .newInstance(context, config.arcSoftIdCardModel));
             default: throw new IllegalArgumentException("Unknown backend " + name);
         }
     }

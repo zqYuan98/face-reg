@@ -196,7 +196,7 @@ public final class ArcSoftBackend implements FaceBackend {
     }
 
     /** Pro: ExtractType REGISTER for enrolment photos, RECOGNIZE for probes, mask NOT_WORN (as its demo). */
-    private static int extract(FaceEngine engine, byte[] data, int width, int height, int format, FaceInfo face,
+    static int extract(FaceEngine engine, byte[] data, int width, int height, int format, FaceInfo face,
                                boolean register, FaceFeature feature) {
         try {
             if (PRO_EXTRACT != null) {
@@ -211,7 +211,7 @@ public final class ArcSoftBackend implements FaceBackend {
     }
 
     /** Pro takes an IR threshold too; no IR camera here, so its own default (0.7) is passed. */
-    private static LivenessParam livenessParam(float rgbThreshold) {
+    static LivenessParam livenessParam(float rgbThreshold) {
         try {
             return LIVENESS_PRO != null ? LIVENESS_PRO.newInstance(rgbThreshold, 0.7f) : LIVENESS_STANDARD.newInstance(rgbThreshold);
         } catch (ReflectiveOperationException error) {
