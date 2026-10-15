@@ -20,6 +20,7 @@
 #include "../pipeline_insightface.h"
 #include "../pipeline_v1.h"
 #include "../image_ops.h"
+#include "../insightface_models.h"
 
 using namespace face;
 
@@ -262,8 +263,62 @@ static int SelfTest() {
     return bad;
 }
 
+// The tracker's per-frame path on a real image: NV21 copy, whole-frame scan (long side 320),
+// region scan (160) around the found face, with 1 and 2 detector threads.
+static int TrackBench(const std::string &det, const std::string &image, int iterations) {
+    cv::Mat bgr = cv::imread(image, cv::IMREAD_COLOR);
+    if (bgr.empty()) return 2;
+    cv::resize(bgr, bgr, cv::Size(960, 1280));
+    cv::Mat i420;
+    cv::cvtColor(bgr, i420, cv::COLOR_BGR2YUV_I420);
+    const int w = 960, h = 1280;
+    std::vector<uint8_t> nv21(w * h * 3 / 2), copy(nv21.size());
+    std::memcpy(nv21.data(), i420.data, w * h);
+    const uint8_t *u = i420.data + w * h, *v = u + w * h / 4;
+    for (int i = 0; i < w * h / 4; ++i) { nv21[w * h + 2 * i] = v[i]; nv21[w * h + 2 * i + 1] = u[i]; }
+    for (int threads : {1, 2}) {
+        OrtConfig config;
+        config.threads = threads;
+        std::vector<char> bytes = ReadFile(det);
+        Scrfd scrfd(std::unique_ptr<NetSession>(new NetSession(bytes.data(), bytes.size(), config)));
+        cv::Mat small;
+        SampleBgr(nv21.data(), w, h, 0, 0, 0, w, h, 240, 320, small);
+        auto faces = scrfd.DetectLongSide(small, 320, 0.5f);
+        if (faces.empty()) { std::printf("no face\n"); return 3; }
+        const float sc = static_cast<float>(w) / 240;
+        const float cx = (faces[0].box.x1 + faces[0].box.x2) / 2 * sc, cy = (faces[0].box.y1 + faces[0].box.y2) / 2 * sc;
+        const float side = std::max(faces[0].box.x2 - faces[0].box.x1, faces[0].box.y2 - faces[0].box.y1) * sc * 2;
+        // Region variants: (scale, linear-above). Keypoint drift is measured against area/2.0.
+        struct V { float scale; int linear; std::vector<double> ts, td; double drift = 0; };
+        std::vector<V> variants = {{2.0f, 0}, {2.0f, 3}, {1.6f, 0}, {1.6f, 3}};
+        std::vector<ScrfdFace> reference;
+        for (auto &v : variants) {
+            g_sample_linear_above = v.linear;
+            const float rs = side / 2 * v.scale;
+            const float x = cx - rs / 2, y = cy - rs / 2;
+            for (int it = 0; it < iterations; ++it) {
+                cv::Mat roi;
+                double t = NowMs(); SampleBgr(nv21.data(), w, h, 0, x, y, rs, rs, 160, 160, roi); v.ts.push_back(NowMs() - t);
+                t = NowMs(); auto found = scrfd.DetectLongSide(roi, 160, 0.5f); v.td.push_back(NowMs() - t);
+                if (it == 0 && !found.empty()) {
+                    for (auto &p : found[0].kps) { p.x = x + p.x * rs / 160; p.y = y + p.y * rs / 160; }
+                    if (reference.empty()) reference = found;
+                    double d = 0;
+                    for (int k = 0; k < 5; ++k) d = std::max(d, cv::norm(found[0].kps[k] - reference[0].kps[k]));
+                    v.drift = d;
+                }
+            }
+            std::printf("threads=%d region %.1fx face, %s: sample %.2f + scrfd160 %.2f ms, max keypoint shift vs area/2.0x %.1f px\n",
+                        threads, v.scale, v.linear ? "linear>=3x" : "area", Median(v.ts), Median(v.td), v.drift);
+        }
+        g_sample_linear_above = 0;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     try {
+        if (argc >= 5 && std::string(argv[1]) == "trackbench") return TrackBench(argv[2], argv[3], std::atoi(argv[4]));
         if (argc >= 2 && std::string(argv[1]) == "selftest") return SelfTest();
         if (argc >= 6 && std::string(argv[1]) == "golden_if")
             return GoldenInsightFace(argv[2], argv[3], argv[4], argv[5], argc > 6 ? std::atoi(argv[6]) : 4);

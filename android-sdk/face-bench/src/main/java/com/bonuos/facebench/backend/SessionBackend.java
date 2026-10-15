@@ -38,6 +38,33 @@ public final class SessionBackend implements FaceBackend {
     private SessionConfig clipConfig = config;
     private long frameIntervalMs = 33;
     private final List<Gallery.Entry<String>> enrolled = new ArrayList<>();
+    /** Analysis-thread time per frame, split by step (reset each frame). */
+    private double detectMs, livenessCaptureMs, featureCaptureMs;
+
+    /** ScrfdEngines with timing; keeps both liveness interfaces so FaceSession still runs liveness async. */
+    private final class Timed implements FaceSession.Detector, FaceSession.LivenessScorer, FaceSession.LivenessEngine {
+        @Override public List<com.bonuos.facesdk.engine.Detection> detect(CameraFrame frame) {
+            long t = SystemClock.elapsedRealtimeNanos();
+            try {
+                return frames.detect(frame);
+            } finally {
+                detectMs += (SystemClock.elapsedRealtimeNanos() - t) / 1e6;
+            }
+        }
+
+        @Override public float score(CameraFrame frame, FaceRect face) { return frames.score(frame, face); }
+
+        @Override public java.util.concurrent.Callable<Float> captureLiveness(CameraFrame frame, FaceRect face) {
+            long t = SystemClock.elapsedRealtimeNanos();
+            try {
+                return frames.captureLiveness(frame, face);
+            } finally {
+                livenessCaptureMs += (SystemClock.elapsedRealtimeNanos() - t) / 1e6;
+            }
+        }
+    }
+
+    private final Timed timed = new Timed();
     private Gallery<String> gallery = Gallery.empty();
     private FaceSession<String> session;
     private List<FaceSession.FaceState<String>> faces = new ArrayList<>();
@@ -94,8 +121,16 @@ public final class SessionBackend implements FaceBackend {
         started = false;
         reported = 0;
         final Gallery<String> clipGallery = gallery;
-        session = new FaceSession<>(clipConfig, frames, frames,
-                new NativeFeatureEngine(engine, NativeEngine.LandmarkMode.SUBPIXEL, config.maxYaw, config.maxPitch),
+        final NativeFeatureEngine features = new NativeFeatureEngine(engine, NativeEngine.LandmarkMode.SUBPIXEL, config.maxYaw, config.maxPitch);
+        session = new FaceSession<>(clipConfig, timed, timed,
+                (frame, face, keypoints, crop) -> {
+                    long t = SystemClock.elapsedRealtimeNanos();
+                    try {
+                        return features.capture(frame, face, keypoints, crop);
+                    } finally {
+                        featureCaptureMs += (SystemClock.elapsedRealtimeNanos() - t) / 1e6;
+                    }
+                },
                 () -> clipGallery, new FaceSession.Listener<String>() {
                     @Override public void onFaces(List<FaceSession.FaceState<String>> states, CameraFrame frame) { faces = states; }
                     @Override public void onRecognized(FaceSession.RecognitionEvent<String> event) {
@@ -125,10 +160,15 @@ public final class SessionBackend implements FaceBackend {
             outcome.note = "dropped";
             return outcome;
         }
+        detectMs = livenessCaptureMs = featureCaptureMs = 0;
         long t0 = SystemClock.elapsedRealtimeNanos();
         session.onFrame(new CameraFrame(frame.nv21, frame.width, frame.height, 0, timestampMs));
         double ms = (SystemClock.elapsedRealtimeNanos() - t0) / 1e6;
         outcome.detectMs = ms;
+        // Breakdown of the analysis-thread cost: detector, liveness hand-off, feature hand-off (crop).
+        outcome.preprocessMs = detectMs;
+        outcome.livenessMs = livenessCaptureMs;
+        outcome.featureMs = featureCaptureMs;
         FaceSession.FaceState<String> main = null;
         for (FaceSession.FaceState<String> face : faces) {
             if (face.reason == FaceSession.Reason.LOST) continue;

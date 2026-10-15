@@ -27,8 +27,11 @@ public final class ScrfdEngines implements FaceSession.Detector, FaceSession.Liv
      */
     static final float LIVENESS_SIDE_PER_HEIGHT = 0.868f;
 
-    /** Whole-frame scan at least every this many frames; ~200-400 ms at 15-30 fps. */
-    public static final int FULL_SCAN_EVERY = 6;
+    /**
+     * Whole-frame scan at least every this many frames: a new face is found within ~330 ms at 30 fps.
+     * The whole-frame scan costs ~2x a region scan on a Helio P60 (44 vs 22 ms).
+     */
+    public static final int FULL_SCAN_EVERY = 10;
     /** Search square around a tracked face: twice its size, sampled to this long side. */
     public static final float REGION_SCALE = 2f;
     public static final int REGION_LONG_SIDE = 160;

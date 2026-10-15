@@ -43,6 +43,8 @@ bool Nv21CropToBgr(const uint8_t *nv21, int width, int height, int rotation_degr
     return true;
 }
 
+int g_sample_linear_above = 3;
+
 bool SampleBgr(const uint8_t *nv21, int width, int height, int rotation_degrees,
                float x, float y, float w, float h, int dst_w, int dst_h, cv::Mat &out) {
     const int rotation = ((rotation_degrees % 360) + 360) % 360;
@@ -86,7 +88,11 @@ bool SampleBgr(const uint8_t *nv21, int width, int height, int rotation_degrees,
     small.resize(static_cast<size_t>(tw) * th * 3 / 2);
     cv::Mat ySmall(th, tw, CV_8UC1, small.data()), uvSmall(th / 2, tw / 2, CV_8UC2, small.data() + tw * th);
     const cv::Rect yRect(ix0, iy0, ix1 - ix0, iy1 - iy0), uvRect(ix0 / 2, iy0 / 2, (ix1 - ix0) / 2, (iy1 - iy0) / 2);
-    const int interpolation = (ix1 - ix0) >= tw ? cv::INTER_AREA : cv::INTER_LINEAR;
+    // Area averaging is exact but slow for non-integer ratios; beyond 2x shrink linear is enough
+    // for the detector (see the trackbench comparison in the CLI).
+    const int ratio = (ix1 - ix0) / std::max(1, tw);
+    const int interpolation = (ix1 - ix0) < tw ? cv::INTER_LINEAR
+                              : (g_sample_linear_above > 0 && ratio >= g_sample_linear_above) ? cv::INTER_LINEAR : cv::INTER_AREA;
     cv::resize(yPlane(yRect), ySmall, ySmall.size(), 0, 0, interpolation);
     cv::resize(uvPlane(uvRect), uvSmall, uvSmall.size(), 0, 0, interpolation);
     cv::Mat bgr, upright;
