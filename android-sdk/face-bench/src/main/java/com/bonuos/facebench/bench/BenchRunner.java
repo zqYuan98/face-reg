@@ -105,6 +105,7 @@ public final class BenchRunner {
     private static void replayClip(FaceBackend backend, File clipFile, ClipMeta meta, BenchConfig config,
                                    Map<String, Object> references, CsvWriter frames, CsvWriter sweep,
                                    CsvWriter scores) throws Exception {
+        backend.clipTiming(meta.frameCount, meta.durationMs);
         backend.beginClip(meta.sensorRotationDegrees);
         try (ClipFile.Reader reader = new ClipFile.Reader(clipFile)) {
             ClipFile.Frame frame;
@@ -163,7 +164,10 @@ public final class BenchRunner {
                 }
             }
             csv.row(backend.name(), subject, feature != null ? 1 : 0, timer.elapsedMs(), note);
-            if (feature != null) references.put(subject, feature);
+            if (feature != null) {
+                references.put(subject, feature);
+                backend.enrolled(subject, feature);
+            }
         }
         progress.update(backend.name() + "：注册照 " + references.size() + "/" + photos.length + " 张可用");
         return references;

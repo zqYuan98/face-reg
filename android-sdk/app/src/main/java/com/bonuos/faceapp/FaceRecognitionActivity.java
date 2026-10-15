@@ -27,6 +27,7 @@ import com.bonuos.facesdk.engine.CameraFrame;
 import com.bonuos.facesdk.engine.FaceRect;
 import com.bonuos.facesdk.engine.FaceSession;
 import com.bonuos.facesdk.engine.MvEngines;
+import com.bonuos.facesdk.engine.NativeAnalyzer;
 import com.bonuos.facesdk.engine.NativeEngine;
 import com.bonuos.facesdk.engine.NativeFeatureEngine;
 import com.bonuos.facesdk.engine.ScrfdEngines;
@@ -107,7 +108,10 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
         cameraLensFacing = cameraLensFacing == CameraSelector.LENS_FACING_BACK
                 ? CameraSelector.LENS_FACING_FRONT : CameraSelector.LENS_FACING_BACK;
         // Tracks from the other camera are meaningless; reset on the analysis thread that owns the session.
-        if (session != null) cameraExecutor.execute(session::reset);
+        if (session != null) cameraExecutor.execute(() -> {
+            session.reset();
+            if (frameEngines instanceof ScrfdEngines) ((ScrfdEngines) frameEngines).reset();
+        });
         startCamera();
     }
 
@@ -119,7 +123,7 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
             FaceSession.Detector detector;
             FaceSession.LivenessScorer liveness;
             if (backend.insightFace()) {
-                ScrfdEngines scrfd = new ScrfdEngines(getAssets(), 480, 0.5f);
+                ScrfdEngines scrfd = new ScrfdEngines(getAssets(), 320, 0.5f);
                 frameEngines = scrfd;
                 detector = scrfd;
                 liveness = scrfd;
@@ -230,9 +234,13 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
             }
             // Pack camera planes directly (no JPEG); rotation is applied in native code, once.
             ImageProxy.PlaneProxy[] planes = image.getPlanes();
-            Nv21.fromYuv420(width, height, planes[0].getBuffer(), planes[0].getRowStride(),
+            if (!NativeAnalyzer.packNv21(width, height, planes[0].getBuffer(), planes[0].getRowStride(),
                     planes[1].getBuffer(), planes[2].getBuffer(), planes[1].getRowStride(),
-                    planes[1].getPixelStride(), nv21Buffer);
+                    planes[1].getPixelStride(), nv21Buffer)) {
+                Nv21.fromYuv420(width, height, planes[0].getBuffer(), planes[0].getRowStride(),
+                        planes[1].getBuffer(), planes[2].getBuffer(), planes[1].getRowStride(),
+                        planes[1].getPixelStride(), nv21Buffer);
+            }
             CameraFrame frame = new CameraFrame(nv21Buffer, width, height,
                     image.getImageInfo().getRotationDegrees(), image.getImageInfo().getTimestamp() / 1_000_000L);
             image.close(); // release the camera buffer before running the models

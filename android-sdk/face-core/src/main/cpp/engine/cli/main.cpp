@@ -19,6 +19,7 @@
 #include <vector>
 #include "../pipeline_insightface.h"
 #include "../pipeline_v1.h"
+#include "../image_ops.h"
 
 using namespace face;
 
@@ -199,8 +200,71 @@ static int BenchModel(const std::string &path, int n, int c, int h, int w, int i
     return 0;
 }
 
+// SampleBgr against the reference (full conversion, rotation, crop, area resize) for every
+// rotation and a region partly outside the frame; then time the detector-input path.
+static int SelfTest() {
+    const int w = 960, h = 1280;
+    std::vector<uint8_t> nv21(w * h * 3 / 2);
+    cv::Mat yPlane(h, w, CV_8UC1, nv21.data()), uvPlane(h / 2, w / 2, CV_8UC2, nv21.data() + w * h);
+    cv::randu(yPlane, 0, 255);
+    cv::GaussianBlur(yPlane, yPlane, cv::Size(0, 0), 3);  // image-like: smooth, not white noise
+    cv::randu(uvPlane, 96, 160);
+    cv::GaussianBlur(uvPlane, uvPlane, cv::Size(0, 0), 2);  // chroma is smooth in real images too
+    int bad = 0;
+    for (int rot : {0, 90, 180, 270}) {
+        cv::Mat yuv(h + h / 2, w, CV_8UC1, nv21.data()), sensor, upright, ref, got;
+        cv::cvtColor(yuv, sensor, cv::COLOR_YUV2BGR_NV21);
+        if (rot == 0) upright = sensor;
+        else cv::rotate(sensor, upright, rot == 90 ? cv::ROTATE_90_CLOCKWISE : rot == 180 ? cv::ROTATE_180 : cv::ROTATE_90_COUNTERCLOCKWISE);
+        const cv::Rect region(100, 120, 400, 300);
+        cv::resize(upright(region), ref, cv::Size(160, 120), 0, 0, cv::INTER_AREA);
+        SampleBgr(nv21.data(), w, h, rot, 100.f, 120.f, 400.f, 300.f, 160, 120, got);
+        cv::Mat diff;
+        cv::absdiff(ref, got, diff);
+        const double mean = cv::mean(diff)[0];
+        // Misalignment check: the error should be smallest with no shift.
+        double bestShift = 1e9; int bdx = 0, bdy = 0;
+        for (int sy = -2; sy <= 2; ++sy)
+            for (int sx = -2; sx <= 2; ++sx) {
+                cv::Mat shifted;
+                cv::resize(upright(cv::Rect(100 + sx * 2, 120 + sy * 2, 400, 300)), shifted, cv::Size(160, 120), 0, 0, cv::INTER_AREA);
+                cv::Mat d;
+                cv::absdiff(shifted, got, d);
+                const double m = cv::mean(d)[0];
+                if (m < bestShift) { bestShift = m; bdx = sx * 2; bdy = sy * 2; }
+            }
+        std::printf("  best match at shift (%d,%d) source px: %.2f\n", bdx, bdy, bestShift);
+        cv::Mat outside;
+        SampleBgr(nv21.data(), w, h, rot, -200.f, -200.f, 400.f, 400.f, 100, 100, outside);
+        const bool blackCorner = outside.at<cv::Vec3b>(10, 10) == cv::Vec3b(0, 0, 0);
+        const bool filled = outside.at<cv::Vec3b>(90, 90) != cv::Vec3b(0, 0, 0);
+        std::printf("rotation %3d: mean abs diff vs reference %.2f, outside-frame part black %s, inside filled %s\n",
+                    rot, mean, blackCorner ? "yes" : "NO", filled ? "yes" : "NO");
+        bad += mean > 3.0 || !blackCorner || !filled;
+    }
+    cv::Mat out, full;
+    std::vector<double> ms, roiMs, fullMs;
+    for (int i = 0; i < 30; ++i) {
+        double t = NowMs();
+        SampleBgr(nv21.data(), w, h, 270, 0.f, 0.f, 1280.f, 960.f, 320, 240, out);
+        ms.push_back(NowMs() - t);
+        t = NowMs();
+        SampleBgr(nv21.data(), w, h, 270, 400.f, 200.f, 600.f, 600.f, 160, 160, out);
+        roiMs.push_back(NowMs() - t);
+        t = NowMs();
+        cv::Mat yuv(h + h / 2, w, CV_8UC1, nv21.data()), bgr;
+        cv::cvtColor(yuv, bgr, cv::COLOR_YUV2BGR_NV21);
+        cv::rotate(bgr, full, cv::ROTATE_90_COUNTERCLOCKWISE);
+        fullMs.push_back(NowMs() - t);
+    }
+    std::printf("whole frame -> 320x240: %.2f ms; 600 px region -> 160x160: %.2f ms; old full convert+rotate: %.2f ms\n",
+                Median(ms), Median(roiMs), Median(fullMs));
+    return bad;
+}
+
 int main(int argc, char **argv) {
     try {
+        if (argc >= 2 && std::string(argv[1]) == "selftest") return SelfTest();
         if (argc >= 6 && std::string(argv[1]) == "golden_if")
             return GoldenInsightFace(argv[2], argv[3], argv[4], argv[5], argc > 6 ? std::atoi(argv[6]) : 4);
         if (argc >= 9 && std::string(argv[1]) == "benchmodel")

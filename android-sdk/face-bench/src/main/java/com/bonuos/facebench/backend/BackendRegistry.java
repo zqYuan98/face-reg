@@ -19,6 +19,8 @@ public final class BackendRegistry {
     public static final String ENGINE_NATIVE_INT8 = "engine_native_int8";
     public static final String INSIGHTFACE_R50 = "insightface_r50_int8";
     public static final String INSIGHTFACE_MBF = "insightface_mbf";
+    public static final String SESSION_R50 = "session_r50_int8";
+    public static final String SESSION_MBF = "session_mbf";
     public static final String ARCSOFT = "arcsoft";
     private static final String ARCSOFT_CLASS = "com.bonuos.facebench.arcsoft.ArcSoftBackend";
 
@@ -34,6 +36,8 @@ public final class BackendRegistry {
         if (BuildConfig.INSIGHTFACE_AVAILABLE) {
             names.add(INSIGHTFACE_R50);
             names.add(INSIGHTFACE_MBF);
+            names.add(SESSION_R50);
+            names.add(SESSION_MBF);
         }
         if (BuildConfig.ARCSOFT_AVAILABLE) names.add(ARCSOFT);
         return names;
@@ -48,6 +52,8 @@ public final class BackendRegistry {
             case ENGINE_NATIVE_INT8: return new NativeEngineBackend(context, true);
             case INSIGHTFACE_R50: return new InsightFaceBackend(context, INSIGHTFACE_R50, NativeEngine.INSIGHTFACE_R50_INT8);
             case INSIGHTFACE_MBF: return new InsightFaceBackend(context, INSIGHTFACE_MBF, NativeEngine.INSIGHTFACE_MBF);
+            case SESSION_R50: return new SessionBackend(context, SESSION_R50, NativeEngine.INSIGHTFACE_R50_INT8);
+            case SESSION_MBF: return new SessionBackend(context, SESSION_MBF, NativeEngine.INSIGHTFACE_MBF);
             case ARCSOFT:
                 requireArcSoft();
                 return (FaceBackend) unwrap(() -> Class.forName(ARCSOFT_CLASS)

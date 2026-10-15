@@ -1,8 +1,11 @@
 #include "frame_analyzer.h"
 
 #include <opencv2/imgproc.hpp>
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
+#include "image_ops.h"
 
 namespace face {
 
@@ -14,24 +17,58 @@ FrameAnalyzer::FrameAnalyzer(std::unique_ptr<NetSession> scrfd, AAssetManager *a
 bool FrameAnalyzer::SetNv21(const uint8_t *nv21, int width, int height, int rotation_degrees) {
     const int rotation = ((rotation_degrees % 360) + 360) % 360;
     if (width <= 0 || height <= 0 || (width & 1) || (height & 1) || rotation % 90 != 0) return false;
-    cv::Mat yuv(height + height / 2, width, CV_8UC1, const_cast<uint8_t *>(nv21));
-    if (rotation == 0) {
-        cv::cvtColor(yuv, bgr_, cv::COLOR_YUV2BGR_NV21);
-    } else {
-        cv::cvtColor(yuv, sensor_, cv::COLOR_YUV2BGR_NV21);
-        cv::rotate(sensor_, bgr_, rotation == 90 ? cv::ROTATE_90_CLOCKWISE
-                                  : rotation == 180 ? cv::ROTATE_180 : cv::ROTATE_90_COUNTERCLOCKWISE);
-    }
+    const size_t size = static_cast<size_t>(width) * height * 3 / 2;
+    nv21_.resize(size);
+    std::memcpy(nv21_.data(), nv21, size);
+    width_ = width;
+    height_ = height;
+    rotation_ = rotation;
+    converted_ = false;
     return true;
 }
 
+std::vector<ScrfdFace> FrameAnalyzer::DetectSampled(float x, float y, float w, float h, int long_side, float threshold) {
+    if (nv21_.empty() || !(w > 0) || !(h > 0) || long_side < 32) return {};
+    const float scale = static_cast<float>(long_side) / std::max(w, h);
+    const int dst_w = std::max(1, static_cast<int>(std::lround(w * scale))), dst_h = std::max(1, static_cast<int>(std::lround(h * scale)));
+    if (!SampleBgr(nv21_.data(), width_, height_, rotation_, x, y, w, h, dst_w, dst_h, sample_)) return {};
+    // The sample already has the target long side, so SCRFD only pads it to a multiple of 32.
+    std::vector<ScrfdFace> faces = detector_.DetectLongSide(sample_, long_side, threshold);
+    const float sx = w / dst_w, sy = h / dst_h;
+    for (auto &f : faces) {
+        f.box.x1 = x + f.box.x1 * sx;
+        f.box.x2 = x + f.box.x2 * sx;
+        f.box.y1 = y + f.box.y1 * sy;
+        f.box.y2 = y + f.box.y2 * sy;
+        for (auto &p : f.kps) {
+            p.x = x + p.x * sx;
+            p.y = y + p.y * sy;
+        }
+    }
+    return faces;
+}
+
 std::vector<ScrfdFace> FrameAnalyzer::Detect(int long_side, float threshold) {
-    if (bgr_.empty()) return {};
-    return detector_.DetectLongSide(bgr_, long_side, threshold);
+    return DetectSampled(0.f, 0.f, static_cast<float>(width()), static_cast<float>(height()), long_side, threshold);
+}
+
+std::vector<ScrfdFace> FrameAnalyzer::DetectRegion(float x, float y, float w, float h, int long_side, float threshold) {
+    return DetectSampled(x, y, w, h, long_side, threshold);
 }
 
 float FrameAnalyzer::Liveness(int left, int top, int right, int bottom) {
-    if (bgr_.empty() || right <= left || bottom <= top) return NAN;
+    if (nv21_.empty() || right <= left || bottom <= top) return NAN;
+    if (!converted_) {
+        cv::Mat yuv(height_ + height_ / 2, width_, CV_8UC1, nv21_.data());
+        if (rotation_ == 0) {
+            cv::cvtColor(yuv, bgr_, cv::COLOR_YUV2BGR_NV21);
+        } else {
+            cv::cvtColor(yuv, sensor_, cv::COLOR_YUV2BGR_NV21);
+            cv::rotate(sensor_, bgr_, rotation_ == 90 ? cv::ROTATE_90_CLOCKWISE
+                                      : rotation_ == 180 ? cv::ROTATE_180 : cv::ROTATE_90_COUNTERCLOCKWISE);
+        }
+        converted_ = true;
+    }
     FaceBox box;
     box.x1 = static_cast<float>(left);
     box.y1 = static_cast<float>(top);

@@ -29,7 +29,9 @@ public final class InsightFaceBackend implements FaceBackend {
     public InsightFaceBackend(Context context, String name, String recognizerAsset) {
         this.name = name;
         this.recognizer = recognizerAsset;
-        frames = new ScrfdEngines(context.getAssets(), 480, 0.5f);
+        // Every model on every frame, with whole-frame detection each time (no tracking): the
+        // worst case per frame. SessionBackend measures what the app actually runs.
+        frames = new ScrfdEngines(context.getAssets(), 320, 0.5f, 1);
         try {
             engine = NativeEngine.insightFace(context.getAssets(), recognizerAsset, 4);
         } catch (RuntimeException error) {
@@ -41,11 +43,11 @@ public final class InsightFaceBackend implements FaceBackend {
     @Override public String name() { return name; }
 
     @Override public String describe() {
-        return "SCRFD-500M (long side 480) + silent liveness on one frame; recognizer " + recognizer
+        return "SCRFD-500M (whole frame, long side 320, every frame) + silent liveness on one frame; recognizer " + recognizer
                 + " on a crop x" + cropScale + "; enrolment SCRFD 640; score cosine; liveness threshold " + livenessThreshold;
     }
 
-    @Override public void beginClip(int sensorRotationDegrees) { }
+    @Override public void beginClip(int sensorRotationDegrees) { frames.reset(); }
 
     @Override
     public FrameOutcome process(ClipFile.Frame frame, boolean runLiveness, boolean runFeature) {

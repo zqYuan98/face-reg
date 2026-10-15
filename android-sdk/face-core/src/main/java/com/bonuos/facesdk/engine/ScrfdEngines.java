@@ -13,9 +13,10 @@ import org.json.JSONObject;
 
 /**
  * SCRFD-500M detection plus the bundled silent-liveness models behind the session interfaces,
- * replacing {@link MvEngines}. One native conversion per frame feeds both. SCRFD keeps small and
- * distant faces far more stably than the minivision detector and also returns five points.
- * Use from the analysis thread only.
+ * replacing {@link MvEngines}. SCRFD keeps small and distant faces far more stably than the
+ * minivision detector and also returns five points. Detection follows faces with a
+ * {@link RoiTracker}: a whole-frame scan every few frames, a small region around each face
+ * otherwise; each scan converts only the pixels it feeds the detector. Analysis thread only.
  */
 public final class ScrfdEngines implements FaceSession.Detector, FaceSession.LivenessScorer, AutoCloseable {
     /**
@@ -25,18 +26,32 @@ public final class ScrfdEngines implements FaceSession.Detector, FaceSession.Liv
      */
     static final float LIVENESS_SIDE_PER_HEIGHT = 0.868f;
 
+    /** Whole-frame scan at least every this many frames; ~200-400 ms at 15-30 fps. */
+    public static final int FULL_SCAN_EVERY = 6;
+    /** Search square around a tracked face: twice its size, sampled to this long side. */
+    public static final float REGION_SCALE = 2f;
+    public static final int REGION_LONG_SIDE = 160;
+
     private final NativeAnalyzer analyzer;
     private final int longSide;
     private final float threshold;
+    private final RoiTracker tracker;
     private CameraFrame current;
 
     /**
-     * @param longSide  detector input long side; 480 finds faces down to ~40 px in a 1280 px frame
+     * @param longSide  whole-frame detector input long side; 320 finds faces down to ~60 px in a
+     *                  1280 px frame (the session's minimum face size is 64)
      * @param threshold SCRFD score threshold (0.5 is insightface's default)
      */
     public ScrfdEngines(AssetManager assets, int longSide, float threshold) {
+        this(assets, longSide, threshold, FULL_SCAN_EVERY);
+    }
+
+    /** {@code fullScanEvery} 1 scans every frame (no tracking), for measurements. */
+    public ScrfdEngines(AssetManager assets, int longSide, float threshold, int fullScanEvery) {
         this.longSide = longSide;
         this.threshold = threshold;
+        this.tracker = new RoiTracker(fullScanEvery, REGION_SCALE, 0.2f);
         String[] names;
         float[] scales;
         int[] sizes;
@@ -60,9 +75,30 @@ public final class ScrfdEngines implements FaceSession.Detector, FaceSession.Liv
     @Override
     public List<Detection> detect(CameraFrame frame) {
         current = null;
-        if (!analyzer.setNv21(frame.nv21, frame.width, frame.height, frame.rotationDegrees)) return new ArrayList<>();
+        if (!analyzer.setNv21(frame.nv21, frame.width, frame.height, frame.rotationDegrees)) {
+            tracker.reset();
+            return new ArrayList<>();
+        }
         current = frame;
-        float[] packed = analyzer.detect(longSide, threshold);
+        return tracker.next(new RoiTracker.Source() {
+            @Override public List<Detection> full() {
+                return unpack(analyzer.detect(longSide, threshold));
+            }
+
+            @Override public List<Detection> region(FaceRect r) {
+                return unpack(analyzer.detectRegion(r.left, r.top, r.width(), r.height(), REGION_LONG_SIDE, threshold));
+            }
+        });
+    }
+
+    /** Forget tracked faces, e.g. after a camera switch or between unrelated clips. */
+    public void reset() {
+        tracker.reset();
+    }
+
+    public RoiTracker tracker() { return tracker; }
+
+    private static List<Detection> unpack(float[] packed) {
         List<Detection> out = new ArrayList<>(packed == null ? 0 : packed.length / 15);
         if (packed == null) return out;
         for (int i = 0; i + 15 <= packed.length; i += 15) {

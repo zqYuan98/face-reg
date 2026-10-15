@@ -1,6 +1,7 @@
 // JNI for com.bonuos.facesdk.engine.NativeEngine.
 #include <android/asset_manager_jni.h>
 #include <cmath>
+#include <cstring>
 #include <android/bitmap.h>
 #include <android/log.h>
 #include <jni.h>
@@ -205,33 +206,96 @@ Java_com_bonuos_facesdk_engine_NativeAnalyzer_nativeSetNv21(JNIEnv *env, jclass,
                                                            jint width, jint height, jint rotation) {
     auto *analyzer = reinterpret_cast<FrameAnalyzer *>(handle);
     if (analyzer == nullptr || nv21 == nullptr || env->GetArrayLength(nv21) < width * height * 3 / 2) return JNI_FALSE;
-    jbyte *data = env->GetByteArrayElements(nv21, nullptr);
-    const bool ok = analyzer->SetNv21(reinterpret_cast<uint8_t *>(data), width, height, rotation);
-    env->ReleaseByteArrayElements(nv21, data, JNI_ABORT);
+    // Critical access: the analyzer makes the only copy (a plain memcpy, no allocation or JNI calls inside).
+    void *data = env->GetPrimitiveArrayCritical(nv21, nullptr);
+    if (data == nullptr) return JNI_FALSE;
+    const bool ok = analyzer->SetNv21(static_cast<uint8_t *>(data), width, height, rotation);
+    env->ReleasePrimitiveArrayCritical(nv21, data, JNI_ABORT);
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 /** Packed per face: x1 y1 x2 y2 score, then 10 keypoint coordinates (15 floats). */
-JNIEXPORT jfloatArray JNICALL
-Java_com_bonuos_facesdk_engine_NativeAnalyzer_nativeDetect(JNIEnv *env, jclass, jlong handle, jint long_side, jfloat threshold) {
-    auto *analyzer = reinterpret_cast<FrameAnalyzer *>(handle);
-    if (analyzer == nullptr) return nullptr;
+static jfloatArray PackFaces(JNIEnv *env, const std::vector<ScrfdFace> &faces) {
     std::vector<float> packed;
-    try {
-        for (const ScrfdFace &f : analyzer->Detect(long_side, threshold)) {
-            packed.insert(packed.end(), {f.box.x1, f.box.y1, f.box.x2, f.box.y2, f.box.score});
-            for (const auto &p : f.kps) {
-                packed.push_back(static_cast<float>(p.x));
-                packed.push_back(static_cast<float>(p.y));
-            }
+    for (const ScrfdFace &f : faces) {
+        packed.insert(packed.end(), {f.box.x1, f.box.y1, f.box.x2, f.box.y2, f.box.score});
+        for (const auto &p : f.kps) {
+            packed.push_back(static_cast<float>(p.x));
+            packed.push_back(static_cast<float>(p.y));
         }
-    } catch (const std::exception &error) {
-        LOG_ERR("detect failed: %s", error.what());
-        return nullptr;
     }
     jfloatArray result = env->NewFloatArray(static_cast<jsize>(packed.size()));
     if (result != nullptr && !packed.empty()) env->SetFloatArrayRegion(result, 0, static_cast<jsize>(packed.size()), packed.data());
     return result;
+}
+
+JNIEXPORT jfloatArray JNICALL
+Java_com_bonuos_facesdk_engine_NativeAnalyzer_nativeDetect(JNIEnv *env, jclass, jlong handle, jint long_side, jfloat threshold) {
+    auto *analyzer = reinterpret_cast<FrameAnalyzer *>(handle);
+    if (analyzer == nullptr) return nullptr;
+    try {
+        return PackFaces(env, analyzer->Detect(long_side, threshold));
+    } catch (const std::exception &error) {
+        LOG_ERR("detect failed: %s", error.what());
+        return nullptr;
+    }
+}
+
+JNIEXPORT jfloatArray JNICALL
+Java_com_bonuos_facesdk_engine_NativeAnalyzer_nativeDetectRegion(JNIEnv *env, jclass, jlong handle, jfloat x, jfloat y,
+                                                                jfloat w, jfloat h, jint long_side, jfloat threshold) {
+    auto *analyzer = reinterpret_cast<FrameAnalyzer *>(handle);
+    if (analyzer == nullptr) return nullptr;
+    try {
+        return PackFaces(env, analyzer->DetectRegion(x, y, w, h, long_side, threshold));
+    } catch (const std::exception &error) {
+        LOG_ERR("region detect failed: %s", error.what());
+        return nullptr;
+    }
+}
+
+/**
+ * Packs CameraX YUV_420_888 planes (direct buffers) into NV21. When the V and U planes are the
+ * usual interleaved view of one VU buffer (pixel stride 2, U one byte after V), each chroma row is
+ * a single memcpy; otherwise it falls back to a per-pixel copy. Returns false on bad arguments.
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_bonuos_facesdk_engine_NativeAnalyzer_nativePackNv21(JNIEnv *env, jclass, jint width, jint height,
+                                                            jobject y, jint y_row_stride, jobject u, jobject v,
+                                                            jint uv_row_stride, jint uv_pixel_stride, jbyteArray out) {
+    if (width <= 0 || height <= 0 || (width & 1) || (height & 1) || out == nullptr) return JNI_FALSE;
+    auto *yp = static_cast<const uint8_t *>(env->GetDirectBufferAddress(y));
+    auto *up = static_cast<const uint8_t *>(env->GetDirectBufferAddress(u));
+    auto *vp = static_cast<const uint8_t *>(env->GetDirectBufferAddress(v));
+    const jlong ycap = env->GetDirectBufferCapacity(y), ucap = env->GetDirectBufferCapacity(u), vcap = env->GetDirectBufferCapacity(v);
+    const int cw = width / 2, ch = height / 2;
+    if (yp == nullptr || up == nullptr || vp == nullptr || y_row_stride < width || uv_pixel_stride < 1
+        || ycap < static_cast<jlong>(y_row_stride) * (height - 1) + width
+        || ucap < static_cast<jlong>(uv_row_stride) * (ch - 1) + static_cast<jlong>(uv_pixel_stride) * (cw - 1) + 1
+        || vcap < static_cast<jlong>(uv_row_stride) * (ch - 1) + static_cast<jlong>(uv_pixel_stride) * (cw - 1) + 1
+        || env->GetArrayLength(out) < width * height * 3 / 2)
+        return JNI_FALSE;
+    jbyte *dst = static_cast<jbyte *>(env->GetPrimitiveArrayCritical(out, nullptr));
+    if (dst == nullptr) return JNI_FALSE;
+    auto *o = reinterpret_cast<uint8_t *>(dst);
+    for (int r = 0; r < height; ++r) std::memcpy(o + r * width, yp + static_cast<size_t>(r) * y_row_stride, width);
+    uint8_t *c = o + width * height;
+    const bool interleaved = uv_pixel_stride == 2 && up == vp + 1;
+    for (int r = 0; r < ch; ++r) {
+        const uint8_t *vr = vp + static_cast<size_t>(r) * uv_row_stride, *ur = up + static_cast<size_t>(r) * uv_row_stride;
+        uint8_t *dr = c + r * width;
+        if (interleaved) {
+            std::memcpy(dr, vr, width - 1);  // V0 U0 V1 U1 ... V(n-1); the last U lies outside V's view
+            dr[width - 1] = ur[(cw - 1) * 2];
+        } else {
+            for (int i = 0; i < cw; ++i) {
+                dr[2 * i] = vr[i * uv_pixel_stride];
+                dr[2 * i + 1] = ur[i * uv_pixel_stride];
+            }
+        }
+    }
+    env->ReleasePrimitiveArrayCritical(out, dst, 0);
+    return JNI_TRUE;
 }
 
 JNIEXPORT jfloat JNICALL

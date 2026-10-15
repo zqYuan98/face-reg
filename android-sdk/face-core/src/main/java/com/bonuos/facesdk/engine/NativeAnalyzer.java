@@ -2,8 +2,10 @@ package com.bonuos.facesdk.engine;
 
 import android.content.res.AssetManager;
 
-/** JNI handle for the native frame analyzer (SCRFD + silent liveness on one converted frame). Single thread. */
-final class NativeAnalyzer implements AutoCloseable {
+import java.nio.ByteBuffer;
+
+/** JNI handle for the native frame analyzer (SCRFD + silent liveness on one frame). Single thread. */
+public final class NativeAnalyzer implements AutoCloseable {
     static {
         System.loadLibrary("faceengine");
     }
@@ -24,6 +26,22 @@ final class NativeAnalyzer implements AutoCloseable {
         return handle == 0 ? null : nativeDetect(handle, longSide, threshold);
     }
 
+    /** Packed faces found inside an upright-frame region (any position), in frame coordinates. */
+    float[] detectRegion(float x, float y, float w, float h, int longSide, float threshold) {
+        return handle == 0 ? null : nativeDetectRegion(handle, x, y, w, h, longSide, threshold);
+    }
+
+    /**
+     * Packs CameraX YUV_420_888 planes (direct buffers) into {@code out} as NV21 in native code:
+     * one memcpy per row when the chroma planes are the usual interleaved VU buffer. Replaces the
+     * per-pixel Java loop in Nv21.fromYuv420. Returns false when the arguments do not fit.
+     */
+    public static boolean packNv21(int width, int height, ByteBuffer y, int yRowStride, ByteBuffer u, ByteBuffer v,
+                                   int uvRowStride, int uvPixelStride, byte[] out) {
+        if (!y.isDirect() || !u.isDirect() || !v.isDirect()) return false;
+        return nativePackNv21(width, height, y, yRowStride, u, v, uvRowStride, uvPixelStride, out);
+    }
+
     float liveness(int left, int top, int right, int bottom) {
         return handle == 0 ? Float.NaN : nativeLiveness(handle, left, top, right, bottom);
     }
@@ -41,5 +59,8 @@ final class NativeAnalyzer implements AutoCloseable {
     private static native void nativeRelease(long handle);
     private static native boolean nativeSetNv21(long handle, byte[] nv21, int width, int height, int rotation);
     private static native float[] nativeDetect(long handle, int longSide, float threshold);
+    private static native float[] nativeDetectRegion(long handle, float x, float y, float w, float h, int longSide, float threshold);
+    private static native boolean nativePackNv21(int width, int height, ByteBuffer y, int yRowStride, ByteBuffer u,
+                                                 ByteBuffer v, int uvRowStride, int uvPixelStride, byte[] out);
     private static native float nativeLiveness(long handle, int left, int top, int right, int bottom);
 }
