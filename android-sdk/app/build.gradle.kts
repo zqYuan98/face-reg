@@ -20,6 +20,11 @@ val insightFaceAssets: File? = localProperties.getProperty("insightface.assets")
 fun localString(key: String): String =
     "\"" + (localProperties.getProperty(key) ?: "").replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
+// Device credentials are not embedded in APKs by default. A deliberately provisioned local test
+// build must explicitly opt in; never enable this for a distributable artifact.
+val includeLocalSync = findProperty("face.includeLocalSync") == "true"
+fun syncString(key: String): String = if (includeLocalSync) localString(key) else "\"\""
+
 android {
     // Models are mapped straight from the APK by the native engine; keep them uncompressed.
     androidResources {
@@ -52,13 +57,15 @@ android {
     }
 
     defaultConfig {
-        buildConfigField("String", "SYNC_URL", localString("face.sync.url"))
-        buildConfigField("String", "SYNC_DEVICE_SN", localString("face.sync.deviceSn"))
-        buildConfigField("String", "SYNC_DEVICE_SECRET", localString("face.sync.deviceSecret"))
+        buildConfigField("String", "SYNC_URL", syncString("face.sync.url"))
+        buildConfigField("String", "SYNC_DEVICE_SN", syncString("face.sync.deviceSn"))
+        buildConfigField("String", "SYNC_DEVICE_SECRET", syncString("face.sync.deviceSecret"))
         // insightface_cascade (default), insightface_r50_int8, insightface_mbf, native_int8, native
         buildConfigField("String", "FACE_ENGINE", localString("face.engine"))
+        buildConfigField("boolean", "SHARE_FEATURE_CAPTURE", (findProperty("face.shareCapture") == "true").toString())
+        buildConfigField("boolean", "EARLY_FRAME_ADMISSION", (findProperty("face.earlyAdmission") == "true").toString())
         buildConfigField("boolean", "SYNC_ALLOW_CLEARTEXT",
-                (localProperties.getProperty("face.sync.allowCleartext") == "true").toString())
+                (includeLocalSync && localProperties.getProperty("face.sync.allowCleartext") == "true").toString())
         applicationId = "com.bonuos.faceapp"
         minSdk = 24
         targetSdk = 34
@@ -90,6 +97,7 @@ android {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")

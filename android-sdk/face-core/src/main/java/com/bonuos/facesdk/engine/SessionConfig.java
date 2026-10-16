@@ -75,6 +75,8 @@ public final class SessionConfig implements Cloneable {
     public long identityCooldownMs = 5000;
     /** Crop sent to the recognizer: box side times this factor, clipped to the frame. 0 = whole frame. */
     public float featureCropScale = 2.2f;
+    /** Candidate only: let compatible cascade engines share one immutable capture. */
+    public boolean shareFeatureCapture = false;
 
     @Override public SessionConfig clone() {
         try {

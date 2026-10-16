@@ -1,5 +1,6 @@
 package com.bonuos.facesdk;
 
+import com.bonuos.facesdk.engine.DatasetEpoch;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
@@ -7,6 +8,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 final class FaceDatasetCoordinator {
     static final ReentrantReadWriteLock LOCK = new ReentrantReadWriteLock(true);
     private static final CopyOnWriteArrayList<Runnable> listeners = new CopyOnWriteArrayList<>();
+    static final DatasetEpoch EPOCH = new DatasetEpoch();
     private static boolean refreshRequired;
     private FaceDatasetCoordinator() { }
     static void add(Runnable listener) { listeners.add(listener); }
@@ -14,8 +16,9 @@ final class FaceDatasetCoordinator {
     static void publish(Runnable commit) {
         LOCK.writeLock().lock();
         try {
-            commit.run();
+            EPOCH.invalidate(); // revoke even if commit or any refresh subsequently fails
             refreshRequired = true;
+            commit.run();
             refreshIfRequired();
         } finally { LOCK.writeLock().unlock(); }
     }
@@ -29,6 +32,7 @@ final class FaceDatasetCoordinator {
             }
             refreshRequired = failure != null;
             if (failure != null) throw failure;
+            EPOCH.markReady(EPOCH.generation());
         } finally { LOCK.writeLock().unlock(); }
     }
 }

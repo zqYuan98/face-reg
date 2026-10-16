@@ -4,7 +4,8 @@ import android.content.res.AssetManager;
 
 /**
  * Silent liveness with its own models and frame conversion, for a worker thread separate from
- * detection. Not thread safe: one instance per worker.
+ * detection. Score and close share a monitor: interrupting a worker does not stop native inference,
+ * so release must wait for the current native call before freeing its models and frame buffers.
  */
 final class NativeLiveness implements AutoCloseable {
     static {
@@ -19,12 +20,12 @@ final class NativeLiveness implements AutoCloseable {
     }
 
     /** Sensor-orientation NV21 and an upright-frame minivision square (inclusive); NaN on failure. */
-    float score(byte[] nv21, int width, int height, int rotation, int left, int top, int right, int bottom) {
+    synchronized float score(byte[] nv21, int width, int height, int rotation, int left, int top, int right, int bottom) {
         return handle == 0 ? Float.NaN : nativeScore(handle, nv21, width, height, rotation, left, top, right, bottom);
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
         if (handle != 0) {
             nativeRelease(handle);
             handle = 0;

@@ -58,7 +58,10 @@ public class FaceRecognizer implements FaceSession.GallerySource<FaceRepository.
     /** null until checked; true when Java cosine reproduces the native compare. */
     private Boolean javaScorerMatches;
     private float threshold = 0.65f;
-    private final Runnable datasetListener = this::reloadUsers;
+    private volatile FaceSession.GallerySnapshot<FaceRepository.FaceUser> snapshot =
+            new FaceSession.GallerySnapshot<>(gallery, FaceDatasetCoordinator.EPOCH,
+                    FaceDatasetCoordinator.EPOCH.generation(), false);
+    private final Runnable datasetListener = this::reloadUsersLocked;
 
     public FaceRecognizer(Context context) {
         this(context, Backend.LEGACY_SDK);
@@ -83,16 +86,23 @@ public class FaceRecognizer implements FaceSession.GallerySource<FaceRepository.
         repository = new FaceRepository(context);
         FaceDatasetCoordinator.LOCK.writeLock().lock();
         try {
-            reloadUsers();
+            reloadUsersLocked();
             FaceDatasetCoordinator.add(datasetListener);
         } finally { FaceDatasetCoordinator.LOCK.writeLock().unlock(); }
     }
 
     public void reloadUsers() {
+        // Reload all participating feature spaces as one local generation.
+        FaceDatasetCoordinator.publish(() -> { });
+    }
+
+    private void reloadUsersLocked() {
         FaceDatasetCoordinator.LOCK.writeLock().lock();
         try {
             // If loading fails, do not keep recognizing people from the previous dataset.
             gallery = Gallery.empty();
+            snapshot = new FaceSession.GallerySnapshot<>(gallery, FaceDatasetCoordinator.EPOCH,
+                    FaceDatasetCoordinator.EPOCH.generation(), false);
             if (repository == null) return;
             List<FaceRepository.FaceUser> users = repository.getAllUsers();
             List<Gallery.Entry<FaceRepository.FaceUser>> entries = new ArrayList<>(users.size());
@@ -108,6 +118,8 @@ public class FaceRecognizer implements FaceSession.GallerySource<FaceRepository.
             for (FaceRepository.FaceUser user : users) user.feature = null;
             if (built.skipped() > 0) Log.w(TAG, built.skipped() + " users skipped: missing or incompatible feature");
             gallery = built;
+            snapshot = new FaceSession.GallerySnapshot<>(built, FaceDatasetCoordinator.EPOCH,
+                    FaceDatasetCoordinator.EPOCH.generation(), true);
         } finally { FaceDatasetCoordinator.LOCK.writeLock().unlock(); }
     }
 
@@ -190,6 +202,8 @@ public class FaceRecognizer implements FaceSession.GallerySource<FaceRepository.
     @Override
     public Gallery<FaceRepository.FaceUser> gallery() { return gallery; }
 
+    @Override public FaceSession.GallerySnapshot<FaceRepository.FaceUser> snapshot() { return snapshot; }
+
     /** Native backend only; null for the legacy one. Use it to build a NativeFeatureEngine. */
     public NativeEngine nativeEngine() { return nativeEngine; }
 
@@ -213,7 +227,10 @@ public class FaceRecognizer implements FaceSession.GallerySource<FaceRepository.
             if (sdkWrapper == null && nativeEngine == null) return new RecognitionResult(false, "SDK已释放");
             float[] feature = extractLocked(bitmap);
             if (feature == null) return new RecognitionResult(false, "未检测到人脸或质量不合格");
-            Gallery<FaceRepository.FaceUser> current = gallery;
+            FaceSession.GallerySnapshot<FaceRepository.FaceUser> view = snapshot;
+            if (!view.ready || !view.epoch.isCurrent(view.generation))
+                return new RecognitionResult(false, "本地人员库正在恢复");
+            Gallery<FaceRepository.FaceUser> current = view.gallery;
             if (current.size() == 0) return new RecognitionResult(false, "本地人员库为空或正在恢复");
             Gallery.Match<FaceRepository.FaceUser> match = current.search(feature);
             if (match == null) return new RecognitionResult(false, "特征维度与本地人员库不一致");
@@ -228,7 +245,12 @@ public class FaceRecognizer implements FaceSession.GallerySource<FaceRepository.
         FaceDatasetCoordinator.LOCK.writeLock().lock();
         try {
             FaceDatasetCoordinator.remove(datasetListener);
-            gallery = Gallery.empty();
+            // Serialize individual-source removal with the same short authorization commit.
+            synchronized (FaceDatasetCoordinator.EPOCH) {
+                gallery = Gallery.empty();
+                snapshot = new FaceSession.GallerySnapshot<>(gallery, FaceDatasetCoordinator.EPOCH,
+                        FaceDatasetCoordinator.EPOCH.generation(), false);
+            }
             if (sdkWrapper != null) { sdkWrapper.release(); sdkWrapper = null; }
             if (nativeEngine != null) { nativeEngine.close(); nativeEngine = null; }
             if (repository != null) { repository.close(); repository = null; }

@@ -69,6 +69,7 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
     private ExecutorService cameraExecutor;
     private ImageAnalysis imageAnalysis;
     private byte[] nv21Buffer;
+    private final CameraFrameAdmission.Counters frameCounters = new CameraFrameAdmission.Counters();
     private int cameraLensFacing = CameraSelector.LENS_FACING_FRONT;
     /** Last status shown, so the text only changes on state changes (UI thread only). */
     private String shownStatus;
@@ -124,6 +125,8 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
             faceRecognizer = new FaceRecognizer(this, backend);
             if (cascade) verifyRecognizer = new FaceRecognizer(this, FaceRecognizer.Backend.INSIGHTFACE_R50_INT8);
             SessionConfig config = new SessionConfig();
+            // Candidate switches are opt-in until the paired device comparison passes.
+            config.shareFeatureCapture = BuildConfig.SHARE_FEATURE_CAPTURE;
             FaceSession.Detector detector;
             FaceSession.LivenessScorer liveness;
             if (backend.insightFace()) {
@@ -240,32 +243,36 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
     }
 
     private void analyzeImage(@NonNull ImageProxy image) {
-        boolean imageClosed = false;
-        FaceSession<FaceRepository.FaceUser> session = this.session;
+        final FaceSession<FaceRepository.FaceUser> current = this.session;
         try {
-            if (session == null || isFinishing() || isDestroyed() || image.getFormat() != ImageFormat.YUV_420_888) return;
-            int width = image.getWidth(), height = image.getHeight();
-            if (nv21Buffer == null || nv21Buffer.length != Nv21.size(width, height)) {
-                nv21Buffer = new byte[Nv21.size(width, height)];
-            }
-            // Pack camera planes directly (no JPEG); rotation is applied in native code, once.
-            ImageProxy.PlaneProxy[] planes = image.getPlanes();
-            if (!NativeAnalyzer.packNv21(width, height, planes[0].getBuffer(), planes[0].getRowStride(),
-                    planes[1].getBuffer(), planes[2].getBuffer(), planes[1].getRowStride(),
-                    planes[1].getPixelStride(), nv21Buffer)) {
-                Nv21.fromYuv420(width, height, planes[0].getBuffer(), planes[0].getRowStride(),
-                        planes[1].getBuffer(), planes[2].getBuffer(), planes[1].getRowStride(),
-                        planes[1].getPixelStride(), nv21Buffer);
-            }
-            CameraFrame frame = new CameraFrame(nv21Buffer, width, height,
-                    image.getImageInfo().getRotationDegrees(), image.getImageInfo().getTimestamp() / 1_000_000L);
-            image.close(); // release the camera buffer before running the models
-            imageClosed = true;
-            session.onFrame(frame);
+            CameraFrameAdmission.analyze(image, new CameraFrameAdmission.Processor() {
+                @Override public boolean shouldProcess(long timestampMs) {
+                    return current != null && !isFinishing() && !isDestroyed()
+                            && image.getFormat() == ImageFormat.YUV_420_888
+                            && (!BuildConfig.EARLY_FRAME_ADMISSION || current.shouldProcessFrame(timestampMs));
+                }
+
+                @Override public CameraFrame capture(ImageProxy source, long timestampMs) {
+                    int width = source.getWidth(), height = source.getHeight();
+                    if (nv21Buffer == null || nv21Buffer.length != Nv21.size(width, height)) {
+                        nv21Buffer = new byte[Nv21.size(width, height)];
+                    }
+                    ImageProxy.PlaneProxy[] planes = source.getPlanes();
+                    if (!NativeAnalyzer.packNv21(width, height, planes[0].getBuffer(), planes[0].getRowStride(),
+                            planes[1].getBuffer(), planes[2].getBuffer(), planes[1].getRowStride(),
+                            planes[1].getPixelStride(), nv21Buffer)) {
+                        Nv21.fromYuv420(width, height, planes[0].getBuffer(), planes[0].getRowStride(),
+                                planes[1].getBuffer(), planes[2].getBuffer(), planes[1].getRowStride(),
+                                planes[1].getPixelStride(), nv21Buffer);
+                    }
+                    return new CameraFrame(nv21Buffer, width, height,
+                            source.getImageInfo().getRotationDegrees(), timestampMs);
+                }
+
+                @Override public void process(CameraFrame frame) { current.onFrame(frame); }
+            }, frameCounters);
         } catch (RuntimeException e) {
             Log.e(TAG, "Frame analysis failed", e);
-        } finally {
-            if (!imageClosed) image.close();
         }
     }
 
@@ -415,7 +422,17 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
         final FaceRecognizer closingRecognizer = faceRecognizer, closingVerifier = verifyRecognizer;
         session = null;
         cameraExecutor.execute(() -> {
-            if (closingSession != null) closingSession.close();
+            if (BuildConfig.DEBUG) Log.d(TAG, "Camera frames received=" + frameCounters.received
+                    + " packed=" + frameCounters.packed + " skipped_before_pack=" + frameCounters.skipped
+                    + " packed_bytes=" + frameCounters.captureBytes + " pack_ms=" + frameCounters.captureNanos / 1e6
+                    + " errors=" + frameCounters.errors);
+            if (closingSession != null) {
+                closingSession.close(); // revoke callbacks before waiting for uninterruptible native work
+                if (!closingSession.finish(2000)) {
+                    Log.e(TAG, "Session did not stop within deadline; native handles retained, not released under inference");
+                    return;
+                }
+            }
             if (closingEngines != null) {
                 try {
                     closingEngines.close();

@@ -339,6 +339,76 @@ public class SyncStoreTest {
         } finally { returnBusy.countDown(); manager.close(); }
     }
 
+    @Test public void publicationRevokesOldEpochBeforeCommitAndAllListenersSeeOneNewEpoch() {
+        long old = FaceDatasetCoordinator.EPOCH.generation();
+        List<Long> seen = new ArrayList<>();
+        Runnable first = () -> {
+            assertFalse(FaceDatasetCoordinator.EPOCH.isCurrent(old));
+            seen.add(FaceDatasetCoordinator.EPOCH.generation());
+        };
+        Runnable second = () -> {
+            assertFalse("ready only after every feature space reloads", FaceDatasetCoordinator.EPOCH.isCurrent(
+                    FaceDatasetCoordinator.EPOCH.generation()));
+            seen.add(FaceDatasetCoordinator.EPOCH.generation());
+        };
+        FaceDatasetCoordinator.add(first); FaceDatasetCoordinator.add(second);
+        try {
+            FaceDatasetCoordinator.publish(() -> assertFalse(FaceDatasetCoordinator.EPOCH.isCurrent(old)));
+            assertEquals(java.util.Arrays.asList(old + 1, old + 1), seen);
+            assertTrue(FaceDatasetCoordinator.EPOCH.isCurrent(old + 1));
+        } finally { FaceDatasetCoordinator.remove(first); FaceDatasetCoordinator.remove(second); }
+    }
+
+    @Test public void failedRefreshKeepsAllFeatureSpacesUnauthorizedUntilSuccessfulRetry() {
+        long old = FaceDatasetCoordinator.EPOCH.generation();
+        AtomicInteger healthy = new AtomicInteger();
+        Runnable succeeds = healthy::incrementAndGet;
+        Runnable fails = () -> { throw new IllegalStateException("gallery load failed"); };
+        FaceDatasetCoordinator.add(succeeds); FaceDatasetCoordinator.add(fails);
+        try {
+            try { FaceDatasetCoordinator.publish(() -> {}); fail("expected refresh failure"); }
+            catch (IllegalStateException expected) { }
+            long generation = FaceDatasetCoordinator.EPOCH.generation();
+            assertEquals(old + 1, generation);
+            assertFalse(FaceDatasetCoordinator.EPOCH.isCurrent(old));
+            assertFalse(FaceDatasetCoordinator.EPOCH.isCurrent(generation));
+            assertEquals(1, healthy.get());
+            FaceDatasetCoordinator.remove(fails);
+            FaceDatasetCoordinator.refreshIfRequired();
+            assertEquals(2, healthy.get());
+            assertTrue(FaceDatasetCoordinator.EPOCH.isCurrent(generation));
+        } finally {
+            FaceDatasetCoordinator.remove(fails); FaceDatasetCoordinator.remove(succeeds);
+            FaceDatasetCoordinator.refreshIfRequired();
+        }
+    }
+
+    @Test public void commitFailureStillRevokesPreviouslyAuthorizedEpoch() {
+        long old = FaceDatasetCoordinator.EPOCH.generation();
+        try {
+            try { FaceDatasetCoordinator.publish(() -> { throw new IllegalStateException("commit failed"); });
+                fail("expected commit failure"); }
+            catch (IllegalStateException expected) { }
+            assertFalse(FaceDatasetCoordinator.EPOCH.isCurrent(old));
+            assertFalse(FaceDatasetCoordinator.EPOCH.isCurrent(FaceDatasetCoordinator.EPOCH.generation()));
+        } finally { FaceDatasetCoordinator.refreshIfRequired(); }
+    }
+
+    @Test public void tombstoneAndEmptyPublicationRevokeEpochEvenWhenRowCountDoesNotChange() throws Exception {
+        seed();
+        long old = FaceDatasetCoordinator.EPOCH.generation();
+        try (SyncStore store = new SyncStore(context)) {
+            store.begin(true); store.delete(1, 2);
+            store.publish(new SyncStore.State("epoch", "1", 2, "device"));
+            long deleted = FaceDatasetCoordinator.EPOCH.generation();
+            assertTrue(deleted > old); assertFalse(FaceDatasetCoordinator.EPOCH.isCurrent(old));
+            assertTrue(online().isEmpty());
+            store.begin(false); store.publish(new SyncStore.State("epoch", "1", 3, "device"));
+            assertTrue(FaceDatasetCoordinator.EPOCH.generation() > deleted);
+            assertFalse(FaceDatasetCoordinator.EPOCH.isCurrent(deleted));
+        }
+    }
+
     static JSONObject wrap(JSONObject data) throws Exception { return new JSONObject().put("code", 200).put("data", data); }
     static class StubTransport implements SyncTransport {
         @Override public JSONObject request(String method, String path, JSONObject body) throws Exception { return wrap(new JSONObject()); }

@@ -26,7 +26,7 @@ import java.util.concurrent.RejectedExecutionException;
  * expensive models once per person".
  *
  * <p>Call {@link #onFrame} from one thread. {@link Listener#onFaces} runs on that thread; the other
- * callbacks may also run on a worker thread, with the session lock held, so keep them short.
+ * callbacks may also run on a worker thread, outside session/dataset locks; keep them short.
  *
  * @param <T> gallery entry type, e.g. a user record; must implement equals/hashCode by identity
  */
@@ -52,6 +52,29 @@ public final class FaceSession<T> implements AutoCloseable {
      */
     public interface FeatureEngine {
         Callable<float[]> capture(CameraFrame frame, FaceRect face, float[] keypoints, FaceRect crop);
+
+        /** Compatibility fallback; optimized engines may share only immutable capture storage. */
+        default CapturedFeatures capturePair(CameraFrame frame, FaceRect face, float[] keypoints,
+                                             FaceRect crop, FeatureEngine verifier) {
+            return new CapturedFeatures(capture(frame, face, keypoints, crop),
+                    verifier == null ? null : verifier.capture(frame, face, keypoints, crop));
+        }
+    }
+
+    public static final class CapturedFeatures {
+        public final Callable<float[]> primary, verification;
+        public final int captureCount;
+        /** Prepared bytes, or -1 when the compatibility engine cannot report them. */
+        public final long preparedBytes;
+        public CapturedFeatures(Callable<float[]> primary, Callable<float[]> verification) {
+            this(primary, verification, verification == null ? 1 : 2, -1);
+        }
+        public CapturedFeatures(Callable<float[]> primary, Callable<float[]> verification, int captureCount, long preparedBytes) {
+            this.primary = primary;
+            this.verification = verification;
+            this.captureCount = captureCount;
+            this.preparedBytes = preparedBytes;
+        }
     }
 
     /**
@@ -89,6 +112,29 @@ public final class FaceSession<T> implements AutoCloseable {
     public interface GallerySource<T> {
         /** Current snapshot; never null (use {@link Gallery#empty()}). */
         Gallery<T> gallery();
+        /**
+         * Override for coordinated publications. Must be a lock-free immutable snapshot read,
+         * never enter a dataset writer/listener or run a model. Legacy/lambda sources use identity.
+         */
+        default GallerySnapshot<T> snapshot() { return new GallerySnapshot<>(gallery(), null, 0, true); }
+    }
+
+    public static final class GallerySnapshot<T> {
+        public final Gallery<T> gallery;
+        public final DatasetEpoch epoch;
+        public final long generation;
+        public final boolean ready;
+        public GallerySnapshot(Gallery<T> gallery, DatasetEpoch epoch, long generation, boolean ready) {
+            this.gallery = gallery;
+            this.epoch = epoch;
+            this.generation = generation;
+            this.ready = ready;
+        }
+        boolean current() { return ready && (epoch == null || epoch.isCurrent(generation)); }
+        boolean same(GallerySnapshot<?> other) {
+            return other != null && gallery == other.gallery && epoch == other.epoch
+                    && generation == other.generation && ready == other.ready;
+        }
     }
 
     public interface Listener<T> {
@@ -100,6 +146,9 @@ public final class FaceSession<T> implements AutoCloseable {
 
         /** A track used up its attempts without a match; it backs off and tries again later. */
         void onRecognitionFailed(long trackId, float bestScore, Reason reason);
+
+        /** One applied, finite liveness vote, including UNKNOWN while the vote window fills. */
+        default void onLiveness(long trackId, float score, Liveness verdict) { }
 
         /**
          * Every gallery decision, for calibration logs: the probe's best score, how many frames were
@@ -151,8 +200,14 @@ public final class FaceSession<T> implements AutoCloseable {
         /** Frames averaged into the probe that matched. */
         public final int fusedFrames;
         public final long timestampMs;
+        /** Authorization provenance; asynchronous consumers must revalidate the dataset epoch. */
+        public final long generation, attemptId, frameId, datasetGeneration;
 
-        RecognitionEvent(long trackId, T user, float score, float secondScore, float livenessScore, int fusedFrames, long timestampMs) {
+        RecognitionEvent(long trackId, T user, float score, float secondScore, float livenessScore, int fusedFrames, long timestampMs, TaskToken<?> token) {
+            generation = token.generation;
+            attemptId = token.attemptId;
+            frameId = token.frameId;
+            datasetGeneration = token.primary.generation;
             this.trackId = trackId;
             this.user = user;
             this.score = score;
@@ -165,6 +220,9 @@ public final class FaceSession<T> implements AutoCloseable {
 
     private static final class TrackState<T> {
         final long id;
+        long attemptId = 1;
+        boolean visible, eligible;
+        TaskToken<T> token;
         Liveness liveness = Liveness.UNKNOWN;
         final ArrayDeque<Boolean> votes = new ArrayDeque<>();
         float livenessScore = Float.NaN;
@@ -191,6 +249,23 @@ public final class FaceSession<T> implements AutoCloseable {
         TrackState(long id) { this.id = id; }
     }
 
+    /** Immutable identities and the exact pair of searched gallery snapshots. */
+    private static final class TaskToken<T> {
+        final long generation, trackId, attemptId, frameId;
+        final GallerySnapshot<T> primary, verification;
+        TaskToken(long generation, long trackId, long attemptId, long frameId,
+                  GallerySnapshot<T> primary, GallerySnapshot<T> verification) {
+            this.generation = generation; this.trackId = trackId; this.attemptId = attemptId;
+            this.frameId = frameId; this.primary = primary; this.verification = verification;
+        }
+    }
+
+    private final SessionTasks tasks = new SessionTasks();
+    private long generation = 1, frameId;
+    private volatile boolean inputStopped, drainFailed;
+    private boolean analysing, hasAnalysed, closeCleaned;
+    private final ArrayDeque<Runnable> notifications = new ArrayDeque<>();
+    private GallerySnapshot<T> observedPrimary, observedVerification;
     private final SessionConfig config;
     private final Detector detector;
     private final LivenessScorer liveness;
@@ -265,30 +340,65 @@ public final class FaceSession<T> implements AutoCloseable {
 
     /** Adds the cascade's second stage; call before the first frame. */
     public FaceSession<T> withVerifier(Verifier<T> verifier) {
-        this.verifier = verifier;
-        return this;
+        synchronized (lock) {
+            if (hasAnalysed || inputStopped || closed) throw new IllegalStateException("Session already started");
+            this.verifier = verifier;
+            return this;
+        }
     }
 
     /** Next track id; persist it and pass it back as {@link SessionConfig#firstTrackId} after a restart. */
-    public long nextTrackId() { return tracker.nextId(); }
+    public long nextTrackId() { synchronized (lock) { return tracker.nextId(); } }
+
+    /** A hint only: does not consume admission or touch the camera buffer. */
+    public boolean shouldProcessFrame(long timestampMs) {
+        synchronized (lock) { return admits(timestampMs); }
+    }
+
+    private boolean admits(long timestampMs) {
+        if (closed || inputStopped || analysing) return false;
+        if (!hasAnalysed || timestampMs < lastAnalysedAt) return true;
+        if (timestampMs == lastAnalysedAt) return false; // never count a duplicate observation
+        long elapsed = timestampMs - lastAnalysedAt;
+        return !idle || elapsed < 0 || elapsed >= config.idleFrameIntervalMs;
+    }
 
     public void onFrame(CameraFrame frame) {
-        if (closed) return;
+        final long acceptedGeneration;
         long now = frame.timestampMs;
         synchronized (lock) {
-            // Idle: nothing to recognise, so a few frames per second are enough to notice a new face.
-            if (idle && now - lastAnalysedAt < config.idleFrameIntervalMs) return;
+            if (!admits(now)) return;
+            // A camera clock rollback starts new observations, not an endless throttle.
+            if (hasAnalysed && now < lastAnalysedAt) {
+                resetLocked();
+                lastReported.clear(); // cooldowns in the previous clock domain cannot be compared
+            }
+            refreshDataset();
+            if (!tasks.reserveFrame()) return;
+            acceptedGeneration = generation;
+            analysing = true;
+            hasAnalysed = true;
+            frameId++;
             lastAnalysedAt = now;
             lastFrameMs = now;
             lastFrameNanos = System.nanoTime();
         }
-        // Detection and tracking belong to the analysis thread alone; no lock needed.
-        List<Track> tracks = tracker.update(detector.detect(frame));
-        List<FaceState<T>> faces;
-        synchronized (lock) {
-            faces = updateStates(tracks, frame, now);
+        tasks.enter();
+        try {
+            List<Detection> detections = detector.detect(frame);
+            List<FaceState<T>> faces;
+            synchronized (lock) {
+                if (closed || generation != acceptedGeneration) return;
+                refreshDataset();
+                faces = updateStates(tracker.update(detections), frame, now);
+            }
+            flushNotifications();
+            listener.onFaces(faces, frame);
+        } finally {
+            synchronized (lock) { analysing = false; }
+            try { flushNotifications(); }
+            finally { tasks.leave(); tasks.complete(); }
         }
-        listener.onFaces(faces, frame);
     }
 
     private List<FaceState<T>> updateStates(List<Track> tracks, CameraFrame frame, long now) {
@@ -312,10 +422,14 @@ public final class FaceSession<T> implements AutoCloseable {
                 states.put(track.id, state);
             }
             if (!track.visible()) {
+                if (state.visible) invalidate(state);
+                state.visible = state.eligible = false;
                 state.reason = Reason.LOST;
             } else {
+                state.visible = true;
                 Reason gate = gate(track, frame, visible, largest);
                 state.reason = gate;
+                state.eligible = gate == Reason.NONE;
                 if (gate == Reason.NONE) process(state, track, frame, now);
             }
             snapshot.add(new FaceState<>(track.id, track.smoothedRect(), state.liveness, state.livenessScore,
@@ -364,20 +478,20 @@ public final class FaceSession<T> implements AutoCloseable {
             }
             state.recognition = Recognition.PENDING;
         }
-        updateLiveness(state, track, frame, now);
-
         quality.measure(frame, track.rect);
         state.bestSharpness = Math.max(state.bestSharpness, quality.sharpness);
         Reason qualityReason = quality.brightness < config.minBrightness ? Reason.TOO_DARK
                 : quality.brightness > config.maxBrightness ? Reason.TOO_BRIGHT
                 : quality.sharpness < Math.max(config.minSharpness, config.relativeSharpness * state.bestSharpness) ? Reason.BLURRY
                 : Reason.NONE;
+        state.eligible = qualityReason == Reason.NONE;
+        updateLiveness(state, track, frame, now);
         if (state.liveness == Liveness.NOT_ALIVE) state.reason = Reason.NOT_ALIVE;
         else if (qualityReason != Reason.NONE) state.reason = qualityReason;
 
         if (state.match == null && !state.extracting && !busy && now >= state.retryAt
                 && state.liveness != Liveness.NOT_ALIVE && qualityReason == Reason.NONE) {
-            if (gallery.gallery().size() == 0) state.reason = Reason.GALLERY_EMPTY;
+            if (!datasetReady() || observedPrimary.gallery.size() == 0) state.reason = Reason.GALLERY_EMPTY;
             else submit(state, track, frame);
         }
         decide(state, now);
@@ -400,31 +514,27 @@ public final class FaceSession<T> implements AutoCloseable {
         } catch (RuntimeException error) {
             return;
         }
-        final long id = state.id;
+        final TaskToken<T> token = token(state);
         state.livenessPending = true;
         livenessBusy = true;
-        try {
-            livenessWorker.execute(() -> {
-                float score = Float.NaN;
-                try {
-                    if (!closed) score = task.call();
-                } catch (Exception error) {
-                    // no vote
-                }
+        execute(livenessWorker, () -> {
+            float score = Float.NaN;
+            try { if (canRun(token)) score = task.call(); }
+            catch (Exception error) { /* no vote */ }
+            finally {
                 synchronized (lock) {
                     livenessBusy = false;
-                    TrackState<T> current = states.get(id);
-                    if (current == null || closed) return; // the face left meanwhile
-                    current.livenessPending = false;
-                    long t = now();
-                    addVote(current, score, t);
-                    decide(current, t);
+                    refreshDataset();
+                    TrackState<T> current = valid(token);
+                    if (current != null) {
+                        current.livenessPending = false;
+                        long t = now();
+                        addVote(current, score, t);
+                        decide(current, t);
+                    }
                 }
-            });
-        } catch (RejectedExecutionException error) {
-            livenessBusy = false;
-            state.livenessPending = false;
-        }
+            }
+        }, () -> { livenessBusy = false; state.livenessPending = false; });
     }
 
     /**
@@ -433,7 +543,7 @@ public final class FaceSession<T> implements AutoCloseable {
      * that ALIVE can no longer be reached. The window need not fill first.
      */
     private void addVote(TrackState<T> state, float score, long now) {
-        if (Float.isNaN(score) || state.liveness == Liveness.ALIVE) return; // engine error: no vote
+        if (!Float.isFinite(score) || state.liveness == Liveness.ALIVE) return; // engine error: no vote
         state.livenessScore = score;
         state.votes.addLast(score > config.livenessThreshold);
         while (state.votes.size() > config.livenessWindow) state.votes.removeFirst();
@@ -446,6 +556,8 @@ public final class FaceSession<T> implements AutoCloseable {
             state.livenessRetryAt = now + config.livenessFailedRetryMs;
             state.votes.clear();
         }
+        Liveness verdict = state.liveness;
+        notifications.add(() -> listener.onLiveness(state.id, score, verdict));
     }
 
     private void submit(TrackState<T> state, Track track, CameraFrame frame) {
@@ -453,40 +565,70 @@ public final class FaceSession<T> implements AutoCloseable {
                 ? track.rect.scaledClipped(config.featureCropScale, frame.uprightWidth(), frame.uprightHeight())
                 : new FaceRect(0, 0, frame.uprightWidth(), frame.uprightHeight());
         final Callable<float[]> task;
+        final TaskToken<T> token = token(state);
         try {
-            task = features.capture(frame, track.rect, track.keypoints, crop);
-            state.verifyTask = verifier == null ? null : verifier.features.capture(frame, track.rect, track.keypoints, crop);
+            if (config.shareFeatureCapture && verifier != null) {
+                CapturedFeatures captured = features.capturePair(frame, track.rect, track.keypoints, crop, verifier.features);
+                task = captured.primary;
+                state.verifyTask = captured.verification;
+            } else {
+                task = features.capture(frame, track.rect, track.keypoints, crop);
+                state.verifyTask = verifier == null ? null : verifier.features.capture(frame, track.rect, track.keypoints, crop);
+            }
+            if (task == null) throw new IllegalStateException("Null capture");
         } catch (RuntimeException error) {
+            state.verifyTask = null;
             state.reason = Reason.FEATURE_ERROR;
             return;
         }
-        final long id = state.id;
+        state.token = token;
         busy = true;
         state.extracting = true;
+        execute(worker, () -> {
+            float[] feature = null;
+            boolean failed = false;
+            try { if (canRun(token)) feature = task.call(); }
+            catch (Exception error) { failed = true; }
+            finally {
+                synchronized (lock) {
+                    busy = false;
+                    refreshDataset();
+                    if (valid(token) != null) applyFeature(token, feature, failed, now());
+                    resumeDecisions();
+                }
+            }
+        }, () -> {
+            busy = false;
+            state.extracting = false;
+            state.verifyTask = null;
+            state.reason = Reason.FEATURE_ERROR;
+        });
+    }
+
+    /** Count chains before submission; completion callbacks are part of the count. */
+    private void execute(Executor executor, Runnable action, Runnable rejected) {
+        tasks.reserve();
+        java.util.concurrent.atomic.AtomicBoolean started = new java.util.concurrent.atomic.AtomicBoolean();
         try {
-            worker.execute(() -> {
-                float[] feature = null;
-                boolean failed = false;
-                try {
-                    if (!closed) feature = task.call();
-                } catch (Exception error) {
-                    failed = true;
-                } finally {
-                    synchronized (lock) {
-                        busy = false;
-                        if (!closed) applyFeature(id, feature, failed, now());
-                    }
+            executor.execute(() -> {
+                started.set(true);
+                tasks.enter();
+                try { action.run(); }
+                finally {
+                    try { flushNotifications(); }
+                    finally { tasks.leave(); tasks.complete(); }
                 }
             });
         } catch (RejectedExecutionException error) {
-            busy = false;
-            state.extracting = false;
+            if (started.get()) throw error;
+            tasks.complete();
+            rejected.run();
         }
     }
 
     /** A feature came back (worker thread, lock held): fuse, search, decide if liveness is in. */
-    private void applyFeature(long trackId, float[] feature, boolean failed, long now) {
-        TrackState<T> state = states.get(trackId);
+    private void applyFeature(TaskToken<T> token, float[] feature, boolean failed, long now) {
+        TrackState<T> state = valid(token);
         if (state == null) return; // the face left before its feature came back
         state.extracting = false;
         if (feature == null) {
@@ -504,30 +646,32 @@ public final class FaceSession<T> implements AutoCloseable {
         }
         for (int i = 0; i < unit.length; i++) state.fusedSum[i] += unit[i];
         state.fusedCount++;
-        Gallery.Match<T> match = gallery.gallery().search(state.fusedSum);
+        Gallery.Match<T> match = token.primary.gallery.search(state.fusedSum);
         if (match == null) {
             attemptFailed(state, now, Reason.FEATURE_ERROR, Float.NaN); // dimension mismatch
             return;
         }
         state.match = match;
         if (state.liveness != Liveness.ALIVE)
-            listener.onMatchScored(state.id, match.score, match.secondScore, state.fusedCount, state.liveness, Reason.NOT_ALIVE);
+            matchScored(state.id, match.score, match.secondScore, state.fusedCount, state.liveness, Reason.NOT_ALIVE);
         decide(state, now);
     }
 
     /** Runs when both a match and liveness are available, whichever arrived last. */
     private void decide(TrackState<T> state, long now) {
         Gallery.Match<T> m = state.match;
-        if (m == null || state.recognition != Recognition.PENDING || state.liveness != Liveness.ALIVE) return;
+        if (m == null || valid(state.token) != state || !state.eligible || state.liveness != Liveness.ALIVE) return;
+        if (verifier != null && busy && m.score >= verifier.reject
+                && !(m.score >= verifier.accept && m.margin() >= config.topMargin)) return;
         state.match = null;
         if (verifier != null && m.best != null && !state.verifying) {
             if (m.score >= verifier.accept && m.margin() >= config.topMargin) {
                 succeed(state, m, now);
             } else if (m.score < verifier.reject || state.verifyTask == null) {
-                listener.onMatchScored(state.id, m.score, m.secondScore, state.fusedCount, state.liveness, Reason.UNKNOWN_PERSON);
+                matchScored(state.id, m.score, m.secondScore, state.fusedCount, state.liveness, Reason.UNKNOWN_PERSON);
                 attemptFailed(state, now, Reason.UNKNOWN_PERSON, m.score);
             } else {
-                listener.onMatchScored(state.id, m.score, m.secondScore, state.fusedCount, state.liveness, Reason.NEED_MORE_FRAMES);
+                matchScored(state.id, m.score, m.secondScore, state.fusedCount, state.liveness, Reason.NEED_MORE_FRAMES);
                 verify(state);
             }
             return;
@@ -536,7 +680,7 @@ public final class FaceSession<T> implements AutoCloseable {
                 : m.score >= config.thresholdHigh && m.margin() >= config.topMargin ? Reason.NONE
                 : m.score >= config.thresholdLow && state.fusedCount < config.fusionFrames ? Reason.NEED_MORE_FRAMES
                 : Reason.UNKNOWN_PERSON;
-        listener.onMatchScored(state.id, m.score, m.secondScore, state.fusedCount, state.liveness, outcome);
+        matchScored(state.id, m.score, m.secondScore, state.fusedCount, state.liveness, outcome);
         if (m.best == null) {
             attemptFailed(state, now, Reason.GALLERY_EMPTY, Float.NaN);
         } else if (m.score >= config.thresholdHigh && m.margin() >= config.topMargin) {
@@ -550,63 +694,154 @@ public final class FaceSession<T> implements AutoCloseable {
     }
 
     private void succeed(TrackState<T> state, Gallery.Match<T> m, long now) {
-        state.recognition = Recognition.SUCCEED;
-        state.user = m.best;
-        state.score = m.score;
-        state.reason = Reason.NONE;
-        state.verifyTask = null;
-        Long last = lastReported.get(m.best);
-        if (last == null || now - last >= config.identityCooldownMs) {
-            lastReported.put(m.best, now);
-            listener.onRecognized(new RecognitionEvent<>(state.id, m.best, m.score, m.secondScore,
-                    state.livenessScore, state.fusedCount, now));
+        TaskToken<T> token = state.token;
+        if (valid(token) != state || !state.eligible || state.liveness != Liveness.ALIVE) return;
+        final boolean[] report = {false};
+        Runnable commit = () -> {
+            // Authorization linearization point, under the shared publication monitor.
+            if (valid(token) != state || !state.eligible || state.liveness != Liveness.ALIVE) return;
+            state.recognition = Recognition.SUCCEED;
+            state.user = m.best;
+            state.score = m.score;
+            state.reason = Reason.NONE;
+            state.verifyTask = null;
+            Long last = lastReported.get(m.best);
+            if (last == null || now - last >= config.identityCooldownMs) {
+                lastReported.put(m.best, now);
+                report[0] = true;
+            }
+        };
+        tasks.authorize(() -> {
+            if (token.primary.epoch == null) commit.run();
+            else token.primary.epoch.commit(token.primary.generation, commit);
+        });
+        // No user code under the dataset barrier. An asynchronous access consumer must
+        // revalidate the event epoch at its own consumption/door-operation point.
+        if (report[0]) {
+            RecognitionEvent<T> event = new RecognitionEvent<>(state.id, m.best, m.score, m.secondScore,
+                    state.livenessScore, state.fusedCount, now, token);
+            notifications.add(() -> {
+                synchronized (lock) {
+                    TrackState<T> current = states.get(token.trackId);
+                    if (closed || token.generation != generation || current == null || !current.visible
+                            || current.attemptId != token.attemptId
+                            || !snapshotsCurrent(token.primary, token.verification)) return;
+                }
+                listener.onRecognized(event);
+            });
         }
     }
 
-    /** Runs the captured second-stage task (lock held); its result decides on the worker. */
+    /** Runs only the captured second-stage task, never adds an observation at EOF. */
     private void verify(TrackState<T> state) {
         final Callable<float[]> task = state.verifyTask;
-        final long id = state.id;
+        final TaskToken<T> token = state.token;
+        if (valid(token) != state || task == null || busy) return;
         state.verifyTask = null;
         state.verifying = true;
         state.extracting = true;
         busy = true;
-        try {
-            worker.execute(() -> {
-                float[] feature = null;
-                try {
-                    if (!closed) feature = task.call();
-                } catch (Exception error) {
-                    feature = null;
-                }
+        execute(worker, () -> {
+            float[] feature = null;
+            try { if (canRun(token)) feature = task.call(); }
+            catch (Exception error) { /* no feature */ }
+            finally {
                 synchronized (lock) {
                     busy = false;
-                    TrackState<T> current = states.get(id);
-                    if (current == null || closed) return;
-                    current.extracting = false;
-                    current.verifying = false;
-                    long t = now();
-                    float[] unit = feature == null ? null : unit(feature);
-                    Gallery.Match<T> m = unit == null ? null : verifier.gallery.gallery().search(unit);
-                    if (m == null || m.best == null) {
-                        attemptFailed(current, t, Reason.NO_FEATURE, Float.NaN);
-                    } else if (m.score >= verifier.threshold && m.margin() >= config.topMargin) {
-                        listener.onMatchScored(current.id, m.score, m.secondScore, 1, current.liveness, Reason.NONE);
-                        succeed(current, m, t);
-                    } else {
-                        listener.onMatchScored(current.id, m.score, m.secondScore, 1, current.liveness, Reason.UNKNOWN_PERSON);
-                        attemptFailed(current, t, Reason.UNKNOWN_PERSON, m.score);
+                    refreshDataset();
+                    TrackState<T> current = valid(token);
+                    if (current != null) {
+                        current.extracting = false;
+                        current.verifying = false;
+                        long t = now();
+                        float[] unit = feature == null ? null : unit(feature);
+                        Gallery.Match<T> m = unit == null ? null : token.verification.gallery.search(unit);
+                        if (m == null || m.best == null) {
+                            attemptFailed(current, t, Reason.NO_FEATURE, Float.NaN);
+                        } else if (m.score >= verifier.threshold && m.margin() >= config.topMargin) {
+                            matchScored(current.id, m.score, m.secondScore, 1, current.liveness, Reason.NONE);
+                            succeed(current, m, t);
+                        } else {
+                            matchScored(current.id, m.score, m.secondScore, 1, current.liveness, Reason.UNKNOWN_PERSON);
+                            attemptFailed(current, t, Reason.UNKNOWN_PERSON, m.score);
+                        }
                     }
+                    resumeDecisions();
                 }
-            });
-        } catch (RejectedExecutionException error) {
+            }
+        }, () -> {
             busy = false;
             state.extracting = false;
             state.verifying = false;
+            state.reason = Reason.FEATURE_ERROR;
+        });
+    }
+
+    private void resumeDecisions() {
+        for (TrackState<T> state : new ArrayList<>(states.values())) decide(state, now());
+    }
+
+    private TaskToken<T> token(TrackState<T> state) {
+        return new TaskToken<>(generation, state.id, state.attemptId, frameId, observedPrimary, observedVerification);
+    }
+
+    private boolean canRun(TaskToken<T> token) {
+        synchronized (lock) { refreshDataset(); return valid(token) != null; }
+    }
+
+    private TrackState<T> valid(TaskToken<T> token) {
+        if (closed || token == null || token.generation != generation || !snapshotsCurrent(token.primary, token.verification)) return null;
+        TrackState<T> state = states.get(token.trackId);
+        return state != null && state.visible && state.attemptId == token.attemptId
+                && state.recognition == Recognition.PENDING ? state : null;
+    }
+
+    private boolean snapshotsCurrent(GallerySnapshot<T> primary, GallerySnapshot<T> verification) {
+        if (primary == null || !primary.current() || !primary.same(gallery.snapshot())) return false;
+        if (verifier == null) return verification == null;
+        return verification != null && verification.current() && verification.same(verifier.gallery.snapshot())
+                && primary.epoch == verification.epoch && primary.generation == verification.generation;
+    }
+
+    private boolean datasetReady() { return snapshotsCurrent(observedPrimary, observedVerification); }
+
+    /** Never enters coordinator/listeners: only immutable snapshots and the short epoch monitor. */
+    private void refreshDataset() {
+        GallerySnapshot<T> primary = gallery.snapshot();
+        GallerySnapshot<T> verification = verifier == null ? null : verifier.gallery.snapshot();
+        if (observedPrimary == null || !observedPrimary.same(primary)
+                || (observedVerification == null ? verification != null : !observedVerification.same(verification))
+                || !snapshotsCurrent(primary, verification)) {
+            for (TrackState<T> state : states.values()) invalidate(state);
+            lastReported.clear();
+            observedPrimary = primary;
+            observedVerification = verification;
+            idle = false;
         }
     }
 
+    private void invalidate(TrackState<T> state) {
+        state.attemptId++;
+        state.token = null;
+        state.match = null;
+        state.verifyTask = null;
+        state.extracting = state.verifying = state.livenessPending = false;
+        state.fusedSum = null;
+        state.fusedCount = state.tries = state.failedRounds = 0;
+        state.recognition = Recognition.PENDING;
+        state.user = null;
+        state.score = Float.NaN;
+        state.liveness = Liveness.UNKNOWN;
+        state.livenessScore = Float.NaN;
+        state.votes.clear();
+        state.retryAt = state.livenessRetryAt = 0;
+        state.bestSharpness = 0;
+    }
+
     private void attemptFailed(TrackState<T> state, long now, Reason reason, float score) {
+        if (closed || states.get(state.id) != state) return;
+        state.attemptId++;
+        state.livenessPending = false;
         state.tries++;
         state.verifyTask = null;
         state.fusedSum = null;
@@ -623,7 +858,31 @@ public final class FaceSession<T> implements AutoCloseable {
         // A face that keeps failing gets its liveness re-checked too, as ArcSoft's demo does.
         state.liveness = Liveness.UNKNOWN;
         state.votes.clear();
-        listener.onRecognitionFailed(state.id, state.score, reason);
+        float bestScore = state.score;
+        notifications.add(() -> listener.onRecognitionFailed(state.id, bestScore, reason));
+    }
+
+    private void matchScored(long trackId, float score, float secondScore, int fusedFrames, Liveness liveness, Reason outcome) {
+        notifications.add(() -> listener.onMatchScored(trackId, score, secondScore, fusedFrames, liveness, outcome));
+    }
+
+    private void flushNotifications() {
+        // A direct executor is supported. Its caller will flush after releasing the outer lock.
+        if (Thread.holdsLock(lock)) return;
+        while (true) {
+            Runnable callback;
+            synchronized (lock) { callback = notifications.poll(); }
+            if (callback == null) return;
+            try { callback.run(); }
+            catch (RuntimeException | Error failure) {
+                // A throwing observer makes the run incomplete; never claim a successful drain.
+                tasks.revoke();
+                drainFailed = true;
+                closed = true;
+                synchronized (lock) { notifications.clear(); }
+                throw failure;
+            }
+        }
     }
 
     private void expireCooldowns(long now) {
@@ -646,21 +905,50 @@ public final class FaceSession<T> implements AutoCloseable {
         return out;
     }
 
-    /** Forgets all tracks, e.g. after switching cameras. Pending results are discarded. */
-    public void reset() {
+    /** Forgets observations; worker slots stay occupied until their actual completion. */
+    public void reset() { synchronized (lock) { resetLocked(); } }
+
+    private void resetLocked() {
+        generation++;
         tracker.reset();
-        synchronized (lock) {
-            states.clear();
+        states.clear();
+        notifications.clear();
+        idle = false;
+        hasAnalysed = false;
+        lastAnalysedAt = Long.MIN_VALUE;
+        // Never clear busy here: uninterruptible native work still owns its engine slot.
+    }
+
+    /**
+     * Stop input and wait for accepted frames, submitted work, cascade descendants and callbacks.
+     * Call off the UI/worker threads. False (timeout/interruption/self-wait) permanently revokes
+     * this session; it says nothing about whether an external engine is safe to release.
+     * True does not imply recognition: a missing liveness vote remains unresolved.
+     */
+    public boolean finish(long timeoutMs) {
+        if (timeoutMs < 0) throw new IllegalArgumentException("negative timeout");
+        inputStopped = true;
+        tasks.stopInput();
+        boolean complete = tasks.await(timeoutMs);
+        if (!complete) {
+            tasks.revoke();
+            drainFailed = true;
+            closed = true; // volatile revocation; do not block behind a native/capture/session lock
         }
+        return complete && !drainFailed;
     }
 
     @Override
     public void close() {
-        closed = true;
-        if (ownedWorker != null) ownedWorker.shutdownNow();
-        if (ownedLivenessWorker != null) ownedLivenessWorker.shutdownNow();
+        inputStopped = true;
+        tasks.revoke();
         synchronized (lock) {
-            states.clear();
+            if (!closeCleaned) { closed = true; resetLocked(); closeCleaned = true; }
+            inputStopped = true;
         }
+        // Queued wrappers must run their cancellation/finally path for reliable drain accounting.
+        // The session owns neither injected engines nor injected executors.
+        if (ownedWorker != null) ownedWorker.shutdown();
+        if (ownedLivenessWorker != null) ownedLivenessWorker.shutdown();
     }
 }
