@@ -18,6 +18,10 @@ struct OrtConfig {
      * liveness) and the feature worker share four big cores, and spinning threads starve each other.
      */
     bool spin = false;
+    /** NNAPI execution provider flags (NNAPI_FLAG_*), or -1 for CPU only. Needs fixed input shapes. */
+    int nnapi_flags = -1;
+    /** Optional diagnostic profiling file prefix; empty keeps normal inference unprofiled. */
+    std::string profile_prefix;
 };
 
 /** One model loaded from memory. Not thread safe: use one instance per thread. */
@@ -32,6 +36,8 @@ public:
     const std::vector<int64_t> &OutputShape(size_t index) const { return output_shapes_[index]; }
 
     bool UsingXnnpack() const { return xnnpack_; }
+    /** Flush a requested diagnostic trace; call only for a session created with profile_prefix. */
+    std::string EndProfiling();
 
 private:
     std::unique_ptr<Ort::Session> session_;

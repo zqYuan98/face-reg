@@ -1,5 +1,7 @@
 #include "ort_model.h"
 
+#include "../include/onnxruntime/nnapi_provider_factory.h"
+
 #include <fstream>
 #include <stdexcept>
 
@@ -16,6 +18,14 @@ NetSession::NetSession(const void *data, size_t size, const OrtConfig &config) {
     options.SetIntraOpNumThreads(config.threads);
     options.SetInterOpNumThreads(1);
     if (!config.spin) options.AddConfigEntry("session.intra_op.allow_spinning", "0");
+    if (!config.profile_prefix.empty()) {
+#ifdef _WIN32
+        std::wstring prefix(config.profile_prefix.begin(), config.profile_prefix.end());
+        options.EnableProfiling(prefix.c_str());
+#else
+        options.EnableProfiling(config.profile_prefix.c_str());
+#endif
+    }
     if (config.xnnpack) {
         try {
             // XNNPACK runs its own pool; ORT's pool then only handles the few unsupported nodes.
@@ -27,6 +37,10 @@ NetSession::NetSession(const void *data, size_t size, const OrtConfig &config) {
             xnnpack_ = false;  // provider not compiled into this ORT build
         }
     }
+#ifdef __ANDROID__
+    if (config.nnapi_flags >= 0)
+        Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_Nnapi(options, static_cast<uint32_t>(config.nnapi_flags)));
+#endif
     session_.reset(new Ort::Session(Environment(), data, size, options));
     Ort::AllocatorWithDefaultOptions allocator;
     input_name_ = session_->GetInputNameAllocated(0, allocator).get();
@@ -54,6 +68,12 @@ std::vector<std::vector<float>> NetSession::Run(const float *input, const std::v
         result[i].assign(values, values + info.GetElementCount());
     }
     return result;
+}
+
+std::string NetSession::EndProfiling() {
+    Ort::AllocatorWithDefaultOptions allocator;
+    auto path = session_->EndProfilingAllocated(allocator);
+    return path ? std::string(path.get()) : std::string();
 }
 
 std::vector<char> ReadFile(const std::string &path) {

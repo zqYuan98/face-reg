@@ -180,15 +180,24 @@ static int GoldenInsightFace(const std::string &det, const std::string &rec, con
 }
 
 // Median latency of one model on a random input of the given NCHW shape.
-static int BenchModel(const std::string &path, int n, int c, int h, int w, int iterations, int threads) {
+static int BenchModel(const std::string &path, int n, int c, int h, int w, int iterations, int threads, int nnapi,
+                      const std::string &profilePrefix) {
+    if (n <= 0 || c <= 0 || h <= 0 || w <= 0 || iterations < 1 || iterations > 10000 || threads < 1 || threads > 32)
+        throw std::invalid_argument("benchmodel requires positive dimensions, 1..10000 iterations and 1..32 threads");
+    if (nnapi < -1 || nnapi > 15 || (nnapi >= 0 && (nnapi & 4) != 0 && (nnapi & 8) != 0))
+        throw std::invalid_argument("invalid NNAPI flags: CPU_DISABLED and CPU_ONLY are mutually exclusive");
     OrtConfig config;
     config.threads = threads;
+    config.nnapi_flags = nnapi;
+    config.profile_prefix = profilePrefix;
     std::vector<char> bytes = ReadFile(path);
     if (bytes.empty()) throw std::runtime_error("cannot read " + path);
+    const double loadStarted = NowMs();
     NetSession model(bytes.data(), bytes.size(), config);
+    const double loadMs = NowMs() - loadStarted;
     std::vector<float> input(static_cast<size_t>(n) * c * h * w);
     for (size_t i = 0; i < input.size(); ++i) input[i] = static_cast<float>((i * 2654435761u) % 255) / 128.f - 1.f;
-    model.Run(input.data(), {n, c, h, w});
+    for (int warmup = 0; warmup < 5; ++warmup) model.Run(input.data(), {n, c, h, w});
     std::vector<double> ms;
     for (int i = 0; i < iterations; ++i) {
         double t = NowMs();
@@ -196,8 +205,12 @@ static int BenchModel(const std::string &path, int n, int c, int h, int w, int i
         ms.push_back(NowMs() - t);
     }
     std::sort(ms.begin(), ms.end());
-    std::printf("%s %dx%dx%dx%d threads=%d median %.2f ms p90 %.2f ms\n", path.c_str(), n, c, h, w, threads,
+    std::printf("%s %dx%dx%dx%d threads=%d nnapi_requested=%d load=%.2f ms warmup=5 iterations=%d median %.2f ms p90 %.2f ms\n",
+                path.c_str(), n, c, h, w, threads, nnapi, loadMs, iterations,
                 ms[ms.size() / 2], ms[ms.size() * 9 / 10]);
+    if (nnapi >= 0)
+        std::cout << "NNAPI requested only; this timing does not prove execution on a GPU/NPU (ORT CPU fallback may remain).\n";
+    if (!profilePrefix.empty()) std::cout << "diagnostic_profile=" << model.EndProfiling() << " (profiling affects latency)\n";
     return 0;
 }
 
@@ -324,7 +337,8 @@ int main(int argc, char **argv) {
             return GoldenInsightFace(argv[2], argv[3], argv[4], argv[5], argc > 6 ? std::atoi(argv[6]) : 4);
         if (argc >= 9 && std::string(argv[1]) == "benchmodel")
             return BenchModel(argv[2], std::atoi(argv[3]), std::atoi(argv[4]), std::atoi(argv[5]), std::atoi(argv[6]),
-                              std::atoi(argv[7]), std::atoi(argv[8]));
+                              std::atoi(argv[7]), std::atoi(argv[8]), argc > 9 ? std::atoi(argv[9]) : -1,
+                              argc > 10 ? argv[10] : "");
         if (argc >= 5 && std::string(argv[1]) == "golden")
             return Golden(argv[2], argv[3], argv[4],
                           argc <= 5 ? LandmarkMode::kTruncated : std::string(argv[5]) == "subpixel" ? LandmarkMode::kSubpixel
@@ -337,6 +351,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     std::cerr << "usage: face_engine_cli golden <model_dir> <list> <out> [exact|subpixel|tta] [threads]\n"
-                 "       face_engine_cli bench <model_dir> <image> <iterations> <threads> [xnnpack]\n";
+                 "       face_engine_cli bench <model_dir> <image> <iterations> <threads> [xnnpack]\n"
+                 "       face_engine_cli benchmodel <model> <n> <c> <h> <w> <iterations> <threads> [nnapi_flags=-1] [profile_prefix]\n";
     return 64;
 }
