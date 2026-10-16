@@ -155,7 +155,10 @@ public class UserServiceImpl implements UserService {
         try {
             List<Float> feature = extract(staged);
             featureJson(feature);
-            return search.search(feature,groupId);
+            User match = search.search(feature,groupId);
+            // A biometric template is not part of a search answer.
+            if (match != null) match.setFeatureData(null);
+            return match;
         } finally { photos.discard(staged); }
     }
 }

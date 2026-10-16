@@ -39,8 +39,17 @@ public class FaceFeatureExtractorClient implements AutoCloseable {
     private final long totalTimeoutNanos;
     private final int maxImageBytes;
     private final int maxResponseBytes;
+    private final long queueWaitNanos;
     private final ScheduledThreadPoolExecutor watchdog;
 
+    /** Refuses at once when all permits are taken. */
+    public FaceFeatureExtractorClient(String apiUrl, long connectTimeoutMs, long readTimeoutMs, long totalTimeoutMs,
+            int maxConcurrent, int maxImageBytes, int maxResponseBytes) {
+        this(apiUrl, connectTimeoutMs, readTimeoutMs, totalTimeoutMs, maxConcurrent, maxImageBytes, maxResponseBytes, 0);
+    }
+
+    /** {@code queueWaitMs}: how long a caller may wait for a permit before ALGORITHM_BUSY. */
+    @org.springframework.beans.factory.annotation.Autowired
     public FaceFeatureExtractorClient(
             @Value("${face.extractor.api.url:http://localhost:8000}") String apiUrl,
             @Value("${face.extractor.connect-timeout-ms:2000}") long connectTimeoutMs,
@@ -48,7 +57,9 @@ public class FaceFeatureExtractorClient implements AutoCloseable {
             @Value("${face.extractor.total-timeout-ms:15000}") long totalTimeoutMs,
             @Value("${face.extractor.max-concurrent:2}") int maxConcurrent,
             @Value("${face.extractor.max-image-bytes:10485760}") int maxImageBytes,
-            @Value("${face.extractor.max-response-bytes:131072}") int maxResponseBytes) {
+            @Value("${face.extractor.max-response-bytes:131072}") int maxResponseBytes,
+            @Value("${face.extractor.queue-wait-ms:3000}") long queueWaitMs) {
+        if (queueWaitMs < 0 || queueWaitMs > 60_000) throw new IllegalArgumentException("Invalid bounded extractor configuration");
         if (connectTimeoutMs < 1 || readTimeoutMs < 1 || totalTimeoutMs < 1 ||
                 connectTimeoutMs > 300_000 || readTimeoutMs > 300_000 || totalTimeoutMs > 300_000 ||
                 maxConcurrent < 1 || maxConcurrent > 32 || maxImageBytes < 1 || maxImageBytes > 20 * 1024 * 1024 ||
@@ -67,6 +78,7 @@ public class FaceFeatureExtractorClient implements AutoCloseable {
         totalTimeoutNanos = TimeUnit.MILLISECONDS.toNanos(totalTimeoutMs);
         this.maxImageBytes = maxImageBytes;
         this.maxResponseBytes = maxResponseBytes;
+        queueWaitNanos = TimeUnit.MILLISECONDS.toNanos(queueWaitMs);
         watchdog = new ScheduledThreadPoolExecutor(1, task -> {
             Thread thread = new Thread(task, "face-extractor-deadlines");
             thread.setDaemon(true);
@@ -102,7 +114,14 @@ public class FaceFeatureExtractorClient implements AutoCloseable {
     }
 
     private void acquire() {
-        if (!permits.tryAcquire()) {
+        boolean admitted;
+        try {
+            admitted = permits.tryAcquire(queueWaitNanos, TimeUnit.NANOSECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            admitted = false;
+        }
+        if (!admitted) {
             throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "ALGORITHM_BUSY", "特征提取繁忙，请稍后重试");
         }
     }

@@ -69,6 +69,37 @@ public class FaceUtils {
         return (float) (dot / Math.sqrt(norm));
     }
 
+    /** Scales {@code v} to unit length; false (v untouched) when it is empty, zero or not finite. */
+    public static boolean normalizeInPlace(float[] v) {
+        if (v == null || v.length == 0) return false;
+        double norm = 0;
+        for (float x : v) {
+            if (!Float.isFinite(x)) return false;
+            norm += (double) x * x;
+        }
+        if (!(norm > 0) || !Double.isFinite(norm)) return false;
+        float scale = (float) (1.0 / Math.sqrt(norm));
+        for (int i = 0; i < v.length; i++) v[i] *= scale;
+        return true;
+    }
+
+    /**
+     * Dot product of {@code probe} with the row of {@code matrix} starting at {@code offset}. Four
+     * independent accumulators let the JIT keep several multiply-adds in flight.
+     */
+    public static float dot(float[] probe, float[] matrix, int offset) {
+        int n = probe.length, i = 0;
+        float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+        for (; i + 3 < n; i += 4) {
+            s0 += probe[i] * matrix[offset + i];
+            s1 += probe[i + 1] * matrix[offset + i + 1];
+            s2 += probe[i + 2] * matrix[offset + i + 2];
+            s3 += probe[i + 3] * matrix[offset + i + 3];
+        }
+        for (; i < n; i++) s0 += probe[i] * matrix[offset + i];
+        return (s0 + s1) + (s2 + s3);
+    }
+
     /**
      * 解析特征数据字符串
      *

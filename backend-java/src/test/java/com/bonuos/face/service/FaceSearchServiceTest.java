@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
+import static org.mockito.ArgumentMatchers.*;
 
 class FaceSearchServiceTest {
     private User row(long id,String feature) { User u=new User(); u.setId(id); u.setFeatureData(feature); u.setGroupId(1L); u.setStatus(1); return u; }
@@ -46,6 +47,36 @@ class FaceSearchServiceTest {
         when(chunks.nextChunk(1,0,10)).thenReturn(List.of(row(1,"[1,0,0]"),row(2,"not json"),row(3,"[0,0]"),row(4,"[\"a\",1]"),row(5,"[0.6,0.8]")));
         when(users.selectById(5L)).thenReturn(row(5,"[0.6,0.8]"));
         assertEquals(5L,new FaceSearchService(chunks,users,1,10,1000).search(List.of(0f,1f),1).getId());
+    }
+    @Test void closeRunnerUpIsAmbiguousWhenMarginIsSet() {
+        FaceSearchMapper chunks=mock(FaceSearchMapper.class); UserMapper users=mock(UserMapper.class);
+        when(chunks.nextChunk(1,0,10)).thenReturn(List.of(row(1,"[0.8,0.6]"),row(2,"[0.79,0.613]")));
+        when(users.selectById(1L)).thenReturn(row(1,"[0.8,0.6]"));
+        assertEquals(1L,new FaceSearchService(chunks,users,null,1,10,1000,0.6f,0f).search(List.of(1f,0f),1).getId());
+        assertEquals("AMBIGUOUS_MATCH",assertThrows(ApiException.class,
+                ()->new FaceSearchService(chunks,users,null,1,10,1000,0.6f,0.05f).search(List.of(1f,0f),1)).getErrorCode());
+    }
+    @Test void cachedGroupIsSearchedWithoutReadingRows() {
+        FaceSearchMapper chunks=mock(FaceSearchMapper.class); UserMapper users=mock(UserMapper.class);
+        FaceGallery gallery=mock(FaceGallery.class);
+        com.bonuos.face.dto.RevisionClock clock=new com.bonuos.face.dto.RevisionClock(); clock.setEpoch("e"); clock.setHead(4);
+        when(chunks.clock()).thenReturn(clock); when(chunks.revision()).thenReturn("e:4");
+        when(gallery.search(eq(1L),eq(clock),any())).thenReturn(new FaceGallery.Top2(7L,3L,0.9f,0.2f));
+        User winner=row(7,"[1,0]"); winner.setSyncVersion(3L);
+        when(users.selectById(7L)).thenReturn(winner);
+        assertEquals(7L,new FaceSearchService(chunks,users,gallery,1,10,1000,0.6f,0f).search(List.of(1f,0f),1).getId());
+        verify(chunks,never()).nextChunk(anyLong(),anyLong(),anyInt());
+    }
+    @Test void staleCachedWinnerIsAConflict() {
+        FaceSearchMapper chunks=mock(FaceSearchMapper.class); UserMapper users=mock(UserMapper.class);
+        FaceGallery gallery=mock(FaceGallery.class);
+        com.bonuos.face.dto.RevisionClock clock=new com.bonuos.face.dto.RevisionClock(); clock.setEpoch("e"); clock.setHead(4);
+        when(chunks.clock()).thenReturn(clock); when(chunks.revision()).thenReturn("e:4");
+        when(gallery.search(eq(1L),eq(clock),any())).thenReturn(new FaceGallery.Top2(7L,3L,0.9f,0.2f));
+        User winner=row(7,"[1,0]"); winner.setSyncVersion(5L);
+        when(users.selectById(7L)).thenReturn(winner);
+        assertEquals("SEARCH_CHANGED",assertThrows(ApiException.class,
+                ()->new FaceSearchService(chunks,users,gallery,1,10,1000,0.6f,0f).search(List.of(1f,0f),1)).getErrorCode());
     }
     @Test void parserMatchesJacksonOnLargeVectors() throws Exception {
         float[] values=new float[1024]; java.util.Random r=new java.util.Random(7);

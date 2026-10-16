@@ -55,6 +55,33 @@ class FaceFeatureExtractorClientTest {
         assertThat(client(1000, 2000, 32768).extractFeature(IMAGE)).hasSize(1024).containsOnly(0.03125f);
     }
 
+    @Test void queuedCallerRunsWhenThePermitFrees() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        server.createContext("/api/extract_feature", exchange -> {
+            if (calls.incrementAndGet() == 1) {
+                entered.countDown();
+                try { release.await(3, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            }
+            reply(exchange, 200, VALID);
+        });
+        var client = new FaceFeatureExtractorClient("http://127.0.0.1:" + server.getAddress().getPort(),
+                500, 2000, 3000, 1, 1024, 32768, 2000);
+        clients.add(client);
+        ExecutorService caller = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> first = caller.submit(() -> { try { return client.extractFeature(IMAGE); } catch (IOException e) { throw new RuntimeException(e); } });
+            assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
+            Future<java.util.List<Float>> second = caller.submit(() -> client.extractFeature(IMAGE));
+            Thread.sleep(100);
+            assertThat(second.isDone()).isFalse();
+            release.countDown();
+            first.get(3, TimeUnit.SECONDS);
+            assertThat(second.get(3, TimeUnit.SECONDS)).hasSize(1024);
+        } finally { release.countDown(); caller.shutdownNow(); }
+    }
+
     @Test void rejectsBusyImmediatelyAndReleasesAfterCompletion() throws Exception {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
