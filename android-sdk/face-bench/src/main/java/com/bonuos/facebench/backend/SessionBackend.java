@@ -45,6 +45,36 @@ public final class SessionBackend implements FaceBackend {
     private final List<Gallery.Entry<String>> enrolled = new ArrayList<>();
     /** Analysis-thread time per frame, split by step (reset each frame). */
     private double detectMs, livenessCaptureMs, featureCaptureMs;
+    private long featureCaptureCount, preparedBytes, unknownPreparedCaptures;
+
+    private final class TimedFeatures implements FaceSession.FeatureEngine {
+        private final NativeFeatureEngine delegate;
+        TimedFeatures(NativeFeatureEngine delegate) { this.delegate = delegate; }
+        @Override public java.util.concurrent.Callable<float[]> capture(CameraFrame frame, FaceRect face,
+                                                                       float[] keypoints, FaceRect crop) {
+            long t = SystemClock.elapsedRealtimeNanos();
+            try {
+                FaceSession.CapturedFeatures capture = delegate.capturePair(frame, face, keypoints, crop, null);
+                featureCaptureCount += capture.captureCount;
+                if (capture.preparedBytes >= 0) preparedBytes += capture.preparedBytes;
+                else unknownPreparedCaptures += capture.captureCount;
+                return capture.primary;
+            }
+            finally { featureCaptureMs += (SystemClock.elapsedRealtimeNanos() - t) / 1e6; }
+        }
+        @Override public FaceSession.CapturedFeatures capturePair(CameraFrame frame, FaceRect face,
+                float[] keypoints, FaceRect crop, FaceSession.FeatureEngine verifier) {
+            long t = SystemClock.elapsedRealtimeNanos();
+            try {
+                FaceSession.FeatureEngine target = verifier instanceof TimedFeatures ? ((TimedFeatures) verifier).delegate : verifier;
+                FaceSession.CapturedFeatures pair = delegate.capturePair(frame, face, keypoints, crop, target);
+                featureCaptureCount += pair.captureCount;
+                if (pair.preparedBytes >= 0) preparedBytes += pair.preparedBytes;
+                else unknownPreparedCaptures += pair.captureCount;
+                return pair;
+            } finally { featureCaptureMs += (SystemClock.elapsedRealtimeNanos() - t) / 1e6; }
+        }
+    }
 
     /** ScrfdEngines with timing; keeps both liveness interfaces so FaceSession still runs liveness async. */
     private final class Timed implements FaceSession.Detector, FaceSession.LivenessScorer, FaceSession.LivenessEngine {
@@ -62,7 +92,21 @@ public final class SessionBackend implements FaceBackend {
         @Override public java.util.concurrent.Callable<Float> captureLiveness(CameraFrame frame, FaceRect face) {
             long t = SystemClock.elapsedRealtimeNanos();
             try {
-                return frames.captureLiveness(frame, face);
+                final java.util.concurrent.Callable<Float> task = frames.captureLiveness(frame, face);
+                final long capturedEpoch = epoch;
+                return () -> {
+                    try {
+                        Float score = task.call();
+                        if (score == null || Float.isNaN(score) || Float.isInfinite(score))
+                            events.add(capturedEpoch, -1, -1, "error", "", elapsed(), Double.NaN,
+                                    FrameOutcome.LIVE_ERROR, "liveness worker returned non-finite score");
+                        return score;
+                    } catch (Exception error) {
+                        events.add(capturedEpoch, -1, -1, "error", "", elapsed(), Double.NaN,
+                                FrameOutcome.LIVE_ERROR, "liveness worker: " + error);
+                        throw error;
+                    }
+                };
             } finally {
                 livenessCaptureMs += (SystemClock.elapsedRealtimeNanos() - t) / 1e6;
             }
@@ -73,12 +117,9 @@ public final class SessionBackend implements FaceBackend {
     private Gallery<String> gallery = Gallery.empty();
     private FaceSession<String> session;
     private List<FaceSession.FaceState<String>> faces = new ArrayList<>();
-    /** Recognition now fires on a worker thread at the moment of decision. */
-    private final List<FaceSession.RecognitionEvent<String>> events = java.util.Collections.synchronizedList(new ArrayList<>());
-    private final List<Long> eventWallMs = java.util.Collections.synchronizedList(new ArrayList<>());
-    private long clipStartMs, wallStartMs;
-    private boolean started;
-    private int reported;
+    private final BackendEvents events = new BackendEvents(4096);
+    private long clipStartMs, wallStartMs, epoch, reported;
+    private boolean started, failed, finished = true;
 
     public SessionBackend(Context context, String name, String recognizerAsset) {
         this(context, name, recognizerAsset, null);
@@ -86,6 +127,13 @@ public final class SessionBackend implements FaceBackend {
 
     /** {@code verifierAsset} non-null: cascade, {@code recognizerAsset} first, the verifier for borderline scores. */
     public SessionBackend(Context context, String name, String recognizerAsset, String verifierAsset) {
+        this(context, name, recognizerAsset, verifierAsset, "baseline");
+    }
+
+    public SessionBackend(Context context, String name, String recognizerAsset, String verifierAsset, String variant) {
+        if (!"baseline".equals(variant) && !"shared_capture".equals(variant))
+            throw new IllegalArgumentException("Unknown variant " + variant);
+        config.shareFeatureCapture = "shared_capture".equals(variant);
         this.name = name;
         this.recognizer = recognizerAsset;
         boolean r50 = !NativeEngine.INSIGHTFACE_MBF.equals(recognizerAsset);
@@ -141,42 +189,47 @@ public final class SessionBackend implements FaceBackend {
     }
 
     @Override public void beginClip(int sensorRotationDegrees) {
+        if (failed || !finished) throw new IllegalStateException("Previous clip not safely finished");
         if (session != null) session.close();
         frames.reset();
-        events.clear();
-        eventWallMs.clear();
+        final long callbackEpoch = epoch = events.begin();
+        finished = false;
         faces = new ArrayList<>();
         started = false;
         reported = 0;
+        featureCaptureCount = preparedBytes = unknownPreparedCaptures = 0;
         final Gallery<String> clipGallery = gallery;
         final NativeFeatureEngine features = new NativeFeatureEngine(engine, NativeEngine.LandmarkMode.SUBPIXEL, config.maxYaw, config.maxPitch);
         session = new FaceSession<>(clipConfig, timed, timed,
-                (frame, face, keypoints, crop) -> {
-                    long t = SystemClock.elapsedRealtimeNanos();
-                    try {
-                        return features.capture(frame, face, keypoints, crop);
-                    } finally {
-                        featureCaptureMs += (SystemClock.elapsedRealtimeNanos() - t) / 1e6;
-                    }
-                },
+                new TimedFeatures(features),
                 () -> clipGallery, new FaceSession.Listener<String>() {
                     @Override public void onFaces(List<FaceSession.FaceState<String>> states, CameraFrame frame) { faces = states; }
                     @Override public void onRecognized(FaceSession.RecognitionEvent<String> event) {
-                        eventWallMs.add(SystemClock.elapsedRealtime() - wallStartMs);
-                        events.add(event);
+                        events.add(callbackEpoch, event.trackId, event.frameId, "recognized", event.user,
+                                elapsed(), event.score, FrameOutcome.LIVE_ALIVE, "");
                     }
-                    @Override public void onRecognitionFailed(long trackId, float bestScore, FaceSession.Reason reason) { }
+                    @Override public void onRecognitionFailed(long trackId, float bestScore, FaceSession.Reason reason) {
+                        events.add(callbackEpoch, trackId, -1, reason == FaceSession.Reason.FEATURE_ERROR ? "error" : "recognition_failed", "", elapsed(), bestScore,
+                                FrameOutcome.LIVE_UNKNOWN, reason.name());
+                    }
+                    @Override public void onLiveness(long trackId, float score, FaceSession.Liveness verdict) {
+                        events.add(callbackEpoch, trackId, -1, "liveness", "", elapsed(), score,
+                                verdict == FaceSession.Liveness.ALIVE ? FrameOutcome.LIVE_ALIVE
+                                        : verdict == FaceSession.Liveness.NOT_ALIVE ? FrameOutcome.LIVE_NOT_ALIVE
+                                        : FrameOutcome.LIVE_UNKNOWN, "");
+                    }
                 }, null); // private worker thread, as in the app
         if (verifyEngine != null) {
             final Gallery<String> clipSlowGallery = slowGallery;
             session.withVerifier(new FaceSession.Verifier<>(
-                    new NativeFeatureEngine(verifyEngine, NativeEngine.LandmarkMode.SUBPIXEL, config.maxYaw, config.maxPitch),
+                    new TimedFeatures(new NativeFeatureEngine(verifyEngine, NativeEngine.LandmarkMode.SUBPIXEL, config.maxYaw, config.maxPitch)),
                     () -> clipSlowGallery, CASCADE_ACCEPT, CASCADE_REJECT, CASCADE_THRESHOLD));
         }
     }
 
     @Override
     public FrameOutcome process(ClipFile.Frame frame, boolean runLiveness, boolean runFeature) {
+        if (failed || finished) throw new IllegalStateException("Clip not accepting frames");
         FrameOutcome outcome = new FrameOutcome();
         long timestampMs = frame.timestampNs / 1_000_000L;
         if (!started) {
@@ -219,11 +272,11 @@ public final class SessionBackend implements FaceBackend {
                     : main.liveness == FaceSession.Liveness.NOT_ALIVE ? FrameOutcome.LIVE_NOT_ALIVE : FrameOutcome.LIVE_UNKNOWN;
             outcome.note = "state:" + main.recognition + ":" + main.reason;
         }
-        if (events.size() > reported) {
-            // Decided on a worker thread since the previous frame; report it with its own time.
-            FaceSession.RecognitionEvent<String> e = events.get(reported);
-            outcome.note = String.format(java.util.Locale.ROOT, "recognized:%s:%.4f:%d", e.user, e.score, eventWallMs.get(reported));
-            reported++;
+        BackendEvent event = events.recognitionAfter(reported);
+        if (event != null) {
+            outcome.note = String.format(java.util.Locale.ROOT, "recognized:%s:%.4f:%d",
+                    event.actualIdentity, event.score, event.elapsedMs);
+            reported = event.sequence;
         }
         return outcome;
     }
@@ -240,7 +293,48 @@ public final class SessionBackend implements FaceBackend {
         return Gallery.cosine((float[]) probe, (float[]) reference);
     }
 
+    private long elapsed() { return started ? SystemClock.elapsedRealtime() - wallStartMs : 0; }
+
+    @Override public List<BackendEvent> drainEvents() { return events.drain(); }
+    @Override public long eventOverflowCount() { return events.overflow(); }
+    @Override public long clipEpoch() { return epoch; }
+    @Override public Object effectiveConfig() {
+        java.util.Map<String, Object> settings = new java.util.LinkedHashMap<>();
+        settings.put("session", clipConfig.clone());
+        settings.put("recognizer", recognizer);
+        settings.put("cascade", verifyEngine != null);
+        settings.put("cascadeAccept", CASCADE_ACCEPT);
+        settings.put("cascadeReject", CASCADE_REJECT);
+        settings.put("cascadeThreshold", CASCADE_THRESHOLD);
+        settings.put("frameIntervalMs", frameIntervalMs);
+        settings.put("detectorLongSide", 320);
+        settings.put("detectorThreshold", 0.5f);
+        settings.put("fullScanEvery", ScrfdEngines.FULL_SCAN_EVERY);
+        settings.put("regionLongSide", ScrfdEngines.REGION_LONG_SIDE);
+        settings.put("livenessHistory", "valid_vote_completions");
+        return settings;
+    }
+
+    @Override public Object clipMetrics() {
+        java.util.Map<String, Object> metrics = new java.util.LinkedHashMap<>();
+        metrics.put("featureCaptureCount", featureCaptureCount);
+        metrics.put("knownPreparedBytes", preparedBytes);
+        metrics.put("unknownPreparedCaptures", unknownPreparedCaptures);
+        return metrics;
+    }
+
+    @Override public boolean finishClip(long timeoutMs) {
+        if (failed) return false;
+        if (finished) return true;
+        boolean ok = session == null || session.finish(timeoutMs);
+        finished = true;
+        failed = !ok;
+        return ok;
+    }
+
     @Override public void close() {
+        // Timed-out native tasks retain their handles. Quarantine rather than free or reuse.
+        if (failed || (!finished && !finishClip(2000))) return;
         if (session != null) session.close();
         if (verifyEngine != null) verifyEngine.close();
         engine.close();

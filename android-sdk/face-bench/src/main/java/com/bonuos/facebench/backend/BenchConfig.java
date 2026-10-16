@@ -17,7 +17,16 @@ public final class BenchConfig {
     /** Use ArcSoft's ID_CARD comparison model when the references are ID-card chip photos. */
     public boolean arcSoftIdCardModel = false;
 
+    /** Same bounded tail grace for every backend; no new observations during this interval. */
+    public long finishTimeoutMs = 2000;
+    /** Performance candidate only; safety and all decision thresholds are identical. */
+    public String evaluationVariant = "baseline";
+
     public void validate() {
+        if (finishTimeoutMs < 0 || finishTimeoutMs > 30000) throw new IllegalArgumentException("finish timeout must be 0..30000 ms");
+        if (!"baseline".equals(evaluationVariant) && !"shared_capture".equals(evaluationVariant))
+            throw new IllegalArgumentException("Unknown evaluationVariant " + evaluationVariant);
+        if (new java.util.HashSet<>(backends).size() != backends.size()) throw new IllegalArgumentException("Duplicate backends");
         if (backends.isEmpty()) throw new IllegalArgumentException("Select at least one backend");
         if (featureEveryNth < 1 || featureEveryNth > 100) throw new IllegalArgumentException("featureEveryNth must be 1..100");
         if (warmupFramesPerClip < 0 || warmupFramesPerClip > 30) throw new IllegalArgumentException("warmup must be 0..30");

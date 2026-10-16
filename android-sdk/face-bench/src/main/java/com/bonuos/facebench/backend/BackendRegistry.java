@@ -59,10 +59,10 @@ public final class BackendRegistry {
             case ENGINE_NATIVE_INT8: return new NativeEngineBackend(context, true);
             case INSIGHTFACE_R50: return new InsightFaceBackend(context, INSIGHTFACE_R50, NativeEngine.INSIGHTFACE_R50_INT8);
             case INSIGHTFACE_MBF: return new InsightFaceBackend(context, INSIGHTFACE_MBF, NativeEngine.INSIGHTFACE_MBF);
-            case SESSION_R50: return new SessionBackend(context, SESSION_R50, NativeEngine.INSIGHTFACE_R50_INT8);
-            case SESSION_MBF: return new SessionBackend(context, SESSION_MBF, NativeEngine.INSIGHTFACE_MBF);
+            case SESSION_R50: return new SessionBackend(context, SESSION_R50, NativeEngine.INSIGHTFACE_R50_INT8, null, config.evaluationVariant);
+            case SESSION_MBF: return new SessionBackend(context, SESSION_MBF, NativeEngine.INSIGHTFACE_MBF, null, config.evaluationVariant);
             case SESSION_CASCADE:
-                return new SessionBackend(context, SESSION_CASCADE, NativeEngine.INSIGHTFACE_MBF, NativeEngine.INSIGHTFACE_R50_INT8);
+                return new SessionBackend(context, SESSION_CASCADE, NativeEngine.INSIGHTFACE_MBF, NativeEngine.INSIGHTFACE_R50_INT8, config.evaluationVariant);
             case ARCSOFT:
                 requireArcSoft();
                 return (FaceBackend) unwrap(() -> Class.forName(ARCSOFT_CLASS)

@@ -10,11 +10,15 @@ import com.arcsoft.face.FaceFeature;
 import com.arcsoft.face.FaceInfo;
 import com.arcsoft.face.FaceSimilar;
 import com.arcsoft.face.LivenessInfo;
+import com.arcsoft.face.VersionInfo;
 import com.arcsoft.face.enums.CompareModel;
 import com.arcsoft.face.enums.DetectFaceOrientPriority;
 import com.arcsoft.face.enums.DetectMode;
 import com.arcsoft.face.util.ImageUtils;
 import com.bonuos.facebench.backend.FaceBackend;
+import com.bonuos.facebench.backend.BackendEvent;
+import com.bonuos.facebench.backend.BackendEvents;
+import com.bonuos.facebench.backend.WorkerDrain;
 import com.bonuos.facebench.backend.FrameOutcome;
 import com.bonuos.facebench.clip.ClipFile;
 import java.util.ArrayList;
@@ -59,6 +63,8 @@ public final class ArcSoftSessionBackend implements FaceBackend {
 
     private final class Track {
         final int id;
+        final long epoch;
+        long frameId;
         final ArrayList<float[]> centers = new ArrayList<>();
         Live live = Live.UNKNOWN;
         Rec rec = Rec.TO_RETRY;
@@ -66,7 +72,7 @@ public final class ArcSoftSessionBackend implements FaceBackend {
         float score = Float.NaN;
         String user;
 
-        Track(int id) { this.id = id; }
+        Track(int id) { this.id = id; this.epoch = clipEpoch; }
     }
 
     private final Context context;
@@ -81,11 +87,16 @@ public final class ArcSoftSessionBackend implements FaceBackend {
     private int stableFrames = 5;
     private boolean started;
     private volatile boolean clipOpen;
-    private volatile String recognizedNote;
+    private final BackendEvents events = new BackendEvents(4096);
+    private long clipEpoch, reported;
+    private boolean accepting, finished = true, failed, livenessExhausted;
+    private String version = "unknown";
 
     public ArcSoftSessionBackend(Context context, boolean idCardModel) {
         this.context = context.getApplicationContext();
         this.compareModel = idCardModel ? CompareModel.ID_CARD : CompareModel.LIFE_PHOTO;
+        VersionInfo info = new VersionInfo();
+        if (FaceEngine.getVersion(info) == ErrorInfo.MOK) version = info.getVersion();
         check(fr.init(this.context, DetectMode.ASF_DETECT_MODE_IMAGE, DetectFaceOrientPriority.ASF_OP_0_ONLY,
                 MAX_FACES, FaceEngine.ASF_FACE_RECOGNITION), "fr engine init");
         check(fl.init(this.context, DetectMode.ASF_DETECT_MODE_IMAGE, DetectFaceOrientPriority.ASF_OP_0_ONLY,
@@ -107,7 +118,7 @@ public final class ArcSoftSessionBackend implements FaceBackend {
     @Override public String name() { return "session_arcsoft"; }
 
     @Override public String describe() {
-        return "ArcSoft demo flow replayed in real time: VIDEO tracking, move filter " + stableFrames
+        return "ArcSoft " + version + " demo flow replayed in real time: VIDEO tracking, move filter " + stableFrames
                 + " frames, parallel FR/FL single-thread pools (queue " + MAX_FACES + "), FR waits for ALIVE, "
                 + "liveness " + LIVENESS_THRESHOLD + " single frame, compare " + compareModel + " > " + SIMILAR_THRESHOLD;
     }
@@ -118,7 +129,9 @@ public final class ArcSoftSessionBackend implements FaceBackend {
     }
 
     @Override public void beginClip(int sensorRotationDegrees) {
-        endClip();
+        if (failed || !finished) throw new IllegalStateException("Previous clip not safely finished");
+        if (tracker != null) { tracker.unInit(); tracker = null; }
+        clipEpoch = events.begin();
         tracker = new FaceEngine(); // fresh VIDEO engine: faceIds never carry across clips
         check(tracker.init(context, DetectMode.ASF_DETECT_MODE_VIDEO, DetectFaceOrientPriority.ASF_OP_0_ONLY,
                 MAX_FACES, FaceEngine.ASF_FACE_DETECT), "tracking engine init");
@@ -126,31 +139,61 @@ public final class ArcSoftSessionBackend implements FaceBackend {
         flPool = pool("arc-fl");
         synchronized (lock) { tracks.clear(); }
         started = false;
-        recognizedNote = null;
-        clipOpen = true;
+        reported = 0;
+        livenessExhausted = false;
+        finished = false;
+        accepting = clipOpen = true;
     }
 
-    private void endClip() {
-        clipOpen = false;
-        synchronized (lock) { lock.notifyAll(); }
-        for (ThreadPoolExecutor p : new ThreadPoolExecutor[]{frPool, flPool}) {
-            if (p == null) continue;
-            p.shutdownNow();
-            try {
-                p.awaitTermination(5, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+    @Override public boolean finishClip(long timeoutMs) {
+        if (failed) return false;
+        if (finished) return true;
+        accepting = false;
+        boolean ok = WorkerDrain.finish(flPool, frPool, timeoutMs, () -> {
+            synchronized (lock) { livenessExhausted = true; lock.notifyAll(); }
+        });
+        synchronized (lock) {
+            clipOpen = false;
+            finished = true;
+            failed = !ok;
+            lock.notifyAll();
         }
-        frPool = flPool = null;
-        if (tracker != null) {
-            tracker.unInit();
-            tracker = null;
+        if (!ok) {
+            // Native calls may ignore interrupts. Never reuse/free those handles afterwards.
+            if (frPool != null) frPool.shutdownNow();
+            if (flPool != null) flPool.shutdownNow();
         }
+        return ok;
+    }
+
+    private boolean current(Track t) { return clipOpen && t.epoch == clipEpoch && tracks.get(t.id) == t; }
+    private long elapsed() { return started ? SystemClock.elapsedRealtime() - wallStartMs : 0; }
+    private void event(Track t, long frameId, String kind, String identity, float score, int live, String error) {
+        events.add(t.epoch, t.id, frameId, kind, identity, elapsed(), score, live, error);
+    }
+    @Override public List<BackendEvent> drainEvents() { return events.drain(); }
+    @Override public long eventOverflowCount() { return events.overflow(); }
+    @Override public long clipEpoch() { return clipEpoch; }
+    @Override public Object effectiveConfig() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("sdkVersion", version);
+        result.put("compareModel", compareModel.name());
+        result.put("similarThreshold", SIMILAR_THRESHOLD);
+        result.put("livenessThreshold", LIVENESS_THRESHOLD);
+        result.put("livenessRequired", 1);
+        result.put("stableFrames", stableFrames);
+        result.put("frameIntervalMs", frameIntervalMs);
+        result.put("maxFaces", MAX_FACES);
+        result.put("minFace", MIN_FACE);
+        result.put("moveLimitRatio", MOVE_LIMIT_RATIO);
+        result.put("extractRetryCount", EXTRACT_RETRY_COUNT);
+        result.put("parallelFrFl", true);
+        return result;
     }
 
     @Override
     public FrameOutcome process(ClipFile.Frame frame, boolean runLiveness, boolean runFeature) {
+        if (!accepting || failed) throw new IllegalStateException("Clip not accepting frames");
         FrameOutcome outcome = new FrameOutcome();
         long ts = frame.timestampNs / 1_000_000L;
         if (!started) {
@@ -167,6 +210,7 @@ public final class ArcSoftSessionBackend implements FaceBackend {
         long t0 = SystemClock.elapsedRealtimeNanos();
         List<FaceInfo> faces = new ArrayList<>();
         int code = tracker.detectFaces(frame.nv21, frame.width, frame.height, FaceEngine.CP_PAF_NV21, faces);
+        check(code, "tracking");
         FaceInfo main = null;
         synchronized (lock) {
             List<Integer> seen = new ArrayList<>();
@@ -175,6 +219,7 @@ public final class ArcSoftSessionBackend implements FaceBackend {
                     seen.add(face.getFaceId());
                     Track t = tracks.get(face.getFaceId());
                     if (t == null) tracks.put(face.getFaceId(), t = new Track(face.getFaceId()));
+                    t.frameId = frame.index;
                     Rect r = face.getRect();
                     t.centers.add(new float[]{r.exactCenterX(), r.exactCenterY(), r.width()});
                     while (t.centers.size() > stableFrames) t.centers.remove(0);
@@ -185,6 +230,7 @@ public final class ArcSoftSessionBackend implements FaceBackend {
                 }
             }
             for (Iterator<Integer> it = tracks.keySet().iterator(); it.hasNext(); ) if (!seen.contains(it.next())) it.remove();
+            lock.notifyAll(); // Wake FR for departed/replaced tracks.
             outcome.faceCount = faces.size();
             if (main != null) {
                 Rect r = main.getRect();
@@ -198,10 +244,11 @@ public final class ArcSoftSessionBackend implements FaceBackend {
             }
         }
         outcome.detectMs = (SystemClock.elapsedRealtimeNanos() - t0) / 1e6;
-        String recognized = recognizedNote;
+        BackendEvent recognized = events.recognitionAfter(reported);
         if (recognized != null) {
-            outcome.note = recognized;
-            recognizedNote = null;
+            outcome.note = String.format(java.util.Locale.ROOT, "recognized:%s:%.4f:%d",
+                    recognized.actualIdentity, recognized.score, recognized.elapsedMs);
+            reported = recognized.sequence;
         }
         return outcome;
     }
@@ -222,8 +269,9 @@ public final class ArcSoftSessionBackend implements FaceBackend {
         final int w = frame.width, h = frame.height;
         t.rec = Rec.SEARCHING;
         try {
-            frPool.execute(() -> recognize(t, nv21, w, h, info));
+            frPool.execute(() -> recognize(t, frame.index, nv21, w, h, info));
         } catch (RejectedExecutionException busy) {
+            event(t, frame.index, "error", "", Float.NaN, FrameOutcome.LIVE_ERROR, "FR queue rejected");
             failFr(t); // ERROR_BUSY path of the demo
         }
     }
@@ -234,68 +282,79 @@ public final class ArcSoftSessionBackend implements FaceBackend {
         final int w = frame.width, h = frame.height;
         t.live = Live.ANALYZING;
         try {
-            flPool.execute(() -> liveness(t, nv21, w, h, info));
+            flPool.execute(() -> liveness(t, frame.index, nv21, w, h, info));
         } catch (RejectedExecutionException busy) {
-            t.live = Live.UNKNOWN;
+            if (current(t)) {
+                t.live = Live.UNKNOWN;
+                event(t, frame.index, "error", "", Float.NaN, FrameOutcome.LIVE_ERROR, "FL queue rejected");
+            }
         }
     }
 
-    private void liveness(Track t, byte[] nv21, int w, int h, FaceInfo info) {
+    private void liveness(Track t, long frameId, byte[] nv21, int w, int h, FaceInfo info) {
+        synchronized (lock) { if (!current(t)) return; }
         Live verdict = Live.UNKNOWN;
-        if (fl.process(nv21, w, h, FaceEngine.CP_PAF_NV21, Collections.singletonList(info), FaceEngine.ASF_LIVENESS) == ErrorInfo.MOK) {
+        String error = "";
+        try {
+            check(fl.process(nv21, w, h, FaceEngine.CP_PAF_NV21, Collections.singletonList(info), FaceEngine.ASF_LIVENESS), "FL process");
             List<LivenessInfo> result = new ArrayList<>();
-            if (fl.getLiveness(result) == ErrorInfo.MOK && !result.isEmpty()) {
-                int v = result.get(0).getLiveness();
-                verdict = v == LivenessInfo.ALIVE ? Live.ALIVE : v == LivenessInfo.NOT_ALIVE ? Live.NOT_ALIVE : Live.UNKNOWN;
-            }
-        }
+            check(fl.getLiveness(result), "FL result");
+            if (result.isEmpty()) throw new IllegalStateException("Empty FL result");
+            int v = result.get(0).getLiveness();
+            verdict = v == LivenessInfo.ALIVE ? Live.ALIVE : v == LivenessInfo.NOT_ALIVE ? Live.NOT_ALIVE : Live.UNKNOWN;
+        } catch (Exception e) { error = e.toString(); }
         synchronized (lock) {
-            t.live = verdict; // NOT_ALIVE / UNKNOWN are resubmitted on the next frame (retry interval 0)
+            if (!current(t)) return;
+            t.live = verdict;
+            event(t, frameId, error.isEmpty() ? "liveness" : "error", "", Float.NaN,
+                    verdict == Live.ALIVE ? FrameOutcome.LIVE_ALIVE : verdict == Live.NOT_ALIVE
+                            ? FrameOutcome.LIVE_NOT_ALIVE : FrameOutcome.LIVE_UNKNOWN, error);
             lock.notifyAll();
         }
     }
 
-    private void recognize(Track t, byte[] nv21, int w, int h, FaceInfo info) {
-        FaceFeature feature = new FaceFeature();
-        if (ArcSoftBackend.extract(fr, nv21, w, h, FaceEngine.CP_PAF_NV21, info, false, feature) != ErrorInfo.MOK) {
-            synchronized (lock) { failFr(t); }
-            return;
-        }
-        synchronized (lock) { // the demo's waitLock: identity only after liveness says ALIVE
-            while (clipOpen && t.live != Live.ALIVE && tracks.get(t.id) == t) {
-                try {
-                    lock.wait(20);
-                } catch (InterruptedException e) {
-                    return;
-                }
+    private void recognize(Track t, long frameId, byte[] nv21, int w, int h, FaceInfo info) {
+        synchronized (lock) { if (!current(t)) return; }
+        try {
+            FaceFeature feature = new FaceFeature();
+            check(ArcSoftBackend.extract(fr, nv21, w, h, FaceEngine.CP_PAF_NV21, info, false, feature), "FR extraction");
+            synchronized (lock) {
+                while (current(t) && t.live != Live.ALIVE && !livenessExhausted) lock.wait();
+                if (!current(t) || t.live != Live.ALIVE) return;
             }
-            if (t.live != Live.ALIVE) return;
-        }
-        String best = null;
-        float bestScore = -1f;
-        for (Map.Entry<String, FaceFeature> e : gallery.entrySet()) {
-            FaceSimilar similar = new FaceSimilar();
-            if (fr.compareFaceFeature(feature, e.getValue(), compareModel, similar) == ErrorInfo.MOK && similar.getScore() > bestScore) {
-                bestScore = similar.getScore();
-                best = e.getKey();
+            String best = null;
+            float bestScore = -1f;
+            for (Map.Entry<String, FaceFeature> e : gallery.entrySet()) {
+                FaceSimilar similar = new FaceSimilar();
+                check(fr.compareFaceFeature(feature, e.getValue(), compareModel, similar), "FR compare");
+                if (similar.getScore() > bestScore) { bestScore = similar.getScore(); best = e.getKey(); }
             }
-        }
-        synchronized (lock) {
-            t.score = bestScore;
-            if (best != null && bestScore > SIMILAR_THRESHOLD) {
-                t.rec = Rec.SUCCEED;
-                t.user = best;
-                recognizedNote = String.format(java.util.Locale.ROOT, "recognized:%s:%.4f:%d", best, bestScore,
-                        SystemClock.elapsedRealtime() - wallStartMs);
-            } else {
+            synchronized (lock) {
+                // Recheck epoch, object identity and liveness AFTER native compare.
+                if (!current(t) || t.live != Live.ALIVE) return;
+                t.score = bestScore;
+                if (best != null && bestScore > SIMILAR_THRESHOLD) {
+                    t.rec = Rec.SUCCEED;
+                    t.user = best;
+                    event(t, frameId, "recognized", best, bestScore, FrameOutcome.LIVE_ALIVE, "");
+                } else failFr(t);
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } catch (Exception error) {
+            synchronized (lock) {
+                if (!current(t)) return;
+                event(t, frameId, "error", "", Float.NaN, FrameOutcome.LIVE_ERROR, error.toString());
                 failFr(t);
             }
         }
     }
 
     private void failFr(Track t) {
+        if (!current(t)) return;
         t.tries++;
         t.rec = t.tries > EXTRACT_RETRY_COUNT ? Rec.FAILED : Rec.TO_RETRY;
+        event(t, t.frameId, "recognition_failed", "", t.score, FrameOutcome.LIVE_UNKNOWN, t.rec.name());
     }
 
     @Override public Object enroll(Bitmap photo) {
@@ -324,7 +383,8 @@ public final class ArcSoftSessionBackend implements FaceBackend {
     }
 
     @Override public void close() {
-        endClip();
+        if (failed || (!finished && !finishClip(2000))) return;
+        if (tracker != null) { tracker.unInit(); tracker = null; }
         fr.unInit();
         fl.unInit();
         enroller.unInit();

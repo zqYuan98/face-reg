@@ -48,6 +48,13 @@ public class ClipFileTest {
         }
     }
 
+    @Test public void truncatedTimestampIsNotCleanEof() throws IOException {
+        File file = Files.createTempFile("clip", ".fclip").toFile();
+        try (ClipFile.Writer writer = new ClipFile.Writer(file, 4, 2)) { writer.write(1L, new byte[12]); }
+        try (RandomAccessFile raf = new RandomAccessFile(file, "rw")) { raf.setLength(20); }
+        try (ClipFile.Reader reader = new ClipFile.Reader(file)) { assertThrows(IOException.class, reader::next); }
+    }
+
     @Test public void rejectsForeignFiles() throws IOException {
         File file = Files.createTempFile("clip", ".fclip").toFile();
         Files.write(file.toPath(), new byte[]{1, 2, 3, 4, 0, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0, 2});

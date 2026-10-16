@@ -145,6 +145,8 @@ public class MainActivity extends AppCompatActivity {
     private void runBench() {
         if (worker != null && worker.isAlive()) return;
         BenchConfig config = new BenchConfig();
+        String variant = getIntent().getStringExtra("evaluationVariant");
+        if (variant != null) config.evaluationVariant = variant;
         for (CheckBox box : backendBoxes) if (box.isChecked()) config.backends.add(box.getText().toString());
         config.arcSoftIdCardModel = idCardModel.isChecked();
         try {

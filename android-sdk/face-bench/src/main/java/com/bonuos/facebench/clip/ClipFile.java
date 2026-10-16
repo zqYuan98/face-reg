@@ -77,12 +77,11 @@ public final class ClipFile {
 
         /** Returns the next frame, or null at a clean end of file. A truncated last frame is an error. */
         public Frame next() throws IOException {
-            long timestamp;
-            try {
-                timestamp = in.readLong();
-            } catch (EOFException end) {
-                return null;
-            }
+            int first = in.read();
+            if (first < 0) return null;
+            // EOF is clean only before the first timestamp byte, not halfway through its 8 bytes.
+            long timestamp = (long) first << 56;
+            for (int shift = 48; shift >= 0; shift -= 8) timestamp |= (long) in.readUnsignedByte() << shift;
             byte[] data = new byte[frameBytes];
             in.readFully(data);
             return new Frame(index++, timestamp, data, width, height);

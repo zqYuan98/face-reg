@@ -20,6 +20,19 @@ public interface FaceBackend extends AutoCloseable {
     /** Called before the first frame of each clip; resets any tracking state. */
     void beginClip(int sensorRotationDegrees) throws Exception;
 
+    /** Stop accepting frames, then drain already-submitted work (including cascade children).
+     * A false result permanently disqualifies this instance: never reuse or free running handles.
+     * Synchronous legacy backends need no extra work. No synthetic frames may be submitted here.
+     */
+    default boolean finishClip(long timeoutMs) throws Exception { return true; }
+
+    default java.util.List<BackendEvent> drainEvents() { return java.util.Collections.emptyList(); }
+    default long eventOverflowCount() { return 0; }
+    default long clipEpoch() { return 0; }
+    /** Full effective settings, captured after clipTiming(), not inferred from UI defaults. */
+    default Object effectiveConfig() { return describe(); }
+    default Object clipMetrics() { return java.util.Collections.emptyMap(); }
+
     FrameOutcome process(ClipFile.Frame frame, boolean runLiveness, boolean runFeature) throws Exception;
 
     /** Extracts an enrollment feature from a registration photo; returns null when no usable face. */
