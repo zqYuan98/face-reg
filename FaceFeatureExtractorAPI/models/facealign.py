@@ -12,6 +12,41 @@ import os
 # image_width, image_height,image_channels: width and height, channels of  src image
 # src_x, src_y: 输出image每个像素对应的src image 中的像素位置.
 def sampling(image_data, image_width, image_height, image_channels, src_x, src_y):
+    """Bilinear sampling with zero padding.
+
+    Bit-identical to sampling_reference: the same float64 operations in the same order per element,
+    only evaluated on in-bounds pixels and in place, which drops most temporaries.
+    """
+    ux = np.floor(src_x).astype(int)
+    uy = np.floor(src_y).astype(int)
+    pixel = np.zeros((*src_x.shape, image_channels), dtype=np.uint8)
+    valid_mask = (ux >= 0) & (ux < image_height - 1) & (uy >= 0) & (uy < image_width - 1)
+    if not valid_mask.any():
+        return pixel
+
+    vx = ux[valid_mask]
+    vy = uy[valid_mask]
+    x = (src_x[valid_mask] - vx)[:, np.newaxis]
+    y = (src_y[valid_mask] - vy)[:, np.newaxis]
+
+    flat = image_data.reshape(-1, image_channels)
+    top_left_index = vx * image_width + vy
+    bottom_left_index = (vx + 1) * image_width + vy
+
+    one_minus_y = 1 - y
+    top = one_minus_y * flat[top_left_index]
+    top += y * flat[top_left_index + 1]
+    bottom = one_minus_y * flat[bottom_left_index]
+    bottom += y * flat[bottom_left_index + 1]
+    top *= 1 - x
+    bottom *= x
+    top += bottom
+    np.clip(top, 0, 255, out=top)
+    pixel[valid_mask] = top.astype(np.uint8)
+    return pixel
+
+
+def sampling_reference(image_data, image_width, image_height, image_channels, src_x, src_y):
     ux = np.floor(src_x).astype(int)
     uy = np.floor(src_y).astype(int)
     

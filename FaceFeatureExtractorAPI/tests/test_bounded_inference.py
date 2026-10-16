@@ -155,7 +155,7 @@ def test_extract_and_detect_share_single_model_slot():
                 entered.set()
                 release.wait(3)
                 return SimpleNamespace(success=False, faces=[], processing_time=0.1)
-        app = create_app(Model, lambda data: data, timeout_seconds=2)
+        app = create_app(Model, lambda data: data, timeout_seconds=2, queue_limit=0)
         try:
             async with app.router.lifespan_context(app):
                 await ready(app.state.inference)
@@ -172,4 +172,93 @@ def test_extract_and_detect_share_single_model_slot():
                     assert (await extracting).status_code == 200
         finally:
             release.set()
+    asyncio.run(scenario())
+
+
+async def wait_until(predicate):
+    for _ in range(200):
+        if predicate():
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("condition not reached")
+
+
+def test_queued_request_runs_after_the_slot_frees():
+    async def scenario():
+        runtime = BoundedInference(object, timeout_seconds=2, queue_limit=1)
+        release, entered = threading.Event(), threading.Event()
+        runtime.start()
+        await ready(runtime)
+        def blocked(model, contents):
+            entered.set()
+            release.wait(3)
+            return "first"
+        try:
+            first = asyncio.create_task(runtime.execute(upload(), blocked))
+            await wait_until(entered.is_set)
+            second = asyncio.create_task(runtime.execute(upload(), lambda model, data: "second"))
+            await wait_until(lambda: len(runtime._waiters) == 1)
+            with pytest.raises(HTTPException) as full:
+                await runtime.execute(upload(), lambda model, data: "third")
+            assert full.value.status_code == 429
+            release.set()
+            assert await first == "first"
+            assert await second == "second"
+        finally:
+            release.set()
+            runtime.close()
+    asyncio.run(scenario())
+
+
+def test_queue_wait_counts_against_the_deadline():
+    async def scenario():
+        runtime = BoundedInference(object, timeout_seconds=0.05, unhealthy_after_seconds=1, queue_limit=4)
+        release, entered = threading.Event(), threading.Event()
+        runtime.start()
+        await ready(runtime)
+        def blocked(model, contents):
+            entered.set()
+            release.wait(3)
+        try:
+            first = asyncio.create_task(runtime.execute(upload(), blocked))
+            await wait_until(entered.is_set)
+            with pytest.raises(HTTPException) as busy:
+                await runtime.execute(upload(), lambda model, data: "late")
+            assert busy.value.status_code == 429
+            assert not runtime._waiters
+            with pytest.raises(HTTPException):
+                await first
+        finally:
+            release.set()
+            runtime.close()
+    asyncio.run(scenario())
+
+
+def test_cancelled_waiter_does_not_strand_the_next_one():
+    async def scenario():
+        runtime = BoundedInference(object, timeout_seconds=2, queue_limit=2)
+        release, entered = threading.Event(), threading.Event()
+        runtime.start()
+        await ready(runtime)
+        def blocked(model, contents):
+            entered.set()
+            release.wait(3)
+            return "first"
+        try:
+            first = asyncio.create_task(runtime.execute(upload(), blocked))
+            await wait_until(entered.is_set)
+            abandoned = asyncio.create_task(runtime.execute(upload(), lambda model, data: "abandoned"))
+            await wait_until(lambda: len(runtime._waiters) == 1)
+            third = asyncio.create_task(runtime.execute(upload(), lambda model, data: "third"))
+            await wait_until(lambda: len(runtime._waiters) == 2)
+            abandoned.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await abandoned
+            release.set()
+            assert await first == "first"
+            assert await asyncio.wait_for(third, 1) == "third"
+            await wait_until(lambda: not runtime.readiness()["busy"])
+        finally:
+            release.set()
+            runtime.close()
     asyncio.run(scenario())

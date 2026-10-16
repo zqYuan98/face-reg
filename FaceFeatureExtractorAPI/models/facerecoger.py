@@ -6,7 +6,8 @@
 """
 
 import cv2
-import onnxruntime as ort 
+import onnxruntime as ort
+from models.ort_options import session_options as session_options_for
 import numpy as np
 
 # 设置ONNX Runtime的日志级别为ERROR
@@ -14,10 +15,9 @@ ort.set_default_logger_severity(3)  # 3表示ERROR级别
 
 class FaceRecoger():
     def __init__(self, onnx_path, num_threads=1) -> None:
-        session_options = ort.SessionOptions()
-        session_options.intra_op_num_threads = num_threads
+        session_options = session_options_for(num_threads)
         # 初始化 InferenceSession 时传入 SessionOptions 对象
-        self.ort_session = ort.InferenceSession(onnx_path, session_options=session_options)
+        self.ort_session = ort.InferenceSession(onnx_path, sess_options=session_options)
         
         output_node_dims = [out.shape for out in self.ort_session.get_outputs()]
         self.len_feat = output_node_dims[0][1] # feature 的长度为...

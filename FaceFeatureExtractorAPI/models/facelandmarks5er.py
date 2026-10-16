@@ -7,7 +7,8 @@
 
 
 import cv2
-import onnxruntime as ort 
+import onnxruntime as ort
+from models.ort_options import session_options as session_options_for
 import numpy as np
 
 # 设置ONNX Runtime的日志级别为ERROR
@@ -147,11 +148,10 @@ def crop_face(image:np.ndarray, face, H, W):
 
 class Landmark5er():
     def __init__(self, onnx_path1, onnx_path2, num_threads=1) -> None:
-        session_options = ort.SessionOptions()
-        session_options.intra_op_num_threads = num_threads
+        session_options = session_options_for(num_threads)
         # 初始化 InferenceSession 时传入 SessionOptions 对象
-        self.ort_session1 = ort.InferenceSession(onnx_path1, session_options=session_options)
-        self.ort_session2 = ort.InferenceSession(onnx_path2, session_options=session_options)
+        self.ort_session1 = ort.InferenceSession(onnx_path1, sess_options=session_options)
+        self.ort_session2 = ort.InferenceSession(onnx_path2, sess_options=session_options)
         self.first_input_name = self.ort_session1.get_inputs()[0].name
         self.second_input_name = self.ort_session2.get_inputs()[0].name
 

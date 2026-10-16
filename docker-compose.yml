@@ -29,6 +29,11 @@ services:
     restart: always
     ports:
       - "127.0.0.1:18000:8000"
+    environment:
+      # 按进程扩容：每个 worker 独立加载模型（约 0.35 GB），约每个物理核一个 worker，ONNX 单线程
+      FACE_WORKERS: ${FACE_WORKERS:-2}
+      FACE_ORT_THREADS: ${FACE_ORT_THREADS:-1}
+      FACE_INFERENCE_QUEUE: ${FACE_INFERENCE_QUEUE:-32}
     volumes:
       - ./FaceFeatureExtractorAPI/models:/app/models
       - ./FaceFeatureExtractorAPI/checkpoints:/app/checkpoints

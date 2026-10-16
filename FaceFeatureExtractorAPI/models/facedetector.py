@@ -6,6 +6,7 @@
 import cv2
 import numpy as np
 import onnxruntime as ort
+from models.ort_options import session_options as session_options_for
 
 
 class Box:
@@ -217,8 +218,7 @@ class BasicOrtHandler:
 
     def initialize_handler(self):
         # self.ort_env = ort.Env(ort.logging.ERROR)
-        session_options = ort.SessionOptions()
-        session_options.intra_op_num_threads = self.num_threads
+        session_options = session_options_for(self.num_threads)
         session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
         # self.ort_session = ort.InferenceSession(self.onnx_path, session_options)

@@ -26,6 +26,7 @@ from models.facedetector import FaceBoxesV2, Box
 from models.facerecoger import FaceRecoger
 from models.facelandmarks5er import Landmark5er
 from models.facealign import FaceAlign
+from models.ort_options import default_threads, session_options
 from models.imgchecker import QualityOfClarity, QualityOfPose, QualityChecker
 
 # 设置ONNX Runtime日志级别
@@ -81,7 +82,7 @@ class FaceFeatureExtractor:
                 'landmk2': './checkpoints/face_landmarker_pts5_net2.onnx',
                 'recognizer': './checkpoints/face_recognizer.onnx',
                 'rotifier': './checkpoints/model_gray_mobilenetv2_rotcls.onnx',
-                'num_threads': 4
+                'num_threads': default_threads(4)
             },
             'detection': {
                 'score_threshold': 0.35,
@@ -136,8 +137,7 @@ class FaceFeatureExtractor:
             rotifier_path = self.config['model_paths']['rotifier']
             self.rotation_session = None
             if os.path.exists(rotifier_path):
-                options = ort.SessionOptions()
-                options.intra_op_num_threads = self.config['model_paths']['num_threads']
+                options = session_options(self.config['model_paths']['num_threads'])
                 self.rotation_session = ort.InferenceSession(rotifier_path, sess_options=options)
                 self.rotation_input_name = self.rotation_session.get_inputs()[0].name
 
@@ -164,7 +164,8 @@ class FaceFeatureExtractor:
                 yaw_thrd=self.config['quality']['pose']['yaw_thrd'],
                 pitch_thrd=self.config['quality']['pose']['pitch_thrd'],
                 var_onnx_path=self.config['quality']['pose']['var_onnx_path'],
-                conv_onnx_path=self.config['quality']['pose']['conv_onnx_path']
+                conv_onnx_path=self.config['quality']['pose']['conv_onnx_path'],
+                num_threads=self.config['model_paths']['num_threads']
             )
 
             # 清晰度检查器

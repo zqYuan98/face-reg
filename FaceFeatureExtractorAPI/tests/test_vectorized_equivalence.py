@@ -61,3 +61,27 @@ def test_box_decode_respects_nms_cap():
     deltas = np.zeros((1, n, 4), np.float32)
     assert len(detector.generate_bboxes([deltas, probs], 0.35, 100.0, 100.0)) == \
         len(detector.generate_bboxes_reference([deltas, probs], 0.35, 100.0, 100.0)) == 6
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_alignment_sampling_matches_reference(seed):
+    from models.facealign import sampling, sampling_reference
+    rng = np.random.default_rng(seed)
+    h, w = rng.integers(40, 300, 2)
+    image = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
+    # A rotated, scaled grid that runs partly off the image exercises the zero-padding mask.
+    theta = rng.uniform(-0.6, 0.6)
+    scale = rng.uniform(0.3, 2.0)
+    by, bx = np.meshgrid(np.arange(64), np.arange(64))
+    src_y = scale * np.cos(theta) * by - scale * np.sin(theta) * bx + rng.uniform(-30, w)
+    src_x = scale * np.sin(theta) * by + scale * np.cos(theta) * bx + rng.uniform(-30, h)
+    expected = sampling_reference(image, w, h, 3, src_x, src_y)
+    actual = sampling(image, w, h, 3, src_x, src_y)
+    assert actual.dtype == expected.dtype and np.array_equal(actual, expected)
+
+
+def test_alignment_sampling_all_outside():
+    from models.facealign import sampling
+    image = np.full((10, 10, 3), 200, np.uint8)
+    grid = np.full((4, 4), -5.0)
+    assert not sampling(image, 10, 10, 3, grid, grid).any()

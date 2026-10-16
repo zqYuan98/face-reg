@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Feature API: bounded model execution with independent liveness and readiness."""
+import runtime_env  # noqa: F401  (thread limits must precede numpy/cv2/onnxruntime)
 import logging
 import math
 import os
@@ -19,6 +20,7 @@ logger = logging.getLogger("FeatureServer")
 
 def default_factory():
     # Heavy native imports and model loading run in the bounded worker, never on the event loop.
+    runtime_env.limit_opencv()
     from face_feature_extractor import FaceFeatureExtractor
     return FaceFeatureExtractor()
 
@@ -58,12 +60,13 @@ class DetectFaceResponse(BaseModel):
 
 
 def create_app(factory=default_factory, decoder=decode_image, *, timeout_seconds=None,
-               unhealthy_after_seconds=None, max_image_bytes=None):
+               unhealthy_after_seconds=None, max_image_bytes=None, queue_limit=None):
     runtime = BoundedInference(
         factory,
         timeout_seconds=float(os.getenv("FACE_INFERENCE_TIMEOUT_SECONDS", "12")) if timeout_seconds is None else timeout_seconds,
         unhealthy_after_seconds=float(os.getenv("FACE_INFERENCE_UNHEALTHY_SECONDS", "30")) if unhealthy_after_seconds is None else unhealthy_after_seconds,
         max_image_bytes=int(os.getenv("FACE_MAX_IMAGE_BYTES", str(10 * 1024 * 1024))) if max_image_bytes is None else max_image_bytes,
+        queue_limit=int(os.getenv("FACE_INFERENCE_QUEUE", "32")) if queue_limit is None else queue_limit,
     )
 
     @asynccontextmanager
@@ -140,6 +143,11 @@ if __name__ == "__main__":
     import uvicorn
     parser = argparse.ArgumentParser(description="Face Feature Extraction Microservice")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--workers", type=int, default=int(os.getenv("FACE_WORKERS", "1")))
     args = parser.parse_args()
-    # One model/slot per process. Raising worker count multiplies model memory and native concurrency.
-    uvicorn.run(app, host="0.0.0.0", port=args.port)
+    # One model/slot per process. Each worker loads its own models; the pipeline is mostly
+    # single-threaded Python, so use about one worker per core with FACE_ORT_THREADS=1.
+    if args.workers > 1:
+        uvicorn.run("feature_server:app", host="0.0.0.0", port=args.port, workers=args.workers)
+    else:
+        uvicorn.run(app, host="0.0.0.0", port=args.port)

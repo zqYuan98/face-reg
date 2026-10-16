@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import onnxruntime as ort
+from models.ort_options import session_options as session_options_for
 
 
 class QualityOfClarity:
@@ -141,14 +142,14 @@ class QualityChecker:  # check resolution and clarity of image
 
 
 class QualityOfPose:
-    def __init__(self, pad=0.3, yaw_thrd=30, pitch_thrd=25, var_onnx_path = './checkpoints/fsanet-var.onnx', conv_onnx_path='./checkpoints/fsanet-conv.onnx') -> None:
+    def __init__(self, pad=0.3, yaw_thrd=30, pitch_thrd=25, var_onnx_path = './checkpoints/fsanet-var.onnx', conv_onnx_path='./checkpoints/fsanet-conv.onnx', num_threads=None) -> None:
         self.pad = pad
         self.input_width = 64
         self.input_height = 64
         self.yaw_thrd = abs(yaw_thrd) 
         self.pitch_thrd = abs(pitch_thrd)
-        self.var_fsanet = ort.InferenceSession(var_onnx_path)
-        self.conv_fsanet = ort.InferenceSession(conv_onnx_path)
+        self.var_fsanet = ort.InferenceSession(var_onnx_path, sess_options=session_options_for(num_threads))
+        self.conv_fsanet = ort.InferenceSession(conv_onnx_path, sess_options=session_options_for(num_threads))
 
         self.var_input_names = [input_.name for input_ in self.var_fsanet.get_inputs()]
         self.var_output_names = [output.name for output in self.var_fsanet.get_outputs()]
