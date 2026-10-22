@@ -83,6 +83,22 @@ public class FaceUtils {
         return true;
     }
 
+    /** Little-endian float32 bytes, the layout devices also store (SyncStore). */
+    public static byte[] toBlob(float[] v) {
+        java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocate(v.length * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        for (float x : v) buffer.putFloat(x);
+        return buffer.array();
+    }
+
+    /** Inverse of {@link #toBlob}; null for a missing or ragged blob. */
+    public static float[] fromBlob(byte[] blob) {
+        if (blob == null || blob.length == 0 || blob.length % 4 != 0) return null;
+        java.nio.FloatBuffer buffer = java.nio.ByteBuffer.wrap(blob).order(java.nio.ByteOrder.LITTLE_ENDIAN).asFloatBuffer();
+        float[] out = new float[buffer.remaining()];
+        buffer.get(out);
+        return out;
+    }
+
     /**
      * Dot product of {@code probe} with the row of {@code matrix} starting at {@code offset}. Four
      * independent accumulators let the JIT keep several multiply-adds in flight.

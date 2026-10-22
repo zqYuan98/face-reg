@@ -4,8 +4,11 @@ import com.bonuos.face.dto.RevisionClock;
 import com.bonuos.face.entity.User;
 import com.bonuos.face.exception.ApiException;
 import com.bonuos.face.mapper.FaceSearchMapper;
+import com.bonuos.face.mapper.UserFeatureMapper;
 import com.bonuos.face.mapper.UserMapper;
 import com.bonuos.face.util.FaceUtils;
+import com.bonuos.face.util.FeatureVersions;
+import jakarta.annotation.PreDestroy;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -15,13 +18,15 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Exact 1:N search. Cached groups are scanned in memory ({@link FaceGallery}); others are streamed
- * from the database with constant batch memory. A deadline means incomplete, never no match.
+ * Exact 1:N search over one feature version ({@code face.search.feature-version}). Cached groups
+ * are scanned in memory ({@link FaceGallery}); others are streamed from the database with constant
+ * batch memory. A deadline means incomplete, never no match.
  */
 @Service
 public class FaceSearchService {
     private final FaceSearchMapper mapper;
     private final UserMapper users;
+    private final FeatureSource source;
     private final FaceGallery gallery;
     private final Semaphore slots;
     private final int chunkSize;
@@ -37,27 +42,64 @@ public class FaceSearchService {
         this(mapper, users, null, concurrency, chunkSize, timeoutMs, threshold, 0f);
     }
 
+    /** v1 search over a given (possibly absent) gallery. */
+    public FaceSearchService(FaceSearchMapper mapper, UserMapper users, FaceGallery gallery,
+            int concurrency, int chunkSize, long timeoutMs, float threshold, float margin) {
+        this(mapper, users, FeatureSource.v1(mapper), gallery, concurrency, chunkSize, timeoutMs, threshold, margin);
+    }
+
     /**
-     * {@code threshold} is uncalibrated (0.6 historically); set it from a FAR-calibrated profile.
-     * {@code margin} &gt; 0 refuses a best match whose lead over the runner-up is smaller than it.
-     * Callers wait for a slot within the search budget instead of failing at once.
+     * Thresholds are uncalibrated defaults: v1 0.6 (historical), arcface_r50_512 0.45 (LFW: FAR 1e-5
+     * at 0.34, 1e-6 at 0.63). Set them from FAR-calibrated data. {@code margin} &gt; 0 refuses a best
+     * match whose lead over the runner-up is smaller. Callers wait for a slot within the budget.
      */
     @Autowired
-    public FaceSearchService(FaceSearchMapper mapper, UserMapper users, FaceGallery gallery,
+    public FaceSearchService(FaceSearchMapper mapper, UserMapper users, UserFeatureMapper features,
+            @Value("${face.search.feature-version:recognizer_v1_1024}") String featureVersion,
             @Value("${face.search.concurrency:4}") int concurrency,
             @Value("${face.search.chunk-size:200}") int chunkSize,
             @Value("${face.search.timeout-ms:5000}") long timeoutMs,
             @Value("${face.search.threshold:0.6}") float threshold,
-            @Value("${face.search.margin:0}") float margin) {
+            @Value("${face.search.v2-threshold:0.45}") float v2Threshold,
+            @Value("${face.search.margin:0}") float margin,
+            @Value("${face.search.gallery.max-bytes:134217728}") long galleryBytes,
+            @Value("${face.search.gallery.max-delta:2000}") int galleryDelta) {
+        this(mapper, users, FeatureSource.of(featureVersion, mapper, features),
+                galleryBytes > 0 ? new FaceGallery(mapper, FeatureSource.of(featureVersion, mapper, features), galleryBytes, galleryDelta) : null,
+                concurrency, chunkSize, timeoutMs, FeatureVersions.V1.equals(featureVersion) ? threshold : v2Threshold, margin);
+    }
+
+    FaceSearchService(FaceSearchMapper mapper, UserMapper users, FeatureSource source, FaceGallery gallery,
+            int concurrency, int chunkSize, long timeoutMs, float threshold, float margin) {
         if (concurrency < 1 || concurrency > 64 || chunkSize < 1 || chunkSize > 500 || timeoutMs < 1 || timeoutMs > 60000
                 || !(threshold > 0f && threshold < 1f) || !(margin >= 0f && margin < 1f))
             throw new IllegalArgumentException("Invalid search limits");
-        this.mapper = mapper; this.users = users; this.gallery = gallery; this.slots = new Semaphore(concurrency);
+        this.mapper = mapper; this.users = users; this.source = source; this.gallery = gallery;
+        this.slots = new Semaphore(concurrency);
         this.chunkSize = chunkSize; this.budgetNanos = TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         this.threshold = threshold; this.margin = margin;
     }
 
+    @PreDestroy public void shutdown() { if (gallery != null) gallery.shutdown(); }
+
+    /** The feature version probes must be extracted with. */
+    public String featureVersion() { return source.version(); }
+
+    /** A feature of the search version changed outside the change log (backfill); drop the cached group. */
+    public void featuresChanged(String version, long groupId) {
+        if (gallery != null && source.version().equals(version)) gallery.invalidate(groupId);
+    }
+
     public User search(List<Float> target, long groupId) {
+        float[] probe = new float[target == null ? 0 : target.size()];
+        for (int i = 0; i < probe.length; i++) {
+            Float value = target.get(i);
+            probe[i] = value == null ? Float.NaN : value;
+        }
+        return search(probe, groupId);
+    }
+
+    public User search(float[] target, long groupId) {
         if (groupId <= 0) throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_GROUP", "请选择有效分组");
         long deadline = System.nanoTime() + budgetNanos;
         try {
@@ -69,8 +111,8 @@ public class FaceSearchService {
         }
         try {
             // Normalise the probe once; each candidate then costs one dot product.
-            float[] probe = FaceUtils.normalizedCopy(target);
-            if (probe == null) throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_FEATURE", "特征数据无效");
+            float[] probe = target.clone();
+            if (!FaceUtils.normalizeInPlace(probe)) throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_FEATURE", "特征数据无效");
             String startingRevision = null;
             FaceGallery.Top2 top = null;
             if (gallery != null) {
@@ -107,21 +149,20 @@ public class FaceSearchService {
         long after = 0; Long best = null; Long bestVersion = null; float score = 0, second = 0;
         while (true) {
             checkDeadline(deadline);
-            List<User> chunk = mapper.nextChunk(groupId, after, chunkSize);
+            List<FeatureSource.Row> chunk = source.nextChunk(groupId, after, chunkSize);
             checkDeadline(deadline);
-            for (User row : chunk) {
+            for (FeatureSource.Row row : chunk) {
                 checkDeadline(deadline);
-                float[] vector = FaceUtils.parseFeatureArray(row.getFeatureData());
-                if (vector != null) {
-                    float similarity = FaceUtils.cosineToUnit(probe, vector);
+                if (row.feature() != null) {
+                    float similarity = FaceUtils.cosineToUnit(probe, row.feature());
                     if (Float.isFinite(similarity) && similarity > score) {
                         if (best != null) second = score;
-                        score = similarity; best = row.getId(); bestVersion = row.getSyncVersion();
+                        score = similarity; best = row.id(); bestVersion = row.syncVersion();
                     } else if (Float.isFinite(similarity) && similarity > second) {
                         second = similarity;
                     }
                 }
-                after = row.getId();
+                after = row.id();
             }
             if (chunk.size() < chunkSize) break;
         }

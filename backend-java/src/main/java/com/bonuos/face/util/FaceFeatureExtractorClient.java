@@ -32,6 +32,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public class FaceFeatureExtractorClient implements AutoCloseable {
     private static final int FEATURE_DIMENSION = 1024;
     private final URI extractUri;
+    private final URI extractV2Uri;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Semaphore permits;
@@ -67,6 +68,7 @@ public class FaceFeatureExtractorClient implements AutoCloseable {
             throw new IllegalArgumentException("Invalid bounded extractor configuration");
         }
         extractUri = URI.create(apiUrl.replaceAll("/+$", "") + "/api/extract_feature");
+        extractV2Uri = URI.create(apiUrl.replaceAll("/+$", "") + "/api/v2/extract_feature");
         if (!("http".equals(extractUri.getScheme()) || "https".equals(extractUri.getScheme())) ||
                 extractUri.getHost() == null || extractUri.getUserInfo() != null) {
             throw new IllegalArgumentException("Extractor URL must be an HTTP(S) server URL");
@@ -113,6 +115,28 @@ public class FaceFeatureExtractorClient implements AutoCloseable {
         }
     }
 
+    /**
+     * Unit-scale feature of {@code featureVersion} for a stored image. recognizer_v1_1024 uses the
+     * original endpoint; arcface_r50_512 the v2 endpoint, whose quality refusals carry a reason.
+     */
+    public float[] extractFeature(File imageFile, String featureVersion) throws IOException {
+        if (FeatureVersions.V1.equals(featureVersion)) {
+            List<Float> values = extractFeature(imageFile);
+            float[] out = new float[values.size()];
+            for (int i = 0; i < out.length; i++) out[i] = values.get(i);
+            return out;
+        }
+        if (!FeatureVersions.V2.equals(featureVersion)) throw new IllegalArgumentException("Unsupported feature version " + featureVersion);
+        acquire();
+        try {
+            checkImageSize(Files.size(imageFile.toPath()));
+            return sendRequest(extractV2Uri, HttpRequest.BodyPublishers.ofFile(imageFile.toPath()),
+                    response -> parseFeature(response, FeatureVersions.dimension(featureVersion), true));
+        } finally {
+            permits.release();
+        }
+    }
+
     private void acquire() {
         boolean admitted;
         try {
@@ -132,11 +156,18 @@ public class FaceFeatureExtractorClient implements AutoCloseable {
     }
 
     private List<Float> sendRequest(HttpRequest.BodyPublisher image) {
+        float[] values = sendRequest(extractUri, image, response -> parseFeature(response, FEATURE_DIMENSION, false));
+        List<Float> result = new ArrayList<>(values.length);
+        for (float value : values) result.add(value);
+        return result;
+    }
+
+    private <T> T sendRequest(URI uri, HttpRequest.BodyPublisher image, java.util.function.Function<HttpResponse<byte[]>, T> parser) {
         String boundary = "face-" + UUID.randomUUID();
         byte[] prefix = ("--" + boundary + "\r\nContent-Disposition: form-data; name=\"image\"; filename=\"upload.jpg\"\r\n" +
                 "Content-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8);
         byte[] suffix = ("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8);
-        HttpRequest request = HttpRequest.newBuilder(extractUri)
+        HttpRequest request = HttpRequest.newBuilder(uri)
                 .timeout(Duration.ofNanos(totalTimeoutNanos))
                 .header("Content-Type", "multipart/form-data; boundary=" + boundary)
                 .POST(HttpRequest.BodyPublishers.concat(HttpRequest.BodyPublishers.ofByteArray(prefix), image,
@@ -152,7 +183,7 @@ public class FaceFeatureExtractorClient implements AutoCloseable {
             exchange.attach(future);
             HttpResponse<byte[]> response = future.get();
             if (exchange.failure.get() != null) throw exchange.failure.get();
-            return parseResponse(response);
+            return parser.apply(response);
         } catch (InterruptedException e) {
             exchange.abort(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "ALGORITHM_CANCELLED", "特征提取已取消"));
             Thread.currentThread().interrupt();
@@ -168,7 +199,7 @@ public class FaceFeatureExtractorClient implements AutoCloseable {
         }
     }
 
-    private List<Float> parseResponse(HttpResponse<byte[]> response) {
+    private float[] parseFeature(HttpResponse<byte[]> response, int dimension, boolean reasons) {
         if (response.statusCode() == 429 || response.statusCode() == 503) {
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "ALGORITHM_UNAVAILABLE", "特征提取服务繁忙或未就绪");
         }
@@ -181,16 +212,18 @@ public class FaceFeatureExtractorClient implements AutoCloseable {
             JsonNode root = objectMapper.readTree(response.body());
             if (root == null || !root.path("success").isBoolean()) throw invalidResponse();
             if (!root.path("success").asBoolean()) {
-                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "NO_USABLE_FACE", "未检测到符合质量要求的人脸");
+                String reason = reasons ? root.path("reason_code").asText("") : "";
+                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "NO_USABLE_FACE", REFUSALS.getOrDefault(reason, "未检测到符合质量要求的人脸"));
             }
             JsonNode feature = root.path("feature");
-            if (!feature.isArray() || feature.size() != FEATURE_DIMENSION) throw invalidResponse();
-            List<Float> result = new ArrayList<>(FEATURE_DIMENSION);
+            if (!feature.isArray() || feature.size() != dimension) throw invalidResponse();
+            float[] result = new float[dimension];
             double norm = 0;
+            int i = 0;
             for (JsonNode value : feature) {
                 float number = (float) value.asDouble(Double.NaN);
                 if (!value.isNumber() || !Float.isFinite(number)) throw invalidResponse();
-                result.add(number);
+                result[i++] = number;
                 norm += (double) number * number;
             }
             if (!(norm > 0) || !Double.isFinite(norm)) throw invalidResponse();
@@ -199,6 +232,15 @@ public class FaceFeatureExtractorClient implements AutoCloseable {
             throw invalidResponse();
         }
     }
+
+    private static final java.util.Map<String, String> REFUSALS = java.util.Map.of(
+            "NO_FACE", "未检测到人脸",
+            "FACE_TOO_SMALL", "人脸过小，请靠近镜头或使用更清晰的照片",
+            "BAD_POSE", "人脸角度过大，请正对镜头",
+            "TOO_DARK", "光线过暗",
+            "TOO_BRIGHT", "光线过亮",
+            "TOO_BLURRY", "照片模糊",
+            "FEATURE_FAILED", "人脸特征提取失败");
 
     private static ApiException timeout() {
         return new ApiException(HttpStatus.GATEWAY_TIMEOUT, "ALGORITHM_TIMEOUT", "特征提取超时，操作未完成");

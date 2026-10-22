@@ -31,19 +31,46 @@ public class UserServiceImpl implements UserService {
     @Autowired private PhotoStorage photos;
     @Autowired private FaceSearchService search;
     @Autowired private AdminQueryService adminQueries;
+    /** Feature versions extracted at enrolment; v1 fills sys_user.feature_data, others sys_user_feature. */
+    @org.springframework.beans.factory.annotation.Value("${face.features.versions:recognizer_v1_1024}")
+    private String featureVersionsSetting;
+    private List<String> featureVersions;
+
+    @jakarta.annotation.PostConstruct
+    void checkFeatureVersions() {
+        featureVersions = Arrays.stream(featureVersionsSetting.split(",")).map(String::trim).filter(v -> !v.isEmpty())
+                .map(com.bonuos.face.util.FeatureVersions::require).distinct().toList();
+        if (featureVersions.isEmpty()) throw new IllegalStateException("face.features.versions is empty");
+        // Otherwise new people would never be found until a backfill ran.
+        if (!featureVersions.contains(search.featureVersion()))
+            throw new IllegalStateException("face.search.feature-version " + search.featureVersion() + " is not in face.features.versions");
+    }
+
+    /** v1 feature JSON (null when v1 is not enrolled) and the other versions' vectors. */
+    private record Enrolment(String v1Json, Map<String, float[]> others) {}
+
+    private Enrolment enrol(Path staged) {
+        String v1 = null;
+        Map<String, float[]> others = new LinkedHashMap<>();
+        for (String version : featureVersions) {
+            if (com.bonuos.face.util.FeatureVersions.V1.equals(version)) v1 = featureJson(extract(staged));
+            else others.put(version, extract(staged, version));
+        }
+        return new Enrolment(v1, others);
+    }
 
     @Override
     public User addUser(String name, Long groupId, MultipartFile photo) {
         name = validateName(name);
         Path staged = photos.stage(photo); String published = null;
         try {
-            String feature = featureJson(extract(staged));
+            Enrolment features = enrol(staged);
             published = photos.publish(staged);
             User user = new User(); user.setUserNo(IdUtil.getSnowflakeNextIdStr());
             user.setName(name); user.setGroupId(groupId); user.setPhotoUrl(published);
-            user.setFeatureData(feature); user.setStatus(1);
+            user.setFeatureData(features.v1Json()); user.setStatus(1);
             user.setCreateTime(LocalDateTime.now()); user.setUpdateTime(LocalDateTime.now());
-            User saved = mutations.insert(user);
+            User saved = mutations.insert(user, features.others());
             notifyUpdate(); return saved;
         } catch (RuntimeException e) {
             if (published != null) photos.retire(published);
@@ -55,13 +82,13 @@ public class UserServiceImpl implements UserService {
     public User updateUser(Long id, String name, Long groupId, MultipartFile photo) {
         if (id == null || id <= 0) throw new ApiException(HttpStatus.BAD_REQUEST,"INVALID_ID","人员 ID 无效");
         name = validateName(name);
-        Path staged = null; String published = null; String feature = null;
+        Path staged = null; String published = null; Enrolment features = new Enrolment(null, Map.of());
         try {
             if (photo != null && !photo.isEmpty()) {
-                staged = photos.stage(photo); feature = featureJson(extract(staged));
+                staged = photos.stage(photo); features = enrol(staged);
                 published = photos.publish(staged);
             }
-            var result = mutations.update(id,name,groupId,published,feature);
+            var result = mutations.update(id,name,groupId,published,features.v1Json(),features.others());
             if (published != null) photos.retire(result.previousPhoto());
             notifyUpdate(); return result.user();
         } catch (RuntimeException e) {
@@ -76,6 +103,10 @@ public class UserServiceImpl implements UserService {
     }
     private List<Float> extract(Path staged) {
         try { return faceFeatureExtractorClient.extractFeature(staged.toFile()); }
+        catch (IOException e) { throw new ApiException(HttpStatus.BAD_GATEWAY,"EXTRACTION_FAILED","照片特征提取失败，请检查照片或稍后重试"); }
+    }
+    private float[] extract(Path staged, String version) {
+        try { return faceFeatureExtractorClient.extractFeature(staged.toFile(), version); }
         catch (IOException e) { throw new ApiException(HttpStatus.BAD_GATEWAY,"EXTRACTION_FAILED","照片特征提取失败，请检查照片或稍后重试"); }
     }
     private static String featureJson(List<Float> feature) {
@@ -153,8 +184,7 @@ public class UserServiceImpl implements UserService {
         if (groupId == null || groupId <= 0) throw new ApiException(HttpStatus.BAD_REQUEST,"INVALID_GROUP","必须指定有效分组");
         Path staged = photos.stage(photo);
         try {
-            List<Float> feature = extract(staged);
-            featureJson(feature);
+            float[] feature = extract(staged, search.featureVersion());
             User match = search.search(feature,groupId);
             // A biometric template is not part of a search answer.
             if (match != null) match.setFeatureData(null);

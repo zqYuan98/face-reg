@@ -10,7 +10,10 @@ import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import com.bonuos.face.util.FaceUtils;
+import com.bonuos.face.util.FeatureVersions;
 import java.time.LocalDateTime;
+import java.util.Map;
 import java.util.Objects;
 
 /** The single write boundary: the revision lock is held through business/log COMMIT. */
@@ -26,17 +29,27 @@ public class UserMutationService {
         return Objects.requireNonNull(jdbc.queryForObject("SELECT head FROM sync_revision WHERE id=1 FOR UPDATE", Long.class));
     }
     @Transactional(timeout = 5)
-    public User insert(User user) {
+    public User insert(User user) { return insert(user, Map.of()); }
+
+    /** {@code features}: versions kept in sys_user_feature (not v1), extracted from the user's photo. */
+    @Transactional(timeout = 5)
+    public User insert(User user, Map<String, float[]> features) {
         long revision = lockClock() + 1;
         validate(user.getName(), user.getGroupId(), null);
         user.setSyncVersion(revision);
         users.insert(user);
+        putFeatures(user.getId(), user.getPhotoUrl(), features);
         publish(user, null, null, revision, "upsert");
         return user;
     }
     public record Updated(User user, String previousPhoto) {}
     @Transactional(timeout = 5)
     public Updated update(long id, String name, Long groupId, String photo, String feature) {
+        return update(id, name, groupId, photo, feature, Map.of());
+    }
+
+    @Transactional(timeout = 5)
+    public Updated update(long id, String name, Long groupId, String photo, String feature, Map<String, float[]> features) {
         long revision = lockClock() + 1;
         User current = users.selectById(id);
         if (current == null) throw new ApiException(HttpStatus.NOT_FOUND, "USER_NOT_FOUND", "人员不存在");
@@ -48,6 +61,11 @@ public class UserMutationService {
         // Explicit SQL updates a null group too; MyBatis' default NOT_NULL policy cannot ungroup.
         jdbc.update("UPDATE sys_user SET name=?,group_id=?,photo_url=?,feature_data=?,update_time=?,sync_version=? WHERE id=?",
                 current.getName(), current.getGroupId(), current.getPhotoUrl(), current.getFeatureData(), current.getUpdateTime(), revision, id);
+        if (photo != null) {
+            // Features of the previous photo are stale; versions not extracted now wait for the backfill.
+            jdbc.update("DELETE FROM sys_user_feature WHERE user_id=? AND photo_url<>?", id, photo);
+            putFeatures(id, photo, features);
+        }
         publish(current, oldGroup, oldPhoto, revision, "upsert");
         return new Updated(current, oldPhoto);
     }
@@ -63,6 +81,16 @@ public class UserMutationService {
         if (users.deleteById(id) != 1) throw new IllegalStateException("Concurrent writer bypassed revision lock");
         publish(current, current.getGroupId(), current.getPhotoUrl(), revision, "delete");
         return new Deleted(true, current.getPhotoUrl());
+    }
+    private void putFeatures(long userId, String photo, Map<String, float[]> features) {
+        for (Map.Entry<String, float[]> entry : features.entrySet()) {
+            String version = FeatureVersions.require(entry.getKey());
+            if (FeatureVersions.V1.equals(version) || entry.getValue().length != FeatureVersions.dimension(version))
+                throw new IllegalArgumentException("Feature " + version + " does not belong in sys_user_feature");
+            jdbc.update("INSERT INTO sys_user_feature(user_id,feature_version,feature_dim,feature_blob,photo_url) VALUES (?,?,?,?,?) "
+                    + "ON DUPLICATE KEY UPDATE feature_dim=VALUES(feature_dim),feature_blob=VALUES(feature_blob),photo_url=VALUES(photo_url)",
+                    userId, version, entry.getValue().length, FaceUtils.toBlob(entry.getValue()), photo);
+        }
     }
     private void validate(String name, Long groupId, Long excludeId) {
         if (name == null || name.isBlank() || name.length() > 100)

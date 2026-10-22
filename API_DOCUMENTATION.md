@@ -141,7 +141,8 @@ options 返回最后一页时 `hasMore=false,nextCursor=null`；有下一页时�
 `POST /api/users/search`，multipart：`photo` 与正整数 `groupId` 必填。服务先提取特征，再对该组全部活跃人员做精确比对（O(N×D)），维护整个搜索范围的第一名和第二名；不复用管理表格当前页。
 
 - 比对优先走内存特征库：每个分组一份预归一化的特征矩阵，按 `sync_revision` 判断新旧，落后时只重放 `user_change_log` 中涉及该组的人员；首次访问、epoch 变化、日志被裁剪或积压超过 `face.search.gallery.max-delta`（默认 2000）时在后台重建，重建完成前按 ID 游标分块读库比对，结果相同。超出 `face.search.gallery.max-bytes`（默认 128 MiB，1024 维约 3 万人）的分组不缓存，始终读库比对。
-- 相似度阈值 `face.search.threshold` 默认 0.6（未校准）；`face.search.margin` 大于 0 时，第一名领先第二名不足该值返回 404 `AMBIGUOUS_MATCH`，默认 0 即关闭。
+- 检索使用的特征版本由 `face.search.feature-version` 决定（环境变量 `FACE_SEARCH_FEATURE_VERSION`）：默认 `recognizer_v1_1024`，可选 `arcface_r50_512`，见 4.1。探针照片按同一版本提取。
+- 相似度阈值：v1 用 `face.search.threshold`，默认 0.6；v2 用 `face.search.v2-threshold`，默认 0.45（LFW 上 FAR 1e-5 约对应 0.34、1e-6 约对应 0.63）。两者都未校准；`face.search.margin` 大于 0 时，第一名领先第二名不足该值返回 404 `AMBIGUOUS_MATCH`，默认 0 即关闭。
 - 并发上限 `face.search.concurrency` 默认 4，超出时在搜索预算内排队。
 
 - 找到匹配：HTTP200，data 为 User，不含 `featureData`。
@@ -150,7 +151,37 @@ options 返回最后一页时 `hasMore=false,nextCursor=null`；有下一页时�
 - 搜索期间数据版本变化：HTTP409 `SEARCH_CHANGED`，需重新搜索。
 - 资源繁忙（排队超时）：HTTP429 `SEARCH_BUSY` 或 `ALGORITHM_BUSY`。
 
-本机实测内存扫描（1024 维，单线程）：1 万人约 2 ms，10 万人约 25 ms。
+本机实测内存扫描（1024 维，单线程）：1 万人约 2 ms，10 万人约 25 ms。v2 为 512 维，耗时约减半，同样的内存预算能缓存的人数约翻倍。
+
+直接改库（绕过本服务的人员增改删）不会写变更日志，已缓存的分组看不到这些改动；改完后需重启后端，或等该分组下次重建。
+
+### 4.1 特征版本 arcface_r50_512
+
+- **定位**：第二个特征版本，与 v1 并存。在 LFW 上 TAR@FAR=1e-5 为 99.86%，v1 为 88.32%。使用 InsightFace 权重，仅限非商业研究用途。算法侧说明见 [FEATURE_V2.md](FaceFeatureExtractorAPI/FEATURE_V2.md)。
+- **注册**：`face.features.versions`（环境变量 `FACE_FEATURES_VERSIONS`，逗号分隔）列出注册时要提取的版本。每个版本都必须提取成功，否则注册失败并返回 422 `NO_USABLE_FACE`，`msg` 给出具体原因（人脸过小、角度过大、过暗、过亮、模糊）。
+  - v1 特征照旧写入 `sys_user.feature_data`，同步给设备。
+  - 其他版本的特征写入 `sys_user_feature(user_id, feature_version, feature_dim, feature_blob, photo_url)`。`feature_blob` 为 little-endian float32；`photo_url` 记录特征来自哪张照片。
+  - 写入与人员记录、变更日志在同一事务里。换照片时旧照片的特征一并删除；删除人员时级联删除。
+- **约束**：检索版本必须包含在注册版本中，否则后端拒绝启动。
+- **上线步骤**：
+  1. 执行迁移 `db/migrations/V20261016_01__user_feature.sql`。
+  2. 算法服务设 `FACE_FEATURE_VERSIONS=recognizer_v1_1024,arcface_r50_512` 并挂载权重。
+  3. 后端设 `FACE_FEATURES_VERSIONS=recognizer_v1_1024,arcface_r50_512`，检索版本暂时保持 v1。
+  4. 调用补提接口，为存量人员提取 v2 特征。
+  5. 状态接口显示 `current == enrollable`（失败人员已处理）后，把 `FACE_SEARCH_FEATURE_VERSION` 改为 `arcface_r50_512` 并重启。
+  6. 回滚：把检索版本改回 v1 即可，v1 数据始终完整。
+- **设备同步不变**：仍只下发 v1 特征。设备端 InsightFace 引擎继续用同步下来的注册照自行建库。
+
+| 管理接口（管理员 Session + CSRF） | 说明 |
+|---|---|
+| `GET /api/features/status?version=arcface_r50_512` | `searchVersion`，以及 `backfill`：`enrollable`（有照片的在职人员数）、`current`（已有该照片对应特征的人数）、`running`、`processed`、`written`、`failed`、`recentFailures`（最近 50 条 `{userId, reason}`） |
+| `POST /api/features/backfill?version=arcface_r50_512` | 启动补提，返回 202；已在运行时返回 409 `BACKFILL_RUNNING`；v1 返回 400 |
+| `POST /api/features/backfill/stop` | 请求停止，当前这批处理完后退出 |
+
+**补提的行为**：
+- 按人员 ID 顺序走一遍，读取库中存储的注册照提取特征，并发数为 `face.features.backfill-concurrency`（默认 2）。
+- 失败的人员保持缺失，并给出原因：`PHOTO_MISSING`、`NO_USABLE_FACE` 等。重新启动补提会再次尝试它们，也就是从数据实际缺的地方续跑。
+- 只有当人员仍是同一张照片时才写入。补提期间有人重新注册，以新注册的结果为准。
 
 ## 5. 设备注册、同步和通知
 
@@ -202,7 +233,9 @@ v2 的 epoch、授权版本、历史窗口或租约失效返回409 `SNAPSHOT_REQ
 | `GET /ready` | 模型已就绪时200，初始化/失败/长时间占槽时503；需检查状态及 restart_required |
 | `POST /api/extract_feature` | multipart的 `image`；成功为 `{success:true,message,feature:[1024维数值],feature_dim:1024,processing_time}` |
 | `POST /api/detect_face` | multipart的 `image`、可选 `expand_scale=0.0`（有限数值0–10）；返回success/message/faces/processing_time |
+| `POST /api/v2/extract_feature` | multipart的 `image`、可选 `quality_filter`；arcface_r50_512 特征、人脸框、关键点、姿态、质量与 `reason_code`。仅在 `FACE_FEATURE_VERSIONS` 含该版本时可用，见 [FEATURE_V2.md](FaceFeatureExtractorAPI/FEATURE_V2.md) |
+| `GET /api/feature_versions` | 本进程已加载的特征版本 |
 
 faces 每项为 `x1,y1,x2,y2,score`，坐标为像素，扩展后裁剪到图片边界。提取未得到可用品质人脸时可能 HTTP200、`success:false`；Java 将其映射为422 `NO_USABLE_FACE`，不要把 Python 的200当作一定取得特征。Python错误通常是 `{"detail":{"errorCode":"..."}}`，输入验证也可能使用 FastAPI 的标准 detail 数组，不能套用Java包络。
 
-两种推理接口共用一个原生工作槽，无无限队列。请求超时/取消不表示底层原生推理已经停止；槽位保留到真实任务结束，长期挂起由就绪检查降级和部署监督重启处理。具体预算、错误和验证边界见 [算法资源限制说明](FaceFeatureExtractorAPI/BOUNDED_EXECUTION.md)。
+各推理接口共用一个原生工作槽，槽忙时在超时内有界排队（`FACE_INFERENCE_QUEUE`）；按进程扩容（`FACE_WORKERS`），CPU 与 GPU 两个部署版本见 FEATURE_V2.md。请求超时/取消不表示底层原生推理已经停止；槽位保留到真实任务结束，长期挂起由就绪检查降级和部署监督重启处理。具体预算、错误和验证边界见 [算法资源限制说明](FaceFeatureExtractorAPI/BOUNDED_EXECUTION.md)。

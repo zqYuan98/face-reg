@@ -1,15 +1,10 @@
 package com.bonuos.face.service;
 
 import com.bonuos.face.dto.RevisionClock;
-import com.bonuos.face.entity.User;
 import com.bonuos.face.mapper.FaceSearchMapper;
 import com.bonuos.face.util.FaceUtils;
-import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -35,13 +30,13 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * caller falls back to the streaming scan until it finishes. Groups that do not fit the memory
  * budget are never cached.
  */
-@Component
 public class FaceGallery {
     private static final Logger log = LoggerFactory.getLogger(FaceGallery.class);
     private static final int PAGE = 500;
     private static final long TOO_LARGE_RETRY_NANOS = 10L * 60 * 1_000_000_000L;
 
     private final FaceSearchMapper mapper;
+    private final FeatureSource source;
     private final long maxBytes;
     private final int maxDelta;
     private final ExecutorService builder;
@@ -50,22 +45,35 @@ public class FaceGallery {
     private final Map<Long, Long> tooLarge = new ConcurrentHashMap<>();
     private final AtomicLong usedBytes = new AtomicLong();
 
-    @Autowired
-    public FaceGallery(FaceSearchMapper mapper,
-            @Value("${face.search.gallery.max-bytes:134217728}") long maxBytes,
-            @Value("${face.search.gallery.max-delta:2000}") int maxDelta) {
-        this(mapper, maxBytes, maxDelta, Executors.newSingleThreadExecutor(r -> {
+    /** {@code mapper} supplies the revision clock and change log; {@code source} the features. */
+    public FaceGallery(FaceSearchMapper mapper, FeatureSource source, long maxBytes, int maxDelta) {
+        this(mapper, source, maxBytes, maxDelta, Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "face-gallery-builder"); t.setDaemon(true); return t;
         }));
     }
 
-    /** {@code builder} runs rebuilds; tests pass a direct executor. */
+    /** v1 features; {@code builder} runs rebuilds and tests pass a direct executor. */
     FaceGallery(FaceSearchMapper mapper, long maxBytes, int maxDelta, ExecutorService builder) {
-        if (maxBytes < 0 || maxDelta < 1) throw new IllegalArgumentException("Invalid gallery limits");
-        this.mapper = mapper; this.maxBytes = maxBytes; this.maxDelta = maxDelta; this.builder = builder;
+        this(mapper, FeatureSource.v1(mapper), maxBytes, maxDelta, builder);
     }
 
-    @PreDestroy public void shutdown() { builder.shutdownNow(); }
+    FaceGallery(FaceSearchMapper mapper, FeatureSource source, long maxBytes, int maxDelta, ExecutorService builder) {
+        if (maxBytes < 0 || maxDelta < 1) throw new IllegalArgumentException("Invalid gallery limits");
+        this.mapper = mapper; this.source = source; this.maxBytes = maxBytes; this.maxDelta = maxDelta; this.builder = builder;
+    }
+
+    public void shutdown() { builder.shutdownNow(); }
+
+    /**
+     * Forgets a cached group so the next search rebuilds it. For feature writes that do not go
+     * through the change log, such as the feature backfill.
+     */
+    public void invalidate(long groupId) {
+        Group group = groups.get(groupId);
+        if (group == null) return;
+        group.lock.writeLock().lock();
+        try { drop(groupId, group); } finally { group.lock.writeLock().unlock(); }
+    }
 
     /** Best and runner-up over a group. {@code bestId} is null when nothing scored above zero. */
     public record Top2(Long bestId, Long bestVersion, float best, float second) {}
@@ -107,14 +115,14 @@ public class FaceGallery {
         if (changed.size() > maxDelta) return false;
         for (int from = 0; from < changed.size(); from += PAGE) {
             List<Long> ids = changed.subList(from, Math.min(changed.size(), from + PAGE));
-            Map<Long, User> rows = new HashMap<>();
-            for (User row : mapper.rowsByIds(ids)) rows.put(row.getId(), row);
+            Map<Long, FeatureSource.Row> rows = new HashMap<>();
+            for (FeatureSource.Row row : source.rowsByIds(ids)) rows.put(row.id(), row);
             for (Long id : ids) {
-                User row = rows.get(id);
-                float[] vector = row != null && Objects.equals(row.getStatus(), 1) && Long.valueOf(groupId).equals(row.getGroupId())
+                FeatureSource.Row row = rows.get(id);
+                float[] vector = row != null && Objects.equals(row.status(), 1) && Long.valueOf(groupId).equals(row.groupId())
                         ? unitFeature(row) : null;
                 if (vector == null) group.remove(id);
-                else if (!group.put(id, row.getSyncVersion(), vector)) return false;
+                else if (!group.put(id, row.syncVersion(), vector)) return false;
             }
         }
         group.revision = clock.getHead();
@@ -143,26 +151,26 @@ public class FaceGallery {
         long after = 0;
         boolean sized = false;
         while (true) {
-            List<User> chunk = mapper.nextChunk(groupId, after, PAGE);
-            for (User row : chunk) {
+            List<FeatureSource.Row> chunk = source.nextChunk(groupId, after, PAGE);
+            for (FeatureSource.Row row : chunk) {
                 float[] vector = unitFeature(row);
                 if (vector != null && !sized) {
                     // Size the group once from its row count, so a group that cannot fit is refused
                     // before it evicts anything.
                     sized = true;
-                    long count = mapper.countActive(groupId);
+                    long count = source.countActive(groupId);
                     group.dim = vector.length;
                     if (!group.ensureCapacity(count + count / 8 + 64)) { refuse(groupId, group); return; }
                 }
-                if (vector != null && !group.put(row.getId(), row.getSyncVersion(), vector)) { refuse(groupId, group); return; }
-                after = row.getId();
+                if (vector != null && !group.put(row.id(), row.syncVersion(), vector)) { refuse(groupId, group); return; }
+                after = row.id();
             }
             if (chunk.size() < PAGE) break;
         }
         tooLarge.remove(groupId);
         Group previous = groups.put(groupId, group);
         if (previous != null) release(previous);
-        log.info("Face gallery for group {} built at revision {} with {} faces", groupId, clock.getHead(), group.size);
+        log.info("Face gallery {} for group {} built at revision {} with {} faces", source.version(), groupId, clock.getHead(), group.size);
     }
 
     private void refuse(long groupId, Group group) {
@@ -194,8 +202,8 @@ public class FaceGallery {
         return true;
     }
 
-    private static float[] unitFeature(User row) {
-        float[] vector = FaceUtils.parseFeatureArray(row.getFeatureData());
+    private static float[] unitFeature(FeatureSource.Row row) {
+        float[] vector = row.feature() == null ? null : row.feature().clone();
         return FaceUtils.normalizeInPlace(vector) ? vector : null;
     }
 

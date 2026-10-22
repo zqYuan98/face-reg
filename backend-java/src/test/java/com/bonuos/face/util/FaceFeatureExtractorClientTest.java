@@ -55,6 +55,27 @@ class FaceFeatureExtractorClientTest {
         assertThat(client(1000, 2000, 32768).extractFeature(IMAGE)).hasSize(1024).containsOnly(0.03125f);
     }
 
+    @Test void v2UsesItsEndpointAndReportsQualityReasons() throws IOException {
+        StringBuilder v2 = new StringBuilder("{\"success\":true,\"feature_version\":\"arcface_r50_512\",\"feature\":[");
+        for (int i = 0; i < 512; i++) v2.append(i == 0 ? "" : ",").append("0.5");
+        v2.append("]}");
+        java.util.concurrent.atomic.AtomicBoolean refuse = new java.util.concurrent.atomic.AtomicBoolean();
+        server.createContext("/api/v2/extract_feature", exchange -> reply(exchange, 200,
+                refuse.get() ? "{\"success\":false,\"reason_code\":\"BAD_POSE\",\"feature\":null}" : v2.toString()));
+        server.createContext("/api/extract_feature", exchange -> reply(exchange, 200, VALID));
+        var client = client(1000, 2000, 32768);
+        java.io.File image = java.nio.file.Files.write(java.nio.file.Files.createTempFile("face", ".jpg"), new byte[]{1, 2, 3}).toFile();
+        try {
+            assertThat(client.extractFeature(image, "arcface_r50_512")).hasSize(512).containsOnly(0.5f);
+            assertThat(client.extractFeature(image, "recognizer_v1_1024")).hasSize(1024);
+            refuse.set(true);
+            assertThatThrownBy(() -> client.extractFeature(image, "arcface_r50_512")).isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getErrorCode()).isEqualTo("NO_USABLE_FACE");
+                assertThat(error.getMessage()).contains("角度");
+            });
+        } finally { image.delete(); }
+    }
+
     @Test void queuedCallerRunsWhenThePermitFrees() throws Exception {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);

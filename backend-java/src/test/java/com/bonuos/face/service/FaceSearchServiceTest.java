@@ -78,6 +78,30 @@ class FaceSearchServiceTest {
         assertEquals("SEARCH_CHANGED",assertThrows(ApiException.class,
                 ()->new FaceSearchService(chunks,users,gallery,1,10,1000,0.6f,0f).search(List.of(1f,0f),1)).getErrorCode());
     }
+    private static com.bonuos.face.dto.FeatureRow stored(long id, long version, float... feature) {
+        com.bonuos.face.dto.FeatureRow r=new com.bonuos.face.dto.FeatureRow(); r.setId(id); r.setSyncVersion(version);
+        r.setFeatureBlob(com.bonuos.face.util.FaceUtils.toBlob(feature)); return r;
+    }
+    @Test void v2SearchReadsStoredBlobsAndSkipsWrongDimensions() {
+        FaceSearchMapper chunks=mock(FaceSearchMapper.class); UserMapper users=mock(UserMapper.class);
+        com.bonuos.face.mapper.UserFeatureMapper features=mock(com.bonuos.face.mapper.UserFeatureMapper.class);
+        float[] a=new float[512], b=new float[512]; a[0]=1; b[1]=1;
+        when(features.nextChunk("arcface_r50_512",1,0,10)).thenReturn(List.of(stored(1,1,a),stored(2,1,b),stored(3,1,1f,0f)));
+        User winner=row(2,null); winner.setSyncVersion(1L); when(users.selectById(2L)).thenReturn(winner);
+        var source=FeatureSource.stored("arcface_r50_512",features);
+        var service=new FaceSearchService(chunks,users,source,null,1,10,1000,0.45f,0f);
+        assertEquals("arcface_r50_512",service.featureVersion());
+        float[] probe=new float[512]; probe[1]=2;
+        assertEquals(2L,service.search(probe,1).getId());
+        verify(chunks,never()).nextChunk(anyLong(),anyLong(),anyInt());
+    }
+    @Test void blobsRoundTripLittleEndian() {
+        float[] v={1.5f,-0.25f,3e-8f};
+        byte[] blob=com.bonuos.face.util.FaceUtils.toBlob(v);
+        assertEquals(0x3f,blob[3]&0xff); // 1.5f = 0x3fc00000, little-endian
+        assertArrayEquals(v,com.bonuos.face.util.FaceUtils.fromBlob(blob));
+        assertNull(com.bonuos.face.util.FaceUtils.fromBlob(new byte[5]));
+    }
     @Test void parserMatchesJacksonOnLargeVectors() throws Exception {
         float[] values=new float[1024]; java.util.Random r=new java.util.Random(7);
         for(int i=0;i<values.length;i++) values[i]=(float)r.nextGaussian();

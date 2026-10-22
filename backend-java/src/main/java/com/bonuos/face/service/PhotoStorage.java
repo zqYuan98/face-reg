@@ -83,6 +83,11 @@ public class PhotoStorage {
         }
         Files.deleteIfExists(marker);
     }
+    /** The stored file of a published photo, or null when the name is invalid or the file is gone. */
+    public Path published(String filename) {
+        Path photo = directChild(filename);
+        return photo != null && Files.isRegularFile(photo) ? photo : null;
+    }
     private Path directChild(String filename) {
         if (filename == null || filename.isBlank() || filename.startsWith(".")) return null;
         Path target = root.resolve(filename).normalize();
