@@ -18,11 +18,92 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("FeatureServer")
 
 
+V1_VERSION = "recognizer_v1_1024"
+V2_VERSION = "arcface_r50_512"
+
+
+def enabled_versions():
+    """FACE_FEATURE_VERSIONS: comma-separated feature versions this process loads."""
+    raw = os.getenv("FACE_FEATURE_VERSIONS", V1_VERSION)
+    versions = {v.strip() for v in raw.split(",") if v.strip()}
+    unknown = versions - {V1_VERSION, V2_VERSION}
+    if unknown or not versions:
+        raise ValueError(f"FACE_FEATURE_VERSIONS has unsupported values: {sorted(unknown) or raw!r}")
+    return versions
+
+
+class ModelSet:
+    """The loaded pipelines. v1 calls keep the original extractor interface."""
+
+    def __init__(self, v1=None, v2=None):
+        self.v1, self.v2 = v1, v2
+
+    def _require_v1(self):
+        if self.v1 is None:
+            raise HTTPException(404, detail={"errorCode": "FEATURE_VERSION_DISABLED"})
+        return self.v1
+
+    def extract_features(self, *args, **kwargs):
+        return self._require_v1().extract_features(*args, **kwargs)
+
+    def detect_faces(self, *args, **kwargs):
+        return self._require_v1().detect_faces(*args, **kwargs)
+
+
 def default_factory():
     # Heavy native imports and model loading run in the bounded worker, never on the event loop.
     runtime_env.limit_opencv()
-    from face_feature_extractor import FaceFeatureExtractor
-    return FaceFeatureExtractor()
+    versions = enabled_versions()
+    v1 = v2 = None
+    if V1_VERSION in versions:
+        from face_feature_extractor import FaceFeatureExtractor
+        v1 = FaceFeatureExtractor()
+    if V2_VERSION in versions:
+        from models.arcface_pipeline import ArcFacePipeline
+        v2 = ArcFacePipeline()
+    return ModelSet(v1, v2)
+
+
+def _finite(value):
+    """JSON cannot carry NaN; undefined measurements (e.g. pose of a degenerate face) become null."""
+    if hasattr(value, "item") and not isinstance(value, (list, tuple, dict)) and getattr(value, "ndim", 1) == 0:
+        value = value.item()  # numpy scalar
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _finite(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite(v) for v in value]
+    return value
+
+
+def v2_response(result, model_versions):
+    face = result.face
+    body = {
+        "success": result.success,
+        "reason_code": result.reason,
+        "feature_version": V2_VERSION,
+        "feature": None,
+        "feature_dim": None,
+        "face": None,
+        "face_count": result.face_count,
+        "rotation": result.rotation,
+        "model_versions": model_versions,
+        "processing_time_ms": result.processing_time_ms,
+    }
+    if face is not None:
+        x1, y1, x2, y2 = face.box
+        body["face"] = {
+            "box": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+            "score": face.score,
+            "landmarks": [list(point) for point in face.landmarks],
+            "pose": {"yaw": face.pose[0], "pitch": face.pose[1], "roll": face.pose[2]},
+            "quality": face.quality,
+        }
+        if face.feature is not None:
+            body["feature"] = face.feature.tolist()
+            body["feature_dim"] = len(body["feature"])
+    return _finite(body)
 
 
 def decode_image(contents):
@@ -112,6 +193,34 @@ def create_app(factory=default_factory, decoder=decode_image, *, timeout_seconds
     @application.post("/api/extract_feature", response_model=ExtractFeatureResponse)
     async def extract_feature(image: UploadFile = File(...)):
         return await execute(image, extraction)
+
+    def extraction_v2(quality_filter):
+        def run(model, contents):
+            pipeline = getattr(model, "v2", None)
+            if pipeline is None:
+                raise HTTPException(404, detail={"errorCode": "FEATURE_VERSION_DISABLED"})
+            result = pipeline.extract(decoder(contents), quality_filter=quality_filter)
+            body = v2_response(result, pipeline.model_versions)
+            feature = body["feature"]
+            if result.success and (feature is None or len(feature) != 512 or not any(feature)):
+                raise HTTPException(502, detail={"errorCode": "INVALID_FEATURE"})
+            return body
+        return run
+
+    @application.post("/api/v2/extract_feature")
+    async def extract_feature_v2(image: UploadFile = File(...), quality_filter: bool = Form(True)):
+        """arcface_r50_512 feature of the largest face, with box, landmarks, pose and quality.
+
+        success=false with reason_code NO_FACE, FACE_TOO_SMALL, BAD_POSE, TOO_DARK, TOO_BRIGHT,
+        TOO_BLURRY or FEATURE_FAILED is a normal 200 answer about the image.
+        """
+        return await execute(image, extraction_v2(quality_filter))
+
+    @application.get("/api/feature_versions")
+    async def feature_versions():
+        model = runtime.model
+        loaded = [] if model is None else [v for v, m in ((V1_VERSION, getattr(model, "v1", model)), (V2_VERSION, getattr(model, "v2", None))) if m is not None]
+        return {"feature_versions": loaded}
 
     @application.post("/api/detect_face", response_model=DetectFaceResponse)
     async def detect_face(image: UploadFile = File(...), expand_scale: float = Form(0.0)):

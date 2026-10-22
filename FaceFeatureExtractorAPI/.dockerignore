@@ -1,0 +1,7 @@
+.venv
+**/__pycache__
+tmp
+tests
+# InsightFace weights are research-licensed: mount them, never bake them into an image.
+checkpoints/insightface
+checkpoints/README.md

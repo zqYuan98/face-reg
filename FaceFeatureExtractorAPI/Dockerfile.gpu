@@ -1,0 +1,24 @@
+# GPU 版：ONNX Runtime CUDA（可选 TensorRT）。宿主机需要 NVIDIA 驱动和 nvidia-container-toolkit，
+# 以 `docker run --gpus all` 或 compose 的 gpu 配置启动。CUDA/cuDNN 由 requirements-gpu.txt 的 wheel 提供。
+# v2 模型（InsightFace 权重）在运行时挂载到 /app/checkpoints/insightface。
+FROM python:3.12-slim-bookworm
+
+WORKDIR /app
+RUN rm -rf /etc/apt/sources.list.d/* \
+    && echo "deb http://mirrors.aliyun.com/debian/ bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list \
+    && echo "deb http://mirrors.aliyun.com/debian/ bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list \
+    && echo "deb http://mirrors.aliyun.com/debian-security/ bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list \
+    && apt-get update && apt-get install -y --no-install-recommends libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-gpu.txt ./
+RUN pip install --no-cache-dir -r requirements-gpu.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+COPY . .
+
+# 一块 GPU 上 2～4 个 worker 即可让 GPU 吃满（前处理仍在 CPU）；v2 默认 det_10g + r50 fp32 + 翻转增强。
+# FACE_DEVICE=tensorrt 需另装 tensorrt-cu12，并把 trt_cache 放在持久卷上（首次构建引擎需数分钟）。
+ENV FACE_DEVICE=cuda FACE_DEVICE_ID=0 FACE_WORKERS=2 FACE_ORT_THREADS=2 FACE_INFERENCE_QUEUE=32 \
+    FACE_FEATURE_VERSIONS=recognizer_v1_1024,arcface_r50_512
+
+EXPOSE 8000
+CMD ["python", "feature_comparison_server.py", "--port", "8000"]

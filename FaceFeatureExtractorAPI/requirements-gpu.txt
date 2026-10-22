@@ -1,0 +1,10 @@
+# GPU edition (Dockerfile.gpu). The cuda/cudnn extras bring CUDA 12 and cuDNN as wheels, so the base
+# image only needs the NVIDIA driver from the container runtime. Never install next to onnxruntime.
+opencv-python-headless>=4.8
+numpy>=1.24
+onnxruntime-gpu[cuda,cudnn]>=1.20
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+pydantic>=2.0,<3
+typing-extensions>=4.6

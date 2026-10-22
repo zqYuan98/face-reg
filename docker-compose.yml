@@ -34,6 +34,8 @@ services:
       FACE_WORKERS: ${FACE_WORKERS:-2}
       FACE_ORT_THREADS: ${FACE_ORT_THREADS:-1}
       FACE_INFERENCE_QUEUE: ${FACE_INFERENCE_QUEUE:-32}
+      # 加载的特征版本；arcface_r50_512 需要把 InsightFace 权重放到 checkpoints/insightface（仅限研究用途许可）
+      FACE_FEATURE_VERSIONS: ${FACE_FEATURE_VERSIONS:-recognizer_v1_1024}
     volumes:
       - ./FaceFeatureExtractorAPI/models:/app/models
       - ./FaceFeatureExtractorAPI/checkpoints:/app/checkpoints
@@ -65,6 +67,9 @@ services:
       SPRING_SERVLET_MULTIPART_LOCATION: /app/uploads
       # 算法服务地址 (使用服务名)
       FACE_EXTRACTOR_API_URL: http://face-algorithm:8000
+      # 注册时提取的特征版本（逗号分隔）与 1:N 检索使用的版本；检索版本必须在注册版本中
+      FACE_FEATURES_VERSIONS: ${FACE_FEATURES_VERSIONS:-recognizer_v1_1024}
+      FACE_SEARCH_FEATURE_VERSION: ${FACE_SEARCH_FEATURE_VERSION:-recognizer_v1_1024}
     volumes:
       - ./backend-java/uploads:/app/uploads
       - sync-snapshots:/app/data/snapshots

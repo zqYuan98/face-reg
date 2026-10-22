@@ -1,4 +1,4 @@
-# 使用轻量级 Python 3.9 基础镜像
+# CPU 版：ONNX Runtime CPU。v2 模型（InsightFace 权重）在运行时挂载到 /app/checkpoints/insightface
 FROM python:3.10-slim
 
 # 设置工作目录
@@ -17,13 +17,16 @@ RUN rm -rf /etc/apt/sources.list.d/* \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制依赖文件
-COPY requirements.txt .
+COPY requirements.txt requirements-cpu.txt ./
 
 # 2. 使用清华源安装 Python 依赖 (加速 pip 安装)
-RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+RUN pip install --no-cache-dir -r requirements-cpu.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 复制项目代码
 COPY . .
+
+# 按进程扩容：每个物理核约一个 worker、ONNX 单线程；v2 默认 det_500m + r50 int8
+ENV FACE_DEVICE=cpu FACE_WORKERS=2 FACE_ORT_THREADS=1 FACE_INFERENCE_QUEUE=32     FACE_FEATURE_VERSIONS=recognizer_v1_1024
 
 # 暴露端口
 EXPOSE 8000

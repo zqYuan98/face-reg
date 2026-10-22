@@ -28,3 +28,6 @@ ArcSoft*.zip
 
 # Biometric test photos and recordings: never commit.
 face_test/
+
+# InsightFace weights (research licence): mounted at deploy time, never committed
+FaceFeatureExtractorAPI/checkpoints/insightface/

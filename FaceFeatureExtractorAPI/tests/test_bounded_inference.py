@@ -262,3 +262,45 @@ def test_cancelled_waiter_does_not_strand_the_next_one():
             release.set()
             runtime.close()
     asyncio.run(scenario())
+
+
+def test_v2_endpoint_reports_quality_reasons_and_disabled_versions():
+    import numpy as np
+    from feature_server import ModelSet
+    from models.arcface_pipeline import V2Face, V2Result
+
+    class Pipeline:
+        model_versions = {"recognizer": "synthetic"}
+        def extract(self, image, quality_filter=True):
+            face = V2Face(box=(1.0, 2.0, 30.0, 40.0), score=0.9, landmarks=[(0.0, 0.0)] * 5,
+                          pose=(float("nan"), 1.0, 2.0), quality={"pose": {"yaw": float("nan"), "passed": np.bool_(False)}, "size": {"value": np.float32(28)}})
+            if quality_filter:
+                return V2Result(False, "BAD_POSE", face, 2, 0, 1.0)
+            face.feature = np.full(512, 1 / np.sqrt(512), np.float32)
+            return V2Result(True, None, face, 2, 90, 1.0)
+
+    async def scenario():
+        app = create_app(lambda: ModelSet(v1=None, v2=Pipeline()), lambda data: data)
+        async with app.router.lifespan_context(app):
+            await ready(app.state.inference)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                refused = (await client.post("/api/v2/extract_feature", files={"image": ("x", b"i")})).json()
+                assert refused["success"] is False and refused["reason_code"] == "BAD_POSE"
+                assert refused["feature"] is None and refused["face"]["pose"]["yaw"] is None
+                accepted = await client.post("/api/v2/extract_feature", files={"image": ("x", b"i")}, data={"quality_filter": "false"})
+                body = accepted.json()
+                assert body["success"] and body["feature_dim"] == 512 and body["rotation"] == 90
+                assert body["feature_version"] == "arcface_r50_512" and body["face_count"] == 2
+                v1 = await client.post("/api/extract_feature", files={"image": ("x", b"i")})
+                assert v1.status_code == 404
+                assert (await client.get("/api/feature_versions")).json() == {"feature_versions": ["arcface_r50_512"]}
+    asyncio.run(scenario())
+
+
+def test_feature_versions_setting_is_validated(monkeypatch):
+    from feature_server import enabled_versions
+    monkeypatch.setenv("FACE_FEATURE_VERSIONS", "recognizer_v1_1024, arcface_r50_512")
+    assert enabled_versions() == {"recognizer_v1_1024", "arcface_r50_512"}
+    monkeypatch.setenv("FACE_FEATURE_VERSIONS", "arcface_r100")
+    with pytest.raises(ValueError):
+        enabled_versions()

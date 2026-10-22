@@ -1,4 +1,4 @@
-"""Concurrent load against /api/extract_feature: throughput, latency percentiles, status counts.
+"""Concurrent load against a feature endpoint: throughput, latency percentiles, status counts.
 
     python tools/load_test.py --url http://127.0.0.1:8000 --images "D:/lfw/*/*.jpg" --concurrency 8 --requests 400
 
@@ -13,7 +13,7 @@ import time
 import httpx
 
 
-async def run(urls, payloads, concurrency, total):
+async def run(urls, path, payloads, concurrency, total):
     latencies, statuses = [], collections.Counter()
     counter = iter(range(total))
 
@@ -23,9 +23,9 @@ async def run(urls, payloads, concurrency, total):
             url = urls[i % len(urls)]
             started = time.perf_counter()
             try:
-                response = await client.post(f"{url}/api/extract_feature", files={"image": ("face.jpg", body)})
+                response = await client.post(f"{url}{path}", files={"image": ("face.jpg", body)})
                 statuses[response.status_code] += 1
-                if response.status_code == 200:
+                if response.status_code == 200 and response.json().get("success"):
                     latencies.append((time.perf_counter() - started) * 1000)
             except httpx.HTTPError as error:
                 statuses[type(error).__name__] += 1
@@ -44,6 +44,7 @@ async def run(urls, payloads, concurrency, total):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:8000", help="comma-separated; requests rotate over them")
+    parser.add_argument("--path", default="/api/extract_feature", help="e.g. /api/v2/extract_feature")
     parser.add_argument("--images", required=True)
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--concurrency", type=int, default=8)
@@ -53,7 +54,7 @@ def main():
     if not payloads:
         raise SystemExit("no images matched")
     urls = [u.strip().rstrip("/") for u in args.url.split(",") if u.strip()]
-    asyncio.run(run(urls, payloads, args.concurrency, args.requests))
+    asyncio.run(run(urls, args.path, payloads, args.concurrency, args.requests))
 
 
 if __name__ == "__main__":

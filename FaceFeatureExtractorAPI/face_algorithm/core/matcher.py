@@ -1,4 +1,4 @@
-"""Fail-closed matching for the frozen 1024-dimensional face protocol."""
+"""Fail-closed matching of two features of the same, supported feature version."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Final, Literal
 import numpy as np
 
 from face_algorithm.schemas import (
-    FEATURE_DIMENSION,
+    FEATURE_DIMENSIONS,
     FeatureVersion,
     ReasonCode,
 )
@@ -40,23 +40,25 @@ class MatchResult:
     feature_dimension: int
 
 
-def _require_feature_version(value: object) -> None:
-    if value != FeatureVersion.RECOGNIZER_V1_1024:
+def _require_feature_version(value: object) -> FeatureVersion:
+    try:
+        return FeatureVersion(value)
+    except ValueError:
         raise EmbeddingMatchError(
             ReasonCode.FEATURE_VERSION_MISMATCH,
-            "embedding feature version must be recognizer_v1_1024",
-        )
+            "unsupported embedding feature version",
+        ) from None
 
 
-def _normalized_copy(vector: object) -> np.ndarray:
+def _normalized_copy(vector: object, dimension: int) -> np.ndarray:
     if (
         not isinstance(vector, np.ndarray)
         or vector.dtype != np.dtype(np.float32)
-        or vector.shape != (FEATURE_DIMENSION,)
+        or vector.shape != (dimension,)
     ):
         raise EmbeddingMatchError(
             ReasonCode.FEATURE_VERSION_MISMATCH,
-            "embedding must be a float32 ndarray with shape (1024,)",
+            f"embedding must be a float32 ndarray with shape ({dimension},)",
         )
     if not np.all(np.isfinite(vector)):
         raise EmbeddingMatchError(
@@ -83,10 +85,16 @@ def match_embeddings(
 ) -> MatchResult:
     """Return a bounded dot-product score after validating both contracts."""
 
-    _require_feature_version(reference_version)
-    _require_feature_version(probe_version)
-    reference_normalized = _normalized_copy(reference)
-    probe_normalized = _normalized_copy(probe)
+    version = _require_feature_version(reference_version)
+    if _require_feature_version(probe_version) != version:
+        # Features of different models live in different spaces; their dot product means nothing.
+        raise EmbeddingMatchError(
+            ReasonCode.FEATURE_VERSION_MISMATCH,
+            "reference and probe feature versions differ",
+        )
+    dimension = FEATURE_DIMENSIONS[version]
+    reference_normalized = _normalized_copy(reference, dimension)
+    probe_normalized = _normalized_copy(probe, dimension)
     raw_score = float(np.dot(reference_normalized, probe_normalized))
     if not np.isfinite(raw_score):
         raise EmbeddingMatchError(
@@ -104,6 +112,6 @@ def match_embeddings(
     return MatchResult(
         score=float(np.clip(raw_score, -1.0, 1.0)),
         matcher_version=MATCHER_VERSION,
-        feature_version=FeatureVersion.RECOGNIZER_V1_1024,
-        feature_dimension=FEATURE_DIMENSION,
+        feature_version=version,
+        feature_dimension=dimension,
     )

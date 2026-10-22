@@ -12,11 +12,11 @@ from typing import Annotated, Any, Literal
 import numpy as np
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.requests import ClientDisconnect
 
 from face_algorithm.core.matcher import EmbeddingMatchError, match_embeddings
-from face_algorithm.schemas import FEATURE_DIMENSION, ReasonCode
+from face_algorithm.schemas import FEATURE_DIMENSIONS, FeatureVersion, ReasonCode
 
 from .body_limit import FEATURE_COMPARISON_MAX_BYTES
 from .deadline import FEATURE_COMPARISON_DEADLINE_SECONDS, request_deadline
@@ -30,8 +30,9 @@ logger = logging.getLogger("face_algorithm.api.features")
 
 FeatureVector = Annotated[
     list[Annotated[float, Field(strict=True, allow_inf_nan=False)]],
-    Field(min_length=FEATURE_DIMENSION, max_length=FEATURE_DIMENSION),
+    Field(min_length=min(FEATURE_DIMENSIONS.values()), max_length=max(FEATURE_DIMENSIONS.values())),
 ]
+VersionName = Literal["recognizer_v1_1024", "arcface_r50_512"]
 
 
 class FeatureComparisonRequest(BaseModel):
@@ -43,14 +44,14 @@ class FeatureComparisonRequest(BaseModel):
 
     reference_feature: FeatureVector = Field(repr=False)
     probe_feature: FeatureVector = Field(repr=False)
-    reference_version: Literal["recognizer_v1_1024"]
-    probe_version: Literal["recognizer_v1_1024"]
+    reference_version: VersionName
+    probe_version: VersionName
 
     @field_validator("reference_feature", "probe_feature", mode="before")
     @classmethod
     def require_float32_numbers(cls, value: Any) -> Any:
-        if type(value) is not list or len(value) != FEATURE_DIMENSION:
-            raise ValueError("feature must contain exactly 1024 numbers")
+        if type(value) is not list or len(value) not in FEATURE_DIMENSIONS.values():
+            raise ValueError("feature has an unsupported length")
         for item in value:
             # Do not coerce JSON booleans, strings, objects, or nested arrays.
             if type(item) not in (int, float):
@@ -63,14 +64,23 @@ class FeatureComparisonRequest(BaseModel):
                 raise ValueError("feature values must be finite float32 numbers")
         return value
 
+    @model_validator(mode="after")
+    def require_matching_versions(self):
+        if self.reference_version != self.probe_version:
+            raise ValueError("reference and probe feature versions differ")
+        dimension = FEATURE_DIMENSIONS[FeatureVersion(self.reference_version)]
+        if len(self.reference_feature) != dimension or len(self.probe_feature) != dimension:
+            raise ValueError("feature length does not match its version")
+        return self
+
 
 class FeatureComparisonResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     success: Literal[True] = True
     similarity_score: float = Field(ge=-1, le=1, allow_inf_nan=False)
-    feature_dimension: Literal[1024] = 1024
-    feature_version: Literal["recognizer_v1_1024"] = "recognizer_v1_1024"
+    feature_dimension: Literal[1024, 512] = 1024
+    feature_version: VersionName = "recognizer_v1_1024"
     matcher_version: Literal["l2_dot_v1"] = "l2_dot_v1"
     processing_time_ms: float = Field(ge=0, allow_inf_nan=False)
 
@@ -147,10 +157,10 @@ def create_feature_comparison_router(*, path: str) -> APIRouter:
     @router.post(
         path,
         operation_id="compare_feature_vectors" if path == V2_FEATURE_COMPARISON_PATH else "legacy_compare_feature_vectors",
-        summary="比较两个同协议的 1024 维人脸特征",
+        summary="比较两个同版本的人脸特征",
         description=(
-            "JSON 体最多 128 KiB，总请求期限 5 秒。两侧必须为有限、非零的 1024 维数值向量，"
-            "并分别声明 recognizer_v1_1024。返回归一化余弦分数，不返回输入向量、身份通过结论或阈值。"
+            "JSON 体最多 128 KiB，总请求期限 5 秒。两侧必须声明同一特征版本：recognizer_v1_1024（1024 维）"
+            "或 arcface_r50_512（512 维），向量为有限、非零数值。返回归一化余弦分数，不返回输入向量、身份通过结论或阈值。"
             "调用方负责确认特征实际来源兼容；此接口不加载模型、不评估图像质量或活体，且不占图像推理槽。"
         ),
         response_model=FeatureComparisonResponse,
@@ -192,6 +202,8 @@ def create_feature_comparison_router(*, path: str) -> APIRouter:
             _require_deadline(deadline)
             return FeatureComparisonResponse(
                 similarity_score=result.score,
+                feature_dimension=result.feature_dimension,
+                feature_version=result.feature_version.value,
                 processing_time_ms=max(0.0, (time.monotonic() - started) * 1000.0),
             )
         except ApiError as error:

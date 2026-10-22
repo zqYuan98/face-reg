@@ -1,0 +1,19 @@
+# GPU 版算法服务：docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+# 需要宿主机 NVIDIA 驱动与 nvidia-container-toolkit。
+services:
+  face-algorithm:
+    build:
+      context: ./FaceFeatureExtractorAPI
+      dockerfile: Dockerfile.gpu
+    environment:
+      FACE_DEVICE: ${FACE_DEVICE:-cuda}
+      FACE_WORKERS: ${FACE_WORKERS:-2}
+      FACE_ORT_THREADS: ${FACE_ORT_THREADS:-2}
+      FACE_FEATURE_VERSIONS: ${FACE_FEATURE_VERSIONS:-recognizer_v1_1024,arcface_r50_512}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

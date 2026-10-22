@@ -20,6 +20,7 @@ from pydantic import (
 
 __all__ = [
     "FEATURE_DIMENSION",
+    "FEATURE_DIMENSIONS",
     "IMAGE_RECAPTURE_REASON_CODES",
     "VIDEO_RECAPTURE_REASON_CODES",
     "CardRegion",
@@ -144,9 +145,15 @@ VIDEO_RECAPTURE_REASON_CODES: frozenset[ReasonCode] = frozenset(
 
 class FeatureVersion(str, Enum):
     RECOGNIZER_V1_1024 = "recognizer_v1_1024"
+    # SCRFD + ArcFace IResNet-50 (w600k_r50); research-licensed weights.
+    ARCFACE_R50_512 = "arcface_r50_512"
 
 
 FEATURE_DIMENSION = 1024
+FEATURE_DIMENSIONS = {
+    FeatureVersion.RECOGNIZER_V1_1024: 1024,
+    FeatureVersion.ARCFACE_R50_512: 512,
+}
 
 
 class _PublicSchema(BaseModel):
