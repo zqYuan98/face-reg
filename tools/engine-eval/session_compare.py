@@ -1,8 +1,9 @@
 """Summarise measured session replay, never estimate ArcSoft timing from per-frame calls.
 
 Only session_* rows are consumed. detect_ms is analysis-thread onFrame cost, not the sum of
-background inference costs. Schema v2 decisions come from events.csv, including bounded tail
-completion; legacy recognized notes remain readable. Elapsed time starts at the first replay frame.
+background inference costs. Schema v2/v3 decisions come from events.csv, including bounded tail
+completion; legacy recognized notes remain readable. V3 separates successful admitted frames from
+rejected calls and audits nested detector timings. Elapsed time starts at the first replay frame.
 
     python session_compare.py <run_dir> [--subject xxr] [--json <output.json>]
     python session_compare.py <run_dir> --arcsoft-run <measured_session_arcsoft_run>
@@ -19,6 +20,25 @@ import math
 import statistics
 from collections import defaultdict
 from pathlib import Path
+
+
+SELF_SESSIONS = {"session_cascade", "session_mbf", "session_r50_int8"}
+FRAME_COLUMNS_V2 = [
+    "backend", "clip_id", "subject_id", "label", "attack_type", "frame_index", "timestamp_ns",
+    "face_count", "box_left", "box_top", "box_right", "box_bottom", "preprocess_ms", "detect_ms",
+    "liveness_ms", "feature_ms", "live_score", "live_status", "feature_attempted", "feature_ok", "warmup", "note",
+]
+TIMING_COLUMNS = [
+    "analysis_status", "detector_mode", "detector_status", "full_calls", "roi_calls", "copy_ms",
+    "sample_ms", "scrfd_preprocess_ms", "scrfd_inference_ms", "scrfd_postprocess_ms", "full_ms", "roi_ms",
+    "analysis_cpu_ms", "feature_capture_count", "liveness_capture_count", "copy_bytes", "copy_reallocations",
+]
+FRAME_COLUMNS_V3 = FRAME_COLUMNS_V2 + TIMING_COLUMNS
+ANALYSIS_STATES = ("ANALYZED", "REJECTED", "DROPPED", "ABORTED", "ERROR", "UNMEASURED")
+STAGE_COLUMNS = ("copy_ms", "sample_ms", "scrfd_preprocess_ms", "scrfd_inference_ms",
+                 "scrfd_postprocess_ms", "full_ms", "roi_ms")
+COUNT_COLUMNS = ("full_calls", "roi_calls", "feature_capture_count", "liveness_capture_count",
+                 "copy_bytes", "copy_reallocations")
 
 
 def number(value):
@@ -41,12 +61,13 @@ def percentile(values, q):
 
 class RunRows(list):
     """Old (rows, warnings) API plus versioned audit evidence."""
-    def __init__(self, rows, metadata=None, events=None, completions=None, enrollments=None):
+    def __init__(self, rows, metadata=None, events=None, completions=None, enrollments=None, frame_columns=None):
         super().__init__(rows)
         self.metadata = metadata or {}
         self.events = events
         self.completions = completions
         self.enrollments = enrollments
+        self.frame_columns = frame_columns
         self.audit = audit_run(self)
 
 
@@ -63,31 +84,48 @@ def read_run(directory):
             return None
         with path.open(encoding="utf-8") as source:
             return json.load(source)
-    def read_csv(name):
+    def read_csv(name, with_header=False):
         path = directory / name
         if not path.is_file():
-            return None
+            return (None, None) if with_header else None
         with path.open(encoding="utf-8", newline="") as source:
-            return list(csv.DictReader(source))
-    rows = RunRows(read_csv("frames.csv") or [], read_json("run.json"), read_csv("events.csv"),
-                   read_json("clip-completion.json"), read_csv("enroll.csv"))
+            reader = csv.DictReader(source)
+            data = list(reader)
+            return (data, reader.fieldnames) if with_header else data
+    frames, columns = read_csv("frames.csv", with_header=True)
+    rows = RunRows(frames or [], read_json("run.json"), read_csv("events.csv"),
+                   read_json("clip-completion.json"), read_csv("enroll.csv"), columns)
     return rows, [directory.name + ": " + issue for issue in rows.audit["issues"]]
 
 
 def audit_run(rows):
+    """Malformed evidence must fail eligibility, not crash into an implied successful report."""
+    try:
+        return _audit_run(rows)
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError, OverflowError) as error:
+        version = rows.metadata.get("schemaVersion") if isinstance(rows.metadata, dict) else None
+        return {"schema_version": version, "eligible": False, "legacy": version not in (2, 3),
+                "issues": ["运行证据结构或数值非法（" + type(error).__name__ + "），审计未通过。"]}
+
+
+def _audit_run(rows):
     """Fail closed for comparison eligibility; incomplete and legacy data remain observable."""
     meta, issues = rows.metadata, []
     version = meta.get("schemaVersion")
-    if version != 2:
-        issues.append("旧版或缺少 run.json schema v2：可能尾部截断，仅允许观察报告，不属于严格验收。")
+    if version not in (2, 3):
+        issues.append("旧版或缺少 run.json schema v2/v3：可能尾部截断，仅允许观察报告，不属于严格验收。")
     if meta.get("cancelled"):
         issues.append("运行被取消，不能视为完整测试。")
     if meta.get("failures"):
         issues.append("存在后端失败，请检查 run.json 的 failures。")
     if meta.get("config", {}).get("arcSoftIdCardModel"):
         issues.append("虹软使用 ID_CARD；普通注册照应使用 LIFE_PHOTO，不能混为相同配置。")
-    if version != 2:
+    if version not in (2, 3):
         return {"schema_version": version, "eligible": False, "issues": issues, "legacy": True}
+    if version == 3:
+        # Reject JSON NaN/Infinity anywhere in the new evidence, including optional metrics.
+        fingerprint([meta, rows.completions])
+        audit_analysis_header(rows, issues)
     if meta.get("finished") is not True or not meta.get("finishedAtEpochMs") or meta.get("complete") is not True:
         issues.append("run 未完整 finished/complete。")
     if meta.get("cancelled") is not False:
@@ -132,7 +170,185 @@ def audit_run(rows):
             issues.append("事件来自未计划的 backend/clip。")
     for key, plan in expected.items():
         audit_clip(key, plan, frames.get(key, []), completions.get(key, {}), event_groups.get(key, []), config, issues)
+        if version == 3:
+            audit_analysis_clip(key, frames.get(key, []), completions.get(key, {}), meta, issues)
     return {"schema_version": version, "eligible": not issues, "issues": list(dict.fromkeys(issues)), "legacy": False}
+
+
+def expected_analysis_profile(variant):
+    if variant not in ("baseline", "shared_capture"):
+        return None
+    return {"version": 1, "variant": variant, "shareFeatureCapture": variant == "shared_capture",
+            "detectorLongSide": 320, "detectorThreshold": .5, "fullScanEvery": 10,
+            "regionLongSide": 160, "regionScale": 2.0, "regionMinIou": .2,
+            "detectorThreads": 2, "featureThreads": 4, "livenessThreads": 2, "landmarkThreads": 1,
+            "earlyFrameAdmission": False, "timingLevel": "detector_stages_v1"}
+
+
+def audit_analysis_header(rows, issues):
+    meta = rows.metadata
+    if type(meta.get("schemaVersion")) is not int or type(meta.get("timingSchemaVersion")) is not int or meta["timingSchemaVersion"] != 1:
+        issues.append("v3 timingSchemaVersion 缺失或不支持。")
+    if meta.get("framesColumns") != FRAME_COLUMNS_V3 or rows.frame_columns != FRAME_COLUMNS_V3:
+        issues.append("v3 frames 表头/列声明不匹配。")
+    profile = meta.get("analysisProfile")
+    expected = expected_analysis_profile(meta.get("config", {}).get("evaluationVariant"))
+    if expected is None or fingerprint(profile) != fingerprint(expected):
+        issues.append("v3 analysisProfile 不是与 variant 对应的已知配置。")
+    if meta.get("profileSha256") != fingerprint(profile):
+        issues.append("v3 profile 指纹不匹配。")
+
+
+def csv_count(value):
+    # CSV counters are decimal integers, not booleans, scientific notation or rounded floats.
+    if isinstance(value, str) and value.isascii() and value.isdecimal():
+        return int(value)
+    return None
+
+
+def audit_analysis_clip(key, data, complete, meta, issues):
+    name = "/".join(key)
+    measured = key[0] in SELF_SESSIONS
+    effective = complete.get("effectiveConfig") or {}
+    profile = meta.get("analysisProfile")
+    metrics = complete.get("metrics") or {}
+    if measured:
+        if fingerprint(effective.get("analysisProfile")) != fingerprint(profile):
+            issues.append(name + " 实际 analysisProfile 与运行配置不一致。")
+        detector = effective.get("detector", {})
+        fields = {"longSide": "detectorLongSide", "threshold": "detectorThreshold",
+                  "fullScanEvery": "fullScanEvery", "regionLongSide": "regionLongSide",
+                  "regionScale": "regionScale", "regionMinIou": "regionMinIou",
+                  "detectorThreads": "detectorThreads", "livenessThreads": "livenessThreads",
+                  "timingLevel": "timingLevel"}
+        if (not isinstance(profile, dict) or not isinstance(detector, dict)
+                or fingerprint(detector) != fingerprint({k: profile.get(v) for k, v in fields.items()})):
+            issues.append(name + " detector 实例设置与 profile 不一致。")
+    elif "analysisProfile" in effective:
+        issues.append(name + " 未测后端不应声明自研 analysisProfile。")
+    if "timingOverflow" in metrics and (type(metrics["timingOverflow"]) is not int or metrics["timingOverflow"] != 0):
+        issues.append(name + " 计时记录溢出或计数非法。")
+
+    counts = dict.fromkeys(ANALYSIS_STATES, 0)
+    captures = liveness_captures = 0
+    saw_full, since_full = False, 0
+    full_every = profile.get("fullScanEvery") if isinstance(profile, dict) else None
+    for row in data:
+        status = row.get("analysis_status")
+        if status not in counts:
+            issues.append(name + " analysis_status 缺失/非法。")
+            continue
+        counts[status] += 1
+        if set(row) != set(FRAME_COLUMNS_V3) or any(value is None for value in row.values()):
+            issues.append(name + " v3 逐帧列缺失/多余。")
+        error = row.get("note", "").startswith("error:") or row.get("live_status") == "-101"
+        if status in ("ERROR", "ABORTED") or error:
+            issues.append(name + " v3 存在错误/中止帧，不参与合格性能比较。")
+        if (row.get("note") == "dropped") != (status == "DROPPED"):
+            issues.append(name + " dropped 标记与状态不一致。")
+        if measured and status == "UNMEASURED":
+            issues.append(name + " 自研 session 缺少准入/计时状态。")
+        if not measured and status not in ("UNMEASURED", "DROPPED", "ERROR", "ABORTED"):
+            issues.append(name + " 未测后端不能声明自研分析状态。")
+        for column in STAGE_COLUMNS + ("analysis_cpu_ms", "detect_ms", "preprocess_ms", "feature_ms", "liveness_ms"):
+            if row.get(column, "") != "" and (number(row[column]) is None or number(row[column]) < 0):
+                issues.append(name + " 非法时长：" + column)
+        for column in COUNT_COLUMNS:
+            if row.get(column, "") != "" and csv_count(row[column]) is None:
+                issues.append(name + " 非法整数计数：" + column)
+        captures += csv_count(row.get("feature_capture_count")) or 0
+        liveness_captures += csv_count(row.get("liveness_capture_count")) or 0
+
+        if status == "ANALYZED":
+            if row.get("detector_status") != "OK" or error:
+                issues.append(name + " 已分析帧没有成功检测状态。")
+            required = ("detect_ms", "preprocess_ms", "copy_ms", "sample_ms", "scrfd_preprocess_ms",
+                        "scrfd_inference_ms", "scrfd_postprocess_ms")
+            if any(number(row.get(c)) is None or number(row[c]) < 0 for c in required):
+                issues.append(name + " 已分析帧缺少有效分阶段耗时。")
+            if any(csv_count(row.get(c)) is None for c in COUNT_COLUMNS):
+                issues.append(name + " 已分析帧缺少计数。")
+            full, roi = csv_count(row.get("full_calls")), csv_count(row.get("roi_calls"))
+            mode = row.get("detector_mode")
+            if mode == "FULL":
+                valid = full == 1 and roi == 0 and number(row.get("full_ms")) is not None and row.get("roi_ms") == ""
+            elif mode == "ROI":
+                valid = full == 0 and roi is not None and roi >= 1 and number(row.get("roi_ms")) is not None and row.get("full_ms") == ""
+            else:
+                valid = False
+            if not valid:
+                issues.append(name + " FULL/ROI 模式、次数或缺失项不一致。")
+            if measured and mode == "FULL":
+                saw_full, since_full = True, 0
+            elif measured and mode == "ROI":
+                if not saw_full:
+                    issues.append(name + " 首次分析必须为 FULL。")
+                since_full += 1
+                # RoiTracker counts analyzed frames, not dropped/rejected frames or individual ROIs.
+                if type(full_every) is int and since_full >= full_every:
+                    issues.append(name + " ROI 连续分析帧数超过 fullScanEvery 调度上限。")
+            if csv_count(row.get("copy_bytes")) in (None, 0):
+                issues.append(name + " 已分析帧缺少 NV21 复制字节计数。")
+            for count_column, time_column in (("feature_capture_count", "feature_ms"), ("liveness_capture_count", "liveness_ms")):
+                count, value = csv_count(row.get(count_column)), row.get(time_column, "")
+                if (count == 0 and value != "") or (count is not None and count > 0 and number(value) is None):
+                    issues.append(name + " capture 次数与耗时缺失标记不一致：" + time_column)
+            call_ms = number(row.get("detect_ms"))
+            if call_ms is not None and any(number(row.get(c)) is not None and number(row[c]) > call_ms + .02
+                                           for c in STAGE_COLUMNS + ("preprocess_ms", "feature_ms", "liveness_ms")):
+                issues.append(name + " 嵌套分项超过 onFrame 总耗时。")
+            # copy is outside the mode call; sample and SCRFD stages are inside it. All ROI
+            # durations are sums across that frame's region calls, never multiplied by roi_calls.
+            mode_column = "full_ms" if mode == "FULL" else "roi_ms" if mode == "ROI" else None
+            sequential = ["preprocess_ms"]
+            for count_column, time_column in (("feature_capture_count", "feature_ms"), ("liveness_capture_count", "liveness_ms")):
+                count = csv_count(row.get(count_column))
+                if count is not None and count > 0:
+                    sequential.append(time_column)
+            intervals = [("detect_ms", sequential)]
+            if mode_column is not None:
+                intervals += [("preprocess_ms", ["copy_ms", mode_column]),
+                              (mode_column, ["sample_ms", "scrfd_preprocess_ms", "scrfd_inference_ms", "scrfd_postprocess_ms"])]
+            for parent, children in intervals:
+                parent_time = number(row.get(parent))
+                child_times = [number(row.get(column)) for column in children]
+                if (parent_time is not None and parent_time >= 0
+                        and all(value is not None and value >= 0 for value in child_times)
+                        and sum(child_times) > parent_time + .02):
+                    issues.append(name + " 不重叠分项之和超过父区间：" + parent)
+        elif status in ("REJECTED", "DROPPED"):
+            if (csv_count(row.get("face_count")) != 0 or row.get("live_status", "-1") not in ("", "-1")
+                    or row.get("live_score", "") != ""
+                    or any(row.get(c, "") not in ("", "0") for c in ("box_left", "box_top", "box_right", "box_bottom", "feature_attempted", "feature_ok"))):
+                issues.append(name + " 未分析帧沿用了人脸/活体结果。")
+            if any(row.get(c, "") != "" for c in STAGE_COLUMNS + COUNT_COLUMNS + ("preprocess_ms", "feature_ms", "liveness_ms")):
+                issues.append(name + " 未分析帧带有检测/capture 记录。")
+            if row.get("detector_mode", "") not in ("", "NONE") or row.get("detector_status", "") not in ("", "UNAVAILABLE"):
+                issues.append(name + " 未分析帧带有旧检测状态。")
+            if status == "REJECTED" and (number(row.get("detect_ms")) is None or number(row["detect_ms"]) < 0):
+                issues.append(name + " 拒绝帧缺少调用总耗时。")
+            if status == "DROPPED" and (row.get("detect_ms", "") != "" or row.get("analysis_cpu_ms", "") != ""):
+                issues.append(name + " 未调用 onFrame 的丢帧不得记录调用耗时。")
+        elif status == "UNMEASURED":
+            if (any(row.get(c, "") != "" for c in STAGE_COLUMNS + COUNT_COLUMNS + ("analysis_cpu_ms",))
+                    or row.get("detector_mode", "") not in ("", "NONE")
+                    or row.get("detector_status", "") not in ("", "UNAVAILABLE")):
+                issues.append(name + " 未测后端包含自研计时。")
+
+    if measured:
+        if counts["ANALYZED"] == 0:
+            issues.append(name + " 自研片段没有任何 ANALYZED 帧，不能作为合格性能样本。")
+        actual = metrics.get("analysisCounts", {})
+        expected = {k: v for k, v in counts.items() if k != "UNMEASURED"}
+        if (not isinstance(actual, dict) or set(actual) - set(ANALYSIS_STATES)
+                or any(type(actual.get(k)) is not int or actual[k] != v for k, v in expected.items())
+                or type(actual.get("UNMEASURED", 0)) is not int or actual.get("UNMEASURED", 0) != 0):
+            issues.append(name + " analysisCounts 与逐帧状态不守恒。")
+        for field, total in (("featureCaptureCount", captures), ("livenessCaptureCount", liveness_captures)):
+            if type(metrics.get(field)) is not int or metrics[field] != total:
+                issues.append(name + " capture 次数与逐帧记录不一致：" + field)
+        if type(complete.get("droppedFrames")) is not int or complete["droppedFrames"] != counts["DROPPED"]:
+            issues.append(name + " droppedFrames 与逐帧状态不一致。")
 
 
 def audit_manifest(manifest, issues):
@@ -248,6 +464,48 @@ def parse_event(note):
     return {"recognized_id": parts[1], "score": score, "elapsed_ms": elapsed}
 
 
+def timing_summary(values):
+    return {"count": len(values), "mean_ms": statistics.mean(values) if values else None,
+            "p50_ms": percentile(values, .5), "p95_ms": percentile(values, .95)}
+
+
+def summarize_analysis(rows):
+    """v3 measured frames only; do not manufacture admitted counts for older or opaque backends."""
+    if not rows or not any(row.get("analysis_status") not in (None, "", "UNMEASURED", "DROPPED") for row in rows):
+        return None
+    counts = {state: sum(row.get("analysis_status") == state for row in rows) for state in ANALYSIS_STATES}
+    analyzed = [row for row in rows if row.get("analysis_status") == "ANALYZED"
+                and row.get("detector_status") == "OK" and row.get("detector_mode") in ("FULL", "ROI")
+                and not row.get("note", "").startswith("error:") and row.get("live_status") != "-101"]
+    def values(data, column):
+        return [value for row in data if (value := number(row.get(column))) is not None and value >= 0]
+    admitted_costs = values(analyzed, "detect_ms")
+    calls = [row for row in rows if row.get("analysis_status") in ("ANALYZED", "REJECTED", "ABORTED", "ERROR")]
+    all_costs = values(calls, "detect_ms")
+    # Recorded timestamps describe the input window, NOT actual replay wall time or camera occupancy.
+    stamps = [csv_count(row.get("timestamp_ns")) for row in rows]
+    seconds = (stamps[-1] - stamps[0]) / 1e9 if stamps and None not in stamps and stamps[-1] > stamps[0] else None
+    total = sum(all_costs) if len(all_costs) == len(calls) else None
+    modes = {}
+    for mode in ("FULL", "ROI"):
+        selected = [row for row in analyzed if row.get("detector_mode") == mode]
+        costs = values(selected, "detect_ms")
+        modes[mode] = {"frames": len(selected), "fraction_of_analyzed": len(selected) / len(analyzed) if analyzed else None,
+                       "costs_ms": costs, "onframe": timing_summary(costs)}
+    stage_values = {column: values(analyzed, column) for column in
+                    ("preprocess_ms",) + STAGE_COLUMNS + ("feature_ms", "liveness_ms", "analysis_cpu_ms")}
+    stages = {column: timing_summary(times) for column, times in stage_values.items()}
+    return {"status_counts": counts, "successful_admitted_count": len(analyzed),
+            "successful_admitted_costs_ms": admitted_costs,
+            "successful_admitted_onframe": timing_summary(admitted_costs), "modes": modes, "stages": stages,
+            "stage_values_ms": stage_values,
+            "all_call_wall_ms": total, "all_call_timing_count": len(all_costs), "all_call_count": len(calls),
+            "recorded_window_seconds": seconds,
+            "call_wall_ms_per_recorded_second": total / seconds if total is not None and seconds else None,
+            "cpu_scope": "calling_thread_only_excludes_ORT_worker_threads",
+            "unmeasured": ["worker_queue", "worker_execution", "locked_quality", "CameraX_callback", "real_wall_occupancy"]}
+
+
 def summarize_session(rows, subject_id, structured_events=None):
     done = [row for row in rows if row.get("note", "") != "dropped"]
     costs, events = [], []
@@ -255,17 +513,19 @@ def summarize_session(rows, subject_id, structured_events=None):
     alive = not_alive = saw_face = False
     for row in sorted(done, key=lambda item: int(item["frame_index"])):
         note = row.get("note", "")
-        error = note.startswith("error:") or row.get("live_status") == "-101"
+        error = (note.startswith("error:") or row.get("live_status") == "-101"
+                 or row.get("analysis_status") in ("ERROR", "ABORTED"))
         errors += int(error)
         cost = number(row.get("detect_ms"))
         if cost is not None and cost >= 0 and not error:
             costs.append(cost)
         else:
             missing_timings += 1
-        face_count = number(row.get("face_count"))
-        saw_face |= face_count is not None and face_count > 0
-        alive |= row.get("live_status") == "1"
-        not_alive |= row.get("live_status") == "0"
+        if row.get("analysis_status") not in ("REJECTED", "ERROR", "ABORTED"):
+            face_count = number(row.get("face_count"))
+            saw_face |= face_count is not None and face_count > 0
+            alive |= row.get("live_status") == "1"
+            not_alive |= row.get("live_status") == "0"
         try:
             event = parse_event(note) if structured_events is None else None
         except ValueError:
@@ -321,6 +581,7 @@ def summarize_session(rows, subject_id, structured_events=None):
     return {
         "total_frames": len(rows), "processed_rows": len(done),
         "dropped_frames": len(rows) - len(done), "costs_ms": costs,
+        "analysis": summarize_analysis(rows),
         "missing_or_invalid_timings": missing_timings, "error_rows": errors,
         "malformed_events": malformed_events, "identity_result": identity,
         "correct_elapsed_ms": min((event["elapsed_ms"] for event in correct), default=None)
@@ -413,15 +674,21 @@ def build_report(rows, subject=None, arcsoft_rows=None):
             "audit": {"eligible": comparison_eligible, "scope": "integrity_not_security_acceptance", "runs": audits},
             "scope": "measured_sessions_only",
             "latency_origin": "first_replay_frame_to_recorded_worker_decision",
-            "analysis_cost_scope": "onFrame_call_including_idle_calls_and_warmup_excluding_background_inference"}
+            "analysis_cost_scope": "onFrame_call_including_idle_calls_and_warmup_excluding_background_inference",
+            "v3_analysis_scope": "successful_admitted_frames_only_including_warmup; nested_stages_not_additive"}
 
 
 def compare_run_evidence(left, right):
     """Different products are allowed; inputs/models/enrollment/harness must still match."""
     a, b = getattr(left, "metadata", {}), getattr(right, "metadata", {})
-    if a.get("schemaVersion") != 2 or b.get("schemaVersion") != 2:
-        return ["跨run缺少v2证据，只作观察比较，不宣称严格配置一致。"]
+    version = a.get("schemaVersion")
+    if version not in (2, 3) or b.get("schemaVersion") != version:
+        return ["跨run缺少相同版本v2/v3证据，只作观察比较，不宣称严格配置一致。"]
     issues = []
+    if version == 3:
+        for field in ("timingSchemaVersion", "analysisProfile", "profileSha256", "framesColumns"):
+            if a.get(field) != b.get(field):
+                issues.append("跨run观测/配置不匹配：" + field)
     for group in ("inputs", "enrollment", "modelAssets", "apks", "nativeLibraries"):
         if a.get("manifest", {}).get(group) != b.get("manifest", {}).get(group):
             issues.append("跨run " + group + " 指纹不匹配。")
@@ -445,13 +712,64 @@ def safe_text(value):
     return str(value).replace("|", "\\|").replace("\n", " ").replace("\r", " ")
 
 
+def render_analysis_sections(report):
+    measured = {backend: {clip: value["analysis"] for clip, value in clips.items() if value.get("analysis") is not None}
+                for backend, clips in report["results"].items()}
+    measured = {backend: clips for backend, clips in measured.items() if clips}
+    if not measured:
+        return []
+    lines = ["\n### v3 成功准入帧成本（不混入 REJECTED，含预热）\n",
+             "ERROR/ABORTED 单独计数并使运行不合格；未测后端不推断准入比例。以下统计只有审计通过后才可用于正式比较。",
+             "| 方案 | 分组 | 平均 ms | P50 | P95 | 有效样本/成功准入帧 | FULL/ROI 占成功准入 |",
+             "|---|---|---|---|---|---|---|"]
+    for backend, clips in measured.items():
+        analyzed = sum(c["successful_admitted_count"] for c in clips.values())
+        costs = [v for c in clips.values() for v in c["successful_admitted_costs_ms"]]
+        groups = [("全部", costs, analyzed)]
+        groups += [(mode, [v for c in clips.values() for v in c["modes"][mode]["costs_ms"]],
+                    sum(c["modes"][mode]["frames"] for c in clips.values())) for mode in ("FULL", "ROI")]
+        for group, values, count in groups:
+            summary = timing_summary(values)
+            fraction = f"{count / analyzed:.1%}" if analyzed else "—"
+            lines.append(f"| {safe_text(backend)} | {group} | "
+                         + " | ".join(display_number(summary[k]) for k in ("mean_ms", "p50_ms", "p95_ms"))
+                         + f" | {len(values)}/{count} | {fraction} |")
+        counts = {state: sum(c["status_counts"][state] for c in clips.values()) for state in ANALYSIS_STATES}
+        lines.append("- " + safe_text(backend) + " 状态计数：" + "，".join(f"{s}={n}" for s, n in counts.items()))
+    lines += ["\n### v3 分阶段成本（成功准入帧，缺失项不填零）\n",
+              "各项相互嵌套，不可相加。inference 包含 NetSession::Run，不是纯 ORT 内核时间；CPU 仅调用线程，不包含 ORT 线程池。",
+              "| 方案 | 分项 | 有效样本 | 平均 ms | P50 | P95 |", "|---|---|---|---|---|---|"]
+    for backend, clips in measured.items():
+        for column in ("preprocess_ms",) + STAGE_COLUMNS + ("feature_ms", "liveness_ms", "analysis_cpu_ms"):
+            values = [v for c in clips.values() for v in c["stage_values_ms"][column]]
+            summary = timing_summary(values)
+            lines.append(f"| {safe_text(backend)} | {column} | {len(values)} | "
+                         + " | ".join(display_number(summary[k]) for k in ("mean_ms", "p50_ms", "p95_ms")) + " |")
+    lines += ["\n### v3 逐片段成本\n",
+              "单列所有已记录调用的墙钟总量（含拒绝/错误）。按录制时窗归一化不是实测回放墙钟占用率，也不代表 CameraX 分析线程占用。",
+              "| 方案/片段 | 成功准入数 | P50 ms | P95 ms | FULL/ROI 帧 | 全调用总 ms | ms/录制秒 |",
+              "|---|---|---|---|---|---|---|"]
+    for backend, clips in measured.items():
+        for clip, value in sorted(clips.items()):
+            summary = value["successful_admitted_onframe"]
+            lines.append(f"| {safe_text(backend)}/{safe_text(clip)} | {value['successful_admitted_count']} | "
+                         + display_number(summary["p50_ms"]) + " | " + display_number(summary["p95_ms"])
+                         + f" | {value['modes']['FULL']['frames']}/{value['modes']['ROI']['frames']} | "
+                         + display_number(value["all_call_wall_ms"]) + " | "
+                         + display_number(value["call_wall_ms_per_recorded_second"]) + " |")
+    lines += ["- 连续帧不是独立样本；P95 在样本少时不稳定。配对比较以片段/运行轮次为单位，不把每一帧当独立实验。",
+              "- 当前没有 worker 排队/执行、锁内质量过滤、完整 CameraX 回调或真实墙钟占用率的分项证据；不作补算。"]
+    return lines
+
+
 def render_report(report):
     lines = ["## 会话回放实测\n", "只统计 session_*，不使用串行模拟的虹软数据。"]
     lines.append("完整性审计：" + ("通过（不等于安全/精度验收）" if report.get("audit", {}).get("eligible")
                                   else "未通过；仅供观察，不能宣称严格验收。"))
     for warning in report["warnings"]:
         lines.append("- 警告：" + safe_text(warning))
-    lines += ["\n### 分析线程调用成本（含预热、含空闲跳过检测的调用）\n",
+    lines += render_analysis_sections(report)
+    lines += ["\n### 全调用成本（兼容旧口径，含预热和准入拒绝）\n",
               "不含后台活体/识别计算；不是整条流水线的单帧耗时。",
               "| 方案 | 平均 ms | P50 | P95 | 有效计时/调用 | 丢帧/输入 |",
               "|---|---|---|---|---|---|"]
@@ -514,7 +832,7 @@ def render_report(report):
         lines.append(f"| {name} | {during} | {tail} |")
     lines += ["\n### 限制\n",
               "- 时延从回放首帧起算，不是启动相机或人进入画面的真实端到端时延；只对正确识别片段求中位数。",
-              "- v2优先使用events.csv与片尾drain；旧版frame notes可能尾部截断，无结果不能判为可靠拒绝。片尾时间不截短，不补造活体票。",
+              "- v2/v3优先使用events.csv与片尾drain；旧版frame notes可能尾部截断，无结果不能判为可靠拒绝。片尾时间不截短，不补造活体票。",
               "- frames活体列仍是状态快照；v2事件记录有效票完成，但不包含完整推理诊断。未决/缺票/超时/错误均不算非活体拒绝。",
               "- 空闲调用、预热和后台 CPU 竞争影响平均值；不得把 session 的各个毫秒列相加当完整流水线时间。",
               "- 这是固定测试片段的观察统计，不能用少量片段证明低 FAR、活体安全性或普遍领先虹软。"]
