@@ -1,6 +1,8 @@
 # 人脸识别服务端 HTTP 接口说明（调用方更新用）
 
-适用代码：分支 `yuanzq/feat/offline-face-engine`，提交 `661453f` 之后（含本次 Java 错误码修正）。本文替代旧版《人脸识别检测算法后端接口文档》第 7 章，旧文档里与代码不符的地方在第 1 节逐条列出。
+适用代码：分支 `yuanzq/feat/offline-face-engine`，合并 `yuanzq/feat/feature-search` 之后，算法服务版本 1.4.0。本文替代旧版《人脸识别检测算法后端接口文档》第 7 章，与旧文档的差异在第 1 节逐条列出。
+
+**线上现状（37 服务器 18001 端口）**：运行 `face-algorithm:search-49eb6e7-20261012`，版本 1.3.0，6 个路由（含 `/api/search_feature`，只支持 v1）。它的代码与本仓库的 `49eb6e7` 逐文件一致；该提交此前不在任何分支上，现已找回并合并。对同一请求，合并后的服务与 37 的 v1 检索结果、v1 特征逐位一致。
 
 服务分两层：
 
@@ -17,20 +19,20 @@
 
 | # | 旧文档内容 | 实际代码 | 调用方要做什么 |
 |---|---|---|---|
-| 1 | 7.4 `POST /api/search_feature`（纯特征 1:N，服务版本 1.3.0 / 1.4.0） | **不存在**。本仓库所有分支和历史提交里都没有该接口，调用返回 404 | 不要接入。1:N 改用 Java `POST /api/users/search`（服务端内存特征库，不必每次上传候选）。旧文档对它的版本号自相矛盾（1.3.0 / 1.4.0），属于未实现的设计稿 |
+| 1 | 7.4 `POST /api/search_feature`（纯特征 1:N），一处写 1.3.0、一处写 1.4.0 | **存在**：1.3.0 起提供（37 线上即此版本）。1.4.0 起也接受 v2 特征 | v1 调用方式不变。用 v2 时查询和全部候选都声明 `arcface_r50_512`；响应的 `feature_dimension`/`feature_version` 回显版本。业务系统按照片查人仍优先用 Java `POST /api/users/search` |
 | 2 | 7.3 `compare_feature` 版本固定 `recognizer_v1_1024`、恰好 1024 维 | 现在也接受 `arcface_r50_512`（512 维）；两侧版本必须相同 | v1 调用无需改动。用 v2 特征时两侧都声明 `arcface_r50_512` |
 | 3 | 7.3 返回 `feature_dimension` 固定 1024、`feature_version` 固定 v1 | 回显本次请求的版本和维度（1024 或 512） | 不要把这两个字段写死成常量校验 |
 | 4 | 7.1 "每侧扩展量为原宽或原高 × expand_scale / 2" | 按**人脸框**的宽高计算，不是整张图的宽高。实测框宽 89.3、`expand_scale=1` 时左边界外扩 44.7 | 按人脸框理解 |
 | 5 | 7.1 "faces 为非空值数组" | 有脸时是数组；无脸时为空数组 `[]` 且 `success=false` | 以 `success` 判断 |
 | 6 | 未列出 | 新增 `POST /api/v2/extract_feature`、`GET /api/feature_versions`；`GET /health`、`GET /ready` 一直存在但旧文档未写 | 见第 2、3 节 |
 | 7 | 未说明 | 推理槽忙时**有界排队**（默认 32 个），不再立刻 429；可多进程部署 | 429 仍要有限退避重试，但频率会大幅下降 |
-| 8 | — | 服务版本号仍为 `1.2.0`（`/openapi.json` 的 `info.version`），新增接口未改版本号 | 用 `GET /api/feature_versions` 或 `/openapi.json` 的路由列表判断能力，不要靠版本号 |
+| 8 | 服务版本 1.2.0 / 1.3.0 | 完整服务为 **1.4.0**（含 v2 提取）；`Dockerfile.compare` 叠加在 1.1.0 镜像上为 1.3.0（无 v2 提取） | 判断能力以 `GET /api/feature_versions` 和 `/openapi.json` 的路由为准 |
 
 ---
 
 ## 2. 全部接口清单
 
-### 2.1 Python 算法服务（共 7 个）
+### 2.1 Python 算法服务（共 8 个）
 
 | 方法与路径 | 状态 | 用途 |
 |---|---|---|
@@ -41,6 +43,7 @@
 | `POST /api/extract_feature` | 契约未变，性能与排队行为变化 | v1 特征，1024 维 |
 | `POST /api/v2/extract_feature` | **新增** | v2 特征，512 维，带质量原因 |
 | `POST /api/compare_feature` | **有调整** | 1:1 特征比对，支持 v1 / v2 |
+| `POST /api/search_feature` | **有调整**（1.3.0 起；1.4.0 支持 v2） | 纯特征 1:N，调用方提供 1–1000 个候选 |
 
 另有 `GET /openapi.json`、`/docs`（FastAPI 自带）。`/api/v2/features/compare` 在代码里有定义但**未挂载**，访问返回 404。
 
@@ -221,6 +224,31 @@ GET /ready   → 200 {"status":"ready","busy":false,"restart_required":false}
 - **两个版本的分数不能互相比较，阈值也不能通用**，见第 6 节。
 - 比对不占用推理槽，不受图片推理繁忙的影响。
 
+### 3.7 `POST /api/search_feature`（1.3.0 起；1.4.0 支持 v2）
+
+请求 `application/json`，**最大 32 MiB**，从收到请求起**绝对期限 5 秒**（含上传、解析、计算）。
+
+| 字段 | 类型 | 约束 |
+|---|---|---|
+| `probe_feature` | number[] | 维度与版本一致：v1 1024，v2 512 |
+| `probe_version` | string | `recognizer_v1_1024` 或 `arcface_r50_512` |
+| `reference_version` | string | 全部候选的版本，**必须与 `probe_version` 相同** |
+| `candidates` | object[] | 1–1000 个，每项只含 `id` 与 `feature`；`id` 为 1–128 字符、非纯空白、请求内唯一的字符串；`feature` 维度同上 |
+| `top_k` | integer | 可选，默认 1，范围 1–候选数；只接受 JSON 整数 |
+
+```json
+{"success": true,
+ "matches": [{"id": "Tony_Blair", "similarity_score": 0.586}, {"id": "Gerhard_Schroeder", "similarity_score": 0.016}],
+ "candidate_count": 5, "top_k": 2, "feature_dimension": 512, "feature_version": "arcface_r50_512",
+ "matcher_version": "l2_dot_v1", "processing_time_ms": 3.1}
+```
+
+- 算法与 1:1 相同（float32 → float64 归一化点积，截断到 [-1, 1]）；按分数降序，同分保持输入顺序，负分也可入选。不设阈值、不判定身份、不回传向量。
+- 任一候选无效，整批返回 400；校验规则同 3.6（另含 ID 规则）。
+- **每个服务进程只有一个 1:N 工作槽，不排队**，忙时立即返回 429 `FEATURE_SEARCH_BUSY`。工作槽在读取请求体之前占用，计算放在独立子进程里，不占图片推理槽。超时或断开后要等后台计算真正结束才释放，所以紧接着的请求仍可能收到 429。
+- 错误：400 `INVALID_FEATURE`；413 `FEATURE_PAYLOAD_TOO_LARGE`；429 `FEATURE_SEARCH_BUSY`；500 `INFERENCE_ERROR`；503 `FEATURE_SEARCH_UNAVAILABLE`（1:N 子进程不可用，与图片模型无关）；504 `ALGORITHM_TIMEOUT`。错误格式同 3.6。
+- 调用建议：复用连接、串行发送；每次都要带完整候选（服务端不缓存）。429 用有上限的退避加抖动重试。候选多、调用频繁时，改用 Java `/api/users/search`（服务端内存特征库，1 万人约 2 ms）。
+
 ---
 
 ## 4. Java 后端接口调整详情
@@ -296,7 +324,7 @@ POST /api/features/backfill/stop                      → 200，当前这批处�
 镜像：
 - **CPU 版**：`Dockerfile`，`docker compose up -d`。
 - **GPU 版**：`Dockerfile.gpu`，`docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d`。
-- **现场叠加镜像**：`Dockerfile.compare` 在已部署的 1.1.0 旧镜像上叠加比对接口，**只提供 5 个旧路由，没有 v2**。本次修复了它缺 `runtime_env.py` 导致构建失败的问题（第 1 阶段引入的回归）。
+- **现场叠加镜像**：`Dockerfile.compare` 在已部署的 1.1.0 旧镜像上叠加比对和检索接口，版本 1.3.0，6 个路由（与 37 现状相同），比对和检索支持 v1 / v2，**没有 v2 提取接口**。已在 1.1.0 代码上模拟过它的构建检查，可以通过。要用 v2 提取，需用 `Dockerfile` 或 `Dockerfile.gpu` 构建完整镜像。
 
 启用 v2 的上线顺序：
 1. 执行数据库迁移 `V20261016_01__user_feature.sql`。

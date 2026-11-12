@@ -235,6 +235,8 @@ v2 的 epoch、授权版本、历史窗口或租约失效返回409 `SNAPSHOT_REQ
 | `POST /api/detect_face` | multipart的 `image`、可选 `expand_scale=0.0`（有限数值0–10）；返回success/message/faces/processing_time |
 | `POST /api/v2/extract_feature` | multipart的 `image`、可选 `quality_filter`；arcface_r50_512 特征、人脸框、关键点、姿态、质量与 `reason_code`。仅在 `FACE_FEATURE_VERSIONS` 含该版本时可用，见 [FEATURE_V2.md](FaceFeatureExtractorAPI/FEATURE_V2.md) |
 | `GET /api/feature_versions` | 本进程已加载的特征版本 |
+| `POST /api/compare_feature` | JSON 两个同版本特征的 1:1 余弦分数，见 [FEATURE_COMPARISON.md](FaceFeatureExtractorAPI/FEATURE_COMPARISON.md) |
+| `POST /api/search_feature` | JSON 查询特征与 1–1000 个调用方候选的 1:N 排名（top_k），独立工作槽、忙时 429，见同上 |
 
 faces 每项为 `x1,y1,x2,y2,score`，坐标为像素，扩展后裁剪到图片边界。提取未得到可用品质人脸时可能 HTTP200、`success:false`；Java 将其映射为422 `NO_USABLE_FACE`，不要把 Python 的200当作一定取得特征。Python错误通常是 `{"detail":{"errorCode":"..."}}`，输入验证也可能使用 FastAPI 的标准 detail 数组，不能套用Java包络。
 
