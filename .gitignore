@@ -40,3 +40,6 @@ face-notes/linux-sdk-*/static/
 face-notes/linux-sdk-*/static-corrected/
 face-notes/linux-sdk-*/evidence/
 face-notes/linux-sdk-*/derived/
+
+# Retired prebuilt SDK (133 MB, above the GitHub file limit); no build references it.
+android-sdk/app/libs/face-sdk-release.aar
