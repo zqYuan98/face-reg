@@ -76,6 +76,19 @@ class FaceFeatureExtractorClientTest {
         } finally { image.delete(); }
     }
 
+    @Test void disabledVersionIsADeploymentError() throws IOException {
+        server.createContext("/api/v2/extract_feature", exchange -> reply(exchange, 404, "{\"detail\":{\"errorCode\":\"FEATURE_VERSION_DISABLED\"}}"));
+        java.io.File image = java.nio.file.Files.write(java.nio.file.Files.createTempFile("face", ".jpg"), new byte[]{1, 2, 3}).toFile();
+        try {
+            assertThatThrownBy(() -> client(1000, 2000, 32768).extractFeature(image, "arcface_r50_512")).isInstanceOfSatisfying(ApiException.class,
+                    error -> assertThat(error.getErrorCode()).isEqualTo("FEATURE_VERSION_DISABLED"));
+            server.removeContext("/api/v2/extract_feature");
+            server.createContext("/api/v2/extract_feature", exchange -> reply(exchange, 413, "{\"detail\":{\"errorCode\":\"IMAGE_DIMENSIONS_TOO_LARGE\"}}"));
+            assertThatThrownBy(() -> client(1000, 2000, 32768).extractFeature(image, "arcface_r50_512")).isInstanceOfSatisfying(ApiException.class,
+                    error -> assertThat(error.getErrorCode()).isEqualTo("IMAGE_TOO_LARGE"));
+        } finally { image.delete(); }
+    }
+
     @Test void queuedCallerRunsWhenThePermitFrees() throws Exception {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);

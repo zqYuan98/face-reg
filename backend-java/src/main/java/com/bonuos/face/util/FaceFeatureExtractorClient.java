@@ -204,6 +204,13 @@ public class FaceFeatureExtractorClient implements AutoCloseable {
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "ALGORITHM_UNAVAILABLE", "特征提取服务繁忙或未就绪");
         }
         if (response.statusCode() == 504) throw timeout();
+        if (response.statusCode() == 413) {
+            throw new ApiException(HttpStatus.PAYLOAD_TOO_LARGE, "IMAGE_TOO_LARGE", "图片文件或像素尺寸超过限制");
+        }
+        if (response.statusCode() == 404) {
+            // The algorithm service does not load this feature version (FACE_FEATURE_VERSIONS), a deployment mismatch.
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "FEATURE_VERSION_DISABLED", "算法服务未启用该特征版本，请检查部署配置");
+        }
         if (response.statusCode() == 400 || response.statusCode() == 422) {
             throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_IMAGE", "图片无效或没有符合质量要求的人脸");
         }
