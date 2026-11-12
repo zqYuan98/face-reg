@@ -44,7 +44,7 @@ InsightFace 权重只允许非商业研究用途，不入库：服务端放在 `
 | 端口 | 容器 | 镜像 | 提交（标签） | 版本 / 接口 |
 |---|---|---|---|---|
 | 18001 | `face-algorithm` | `face-algorithm:platform-944765d` | `944765d`（`deployed/server37/face-algorithm-18001`） | 1.4.0，8 个接口；v1 + v2 均已加载；2 个进程；限制 2 CPU / 4 GB |
-| 18080 | `face-backend` | `face-backend:platform-944765d` | `944765d`（`deployed/server37/face-backend-18080`） | 注册时同时提取 v1 和 v2；**检索仍为 v1**（58 人中 2 人缺 v2 特征）；内存特征库；补提接口 |
+| 18080 | `face-backend` | `face-backend:platform-944765d` | `944765d`（`deployed/server37/face-backend-18080`） | 注册时同时提取 v1 和 v2；**1:N 检索用 v2**（`arcface_r50_512`，阈值 0.45）；内存特征库；补提接口 |
 | 13307 | `face-mysql` | `mysql:8.0` | — | `face_db` 已执行 `V20261016_01`（新增 `sys_user_feature` 表） |
 | 18002 / 18003 | `face-algorithm-task-2026-001` / `-visual-console-…` | `face-algorithm:task-2026-001-a49670dc9123` | `a49670dc`（`deployed/server37/face-algorithm-task-2026-001-18002`） | 另一套模块化服务 2.4.0：`/api/v2/verify/*`、`/api/v2/portrait/generate` 等 |
 | 18000 | `smart-platform-auto-label` | 其他项目 | — | **注意**：仓库 `docker-compose.yml` 让算法服务占 18000，而 37 上这个端口被别的项目占用；37 用的是自己的 `/home/<user>/docker/docker-compose.yml`，算法服务在 18001。不要拿仓库里的 compose 覆盖 37 的配置 |
