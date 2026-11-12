@@ -233,12 +233,26 @@ JNIEXPORT jboolean JNICALL
 Java_com_bonuos_facesdk_engine_NativeAnalyzer_nativeSetNv21(JNIEnv *env, jclass, jlong handle, jbyteArray nv21,
                                                            jint width, jint height, jint rotation) {
     auto *analyzer = reinterpret_cast<FrameAnalyzer *>(handle);
-    if (analyzer == nullptr || nv21 == nullptr || env->GetArrayLength(nv21) < width * height * 3 / 2) return JNI_FALSE;
-    // Critical access: the analyzer makes the only copy (a plain memcpy, no allocation or JNI calls inside).
-    void *data = env->GetPrimitiveArrayCritical(nv21, nullptr);
+    if (analyzer == nullptr) return JNI_FALSE;
+    analyzer->InvalidateFrame();
+    if (nv21 == nullptr || width <= 0 || height <= 0 || (width & 1) || (height & 1) || rotation % 90 != 0)
+        return JNI_FALSE;
+    const jlong pixels = static_cast<jlong>(width) * height;
+    const jlong bytes = pixels + pixels / 2;
+    if (bytes > env->GetArrayLength(nv21)) return JNI_FALSE;
+    // SetNv21 may allocate. Ordinary array access permits that and is not claimed as zero-copy.
+    jbyte *data = env->GetByteArrayElements(nv21, nullptr);
     if (data == nullptr) return JNI_FALSE;
-    const bool ok = analyzer->SetNv21(static_cast<uint8_t *>(data), width, height, rotation);
-    env->ReleasePrimitiveArrayCritical(nv21, data, JNI_ABORT);
+    bool ok = false;
+    try {
+        ok = analyzer->SetNv21(reinterpret_cast<const uint8_t *>(data), width, height, rotation);
+    } catch (const std::exception &error) {
+        LOG_ERR("analyzer frame copy failed: %s", error.what());
+    } catch (...) {
+        LOG_ERR("analyzer frame copy failed with an unknown exception");
+    }
+    env->ReleaseByteArrayElements(nv21, data, JNI_ABORT);
+    if (!ok) analyzer->InvalidateFrame();
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -266,6 +280,9 @@ Java_com_bonuos_facesdk_engine_NativeAnalyzer_nativeDetect(JNIEnv *env, jclass, 
     } catch (const std::exception &error) {
         LOG_ERR("detect failed: %s", error.what());
         return nullptr;
+    } catch (...) {
+        LOG_ERR("detect failed with an unknown exception");
+        return nullptr;
     }
 }
 
@@ -278,6 +295,9 @@ Java_com_bonuos_facesdk_engine_NativeAnalyzer_nativeDetectRegion(JNIEnv *env, jc
         return PackFaces(env, analyzer->DetectRegion(x, y, w, h, long_side, threshold));
     } catch (const std::exception &error) {
         LOG_ERR("region detect failed: %s", error.what());
+        return nullptr;
+    } catch (...) {
+        LOG_ERR("region detect failed with an unknown exception");
         return nullptr;
     }
 }

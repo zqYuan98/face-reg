@@ -27,19 +27,31 @@ public final class ScrfdEngines implements FaceSession.Detector, FaceSession.Liv
      */
     static final float LIVENESS_SIDE_PER_HEIGHT = 0.868f;
 
-    /**
-     * Whole-frame scan at least every this many frames: a new face is found within ~330 ms at 30 fps.
-     * The whole-frame scan costs ~2x a region scan on a Helio P60 (44 vs 22 ms).
-     */
-    public static final int FULL_SCAN_EVERY = 10;
+    /** Whole-frame interval in actually analyzed frames, not a wall-clock discovery guarantee. */
+    public static final int FULL_SCAN_EVERY = AnalysisProfile.FULL_SCAN_EVERY;
     /** Search square around a tracked face: twice its size, sampled to this long side. */
-    public static final float REGION_SCALE = 2f;
-    public static final int REGION_LONG_SIDE = 160;
+    public static final float REGION_SCALE = AnalysisProfile.REGION_SCALE;
+    public static final int REGION_LONG_SIDE = AnalysisProfile.REGION_LONG_SIDE;
 
-    private final NativeAnalyzer analyzer;
+    /** Package-local seam: JVM tests exercise the production failure path without loading JNI. */
+    interface Analyzer {
+        boolean setNv21(byte[] nv21, int width, int height, int rotation);
+        float[] detect(int longSide, float threshold);
+        float[] detectRegion(float x, float y, float w, float h, int longSide, float threshold);
+        float liveness(int left, int top, int right, int bottom);
+        int threads();
+        void close();
+    }
+
+    interface LivenessWorker {
+        float score(byte[] nv21, int width, int height, int rotation, int left, int top, int right, int bottom);
+        void close();
+    }
+
+    private final Analyzer analyzer;
     /** Second copy of the liveness models for the session's liveness worker thread. */
-    private final NativeLiveness asyncLiveness;
-    private final int longSide;
+    private final LivenessWorker asyncLiveness;
+    private final int longSide, regionLongSide;
     private final float threshold;
     private final RoiTracker tracker;
     private CameraFrame current;
@@ -53,11 +65,24 @@ public final class ScrfdEngines implements FaceSession.Detector, FaceSession.Liv
         this(assets, longSide, threshold, FULL_SCAN_EVERY);
     }
 
+    public ScrfdEngines(AssetManager assets, AnalysisProfile profile) {
+        this(assets, profile.detectorLongSide, profile.detectorThreshold, profile.fullScanEvery,
+                profile.regionLongSide, profile.regionScale, profile.regionMinIou, profile.detectorThreads);
+    }
+
     /** {@code fullScanEvery} 1 scans every frame (no tracking), for measurements. */
     public ScrfdEngines(AssetManager assets, int longSide, float threshold, int fullScanEvery) {
+        this(assets, longSide, threshold, fullScanEvery, REGION_LONG_SIDE, REGION_SCALE,
+                AnalysisProfile.REGION_MIN_IOU, AnalysisProfile.DETECTOR_THREADS);
+    }
+
+    private ScrfdEngines(AssetManager assets, int longSide, float threshold, int fullScanEvery,
+                         int regionLongSide, float regionScale, float regionMinIou, int threads) {
+        validateSettings(longSide, threshold, regionLongSide, threads);
         this.longSide = longSide;
+        this.regionLongSide = regionLongSide;
         this.threshold = threshold;
-        this.tracker = new RoiTracker(fullScanEvery, REGION_SCALE, 0.2f);
+        this.tracker = new RoiTracker(fullScanEvery, regionScale, regionMinIou);
         String[] names;
         float[] scales;
         int[] sizes;
@@ -75,45 +100,89 @@ public final class ScrfdEngines implements FaceSession.Detector, FaceSession.Liv
         } catch (IOException | JSONException error) {
             throw new IllegalStateException("Cannot read live/config.json", error);
         }
-        analyzer = new NativeAnalyzer(assets, NativeEngine.INSIGHTFACE_DETECTOR, 2, names, scales, sizes);
+        analyzer = new NativeAnalyzer(assets, NativeEngine.INSIGHTFACE_DETECTOR, threads, names, scales, sizes);
         try {
             asyncLiveness = new NativeLiveness(assets, names, scales, sizes);
-        } catch (RuntimeException error) {
+        } catch (RuntimeException | Error error) {
             analyzer.close();
             throw error;
         }
     }
 
+    ScrfdEngines(Analyzer analyzer, LivenessWorker asyncLiveness, AnalysisProfile profile) {
+        if (analyzer == null || asyncLiveness == null || profile == null)
+            throw new IllegalArgumentException("Analyzer, liveness and profile are required");
+        validateSettings(profile.detectorLongSide, profile.detectorThreshold, profile.regionLongSide, analyzer.threads());
+        if (analyzer.threads() != profile.detectorThreads) throw new IllegalArgumentException("Detector threads differ from profile");
+        this.analyzer = analyzer;
+        this.asyncLiveness = asyncLiveness;
+        this.longSide = profile.detectorLongSide;
+        this.regionLongSide = profile.regionLongSide;
+        this.threshold = profile.detectorThreshold;
+        this.tracker = new RoiTracker(profile.fullScanEvery, profile.regionScale, profile.regionMinIou);
+    }
+
+    private static void validateSettings(int longSide, float threshold, int regionLongSide, int threads) {
+        if (longSide < 32 || regionLongSide < 32 || !Float.isFinite(threshold)
+                || threshold < 0 || threshold > 1 || threads < 1)
+            throw new IllegalArgumentException("Invalid detector settings");
+    }
+
     @Override
     public List<Detection> detect(CameraFrame frame) {
         current = null;
-        if (!analyzer.setNv21(frame.nv21, frame.width, frame.height, frame.rotationDegrees)) {
-            tracker.reset();
-            return new ArrayList<>();
-        }
-        current = frame;
-        return tracker.next(new RoiTracker.Source() {
-            @Override public List<Detection> full() {
-                return unpack(analyzer.detect(longSide, threshold));
-            }
+        try {
+            if (!analyzer.setNv21(frame.nv21, frame.width, frame.height, frame.rotationDegrees))
+                throw new IllegalStateException("Native analyzer rejected NV21 frame");
+            List<Detection> detections = tracker.next(new RoiTracker.Source() {
+                @Override public List<Detection> full() {
+                    return unpack(analyzer.detect(longSide, threshold));
+                }
 
-            @Override public List<Detection> region(FaceRect r) {
-                return unpack(analyzer.detectRegion(r.left, r.top, r.width(), r.height(), REGION_LONG_SIDE, threshold));
-            }
-        });
+                @Override public List<Detection> region(FaceRect r) {
+                    return unpack(analyzer.detectRegion(r.left, r.top, r.width(), r.height(), regionLongSide, threshold));
+                }
+            });
+            current = frame; // only a successful, complete observation enables synchronous scoring
+            return detections;
+        } catch (RuntimeException | Error failure) {
+            tracker.reset();
+            throw failure;
+        }
     }
 
     /** Forget tracked faces, e.g. after a camera switch or between unrelated clips. */
     public void reset() {
+        current = null;
         tracker.reset();
     }
 
     public RoiTracker tracker() { return tracker; }
 
+    /** Construction values actually used by this detector, not a claim about measured timing/provider. */
+    public java.util.Map<String, Object> effectiveSettings() {
+        java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("longSide", longSide);
+        out.put("threshold", threshold);
+        out.put("fullScanEvery", tracker.fullEvery());
+        out.put("regionLongSide", regionLongSide);
+        out.put("regionScale", tracker.regionScale());
+        out.put("regionMinIou", tracker.minIou());
+        out.put("detectorThreads", analyzer.threads());
+        return java.util.Collections.unmodifiableMap(out);
+    }
+
     private static List<Detection> unpack(float[] packed) {
-        List<Detection> out = new ArrayList<>(packed == null ? 0 : packed.length / 15);
-        if (packed == null) return out;
-        for (int i = 0; i + 15 <= packed.length; i += 15) {
+        if (packed == null) throw new IllegalStateException("Native detector failed");
+        if (packed.length % 15 != 0) throw new IllegalStateException("Malformed native detection output");
+        List<Detection> out = new ArrayList<>(packed.length / 15);
+        for (int i = 0; i < packed.length; i += 15) {
+            for (int k = 0; k < 15; k++)
+                if (!Float.isFinite(packed[i + k])) throw new IllegalStateException("Non-finite native detection output");
+            if (!(packed[i + 2] > packed[i]) || !(packed[i + 3] > packed[i + 1])
+                    || !Float.isFinite(packed[i + 2] - packed[i]) || !Float.isFinite(packed[i + 3] - packed[i + 1])
+                    || packed[i + 4] < 0 || packed[i + 4] > 1)
+                throw new IllegalStateException("Invalid native detection geometry or score");
             float[] kps = new float[10];
             System.arraycopy(packed, i + 5, kps, 0, 10);
             out.add(new Detection(new FaceRect(packed[i], packed[i + 1], packed[i + 2], packed[i + 3]), packed[i + 4], kps));
@@ -136,6 +205,7 @@ public final class ScrfdEngines implements FaceSession.Detector, FaceSession.Liv
      */
     @Override
     public java.util.concurrent.Callable<Float> captureLiveness(CameraFrame frame, FaceRect face) {
+        if (frame != current) throw new IllegalStateException("captureLiveness() must follow detect() on the same frame");
         final byte[] nv21 = frame.nv21.clone();
         final int w = frame.width, h = frame.height, rotation = frame.rotationDegrees;
         float side = face.height() * LIVENESS_SIDE_PER_HEIGHT;

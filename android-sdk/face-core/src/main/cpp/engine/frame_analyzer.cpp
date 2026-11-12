@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include "image_ops.h"
 
@@ -14,10 +16,20 @@ FrameAnalyzer::FrameAnalyzer(std::unique_ptr<NetSession> scrfd, AAssetManager *a
     if (live_.LoadModel(assets, live_configs) != 0) throw std::runtime_error("liveness models failed to load");
 }
 
+void FrameAnalyzer::InvalidateFrame() {
+    // Keep the vector's size too: clearing it would make the next resize zero-fill a whole frame.
+    width_ = height_ = rotation_ = 0;
+    converted_ = false;
+}
+
 bool FrameAnalyzer::SetNv21(const uint8_t *nv21, int width, int height, int rotation_degrees) {
+    InvalidateFrame();
     const int rotation = ((rotation_degrees % 360) + 360) % 360;
-    if (width <= 0 || height <= 0 || (width & 1) || (height & 1) || rotation % 90 != 0) return false;
-    const size_t size = static_cast<size_t>(width) * height * 3 / 2;
+    if (nv21 == nullptr || width <= 0 || height <= 0 || (width & 1) || (height & 1) || rotation % 90 != 0) return false;
+    const int64_t pixels = static_cast<int64_t>(width) * height;
+    const int64_t bytes = pixels + pixels / 2;
+    if (bytes > std::numeric_limits<int>::max()) return false; // image helpers use int offsets
+    const size_t size = static_cast<size_t>(bytes);
     nv21_.resize(size);
     std::memcpy(nv21_.data(), nv21, size);
     width_ = width;
@@ -28,10 +40,18 @@ bool FrameAnalyzer::SetNv21(const uint8_t *nv21, int width, int height, int rota
 }
 
 std::vector<ScrfdFace> FrameAnalyzer::DetectSampled(float x, float y, float w, float h, int long_side, float threshold) {
-    if (nv21_.empty() || !(w > 0) || !(h > 0) || long_side < 32) return {};
+    if (width_ <= 0 || height_ <= 0 || nv21_.empty()) throw std::logic_error("Detection requires a valid NV21 frame");
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(w) || !std::isfinite(h)
+        || !std::isfinite(x + w) || !std::isfinite(y + h) || !(w > 0) || !(h > 0)
+        || long_side < 32 || !std::isfinite(threshold) || threshold < 0 || threshold > 1)
+        throw std::invalid_argument("Invalid SCRFD sampling arguments");
+    const int64_t aligned_side = (static_cast<int64_t>(long_side) + 31) / 32 * 32;
+    if (aligned_side * aligned_side > std::numeric_limits<int>::max() / 3)
+        throw std::invalid_argument("SCRFD input exceeds integer indexing limits");
     const float scale = static_cast<float>(long_side) / std::max(w, h);
     const int dst_w = std::max(1, static_cast<int>(std::lround(w * scale))), dst_h = std::max(1, static_cast<int>(std::lround(h * scale)));
-    if (!SampleBgr(nv21_.data(), width_, height_, rotation_, x, y, w, h, dst_w, dst_h, sample_)) return {};
+    if (!SampleBgr(nv21_.data(), width_, height_, rotation_, x, y, w, h, dst_w, dst_h, sample_))
+        throw std::runtime_error("SCRFD frame sampling failed");
     // The sample already has the target long side, so SCRFD only pads it to a multiple of 32.
     std::vector<ScrfdFace> faces = detector_.DetectLongSide(sample_, long_side, threshold);
     const float sx = w / dst_w, sy = h / dst_h;
@@ -57,7 +77,7 @@ std::vector<ScrfdFace> FrameAnalyzer::DetectRegion(float x, float y, float w, fl
 }
 
 float FrameAnalyzer::Liveness(int left, int top, int right, int bottom) {
-    if (nv21_.empty() || right <= left || bottom <= top) return NAN;
+    if (width_ <= 0 || height_ <= 0 || nv21_.empty() || right <= left || bottom <= top) return NAN;
     if (!converted_) {
         cv::Mat yuv(height_ + height_ / 2, width_, CV_8UC1, nv21_.data());
         if (rotation_ == 0) {

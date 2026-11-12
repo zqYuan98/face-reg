@@ -61,6 +61,166 @@ public class FaceSessionLifecycleTest {
         public Callable<Float> captureLiveness(CameraFrame f, FaceRect r) { return () -> .95f; }
     }
 
+    @Test public void frameCountsSeparateHintsRejectedCallsAndLifetimeResets() {
+        config.idleFrameIntervalMs = 100;
+        faces = Collections.emptyList();
+        FaceSession<String> s = session(Runnable::run, (f,r,k,c) -> () -> ALICE);
+        assertTrue(s.shouldProcessFrame(1000)); assertTrue(s.shouldProcessFrame(1000));
+        assertEquals(0, s.frameCounts().admitted); assertEquals(0, s.frameCounts().rejected);
+        s.onFrame(new CameraFrame(pixels,320,240,0,1000));
+        s.onFrame(new CameraFrame(pixels,320,240,0,1000));
+        s.onFrame(new CameraFrame(pixels,320,240,0,1099));
+        s.onFrame(new CameraFrame(pixels,320,240,0,1100));
+        FaceSession.FrameCounts snapshot = s.frameCounts();
+        assertEquals(2, snapshot.admitted); assertEquals(2, snapshot.rejected);
+        s.reset(); s.onFrame(new CameraFrame(pixels,320,240,0,3));
+        assertTrue(s.finish(0));
+        s.onFrame(new CameraFrame(pixels,320,240,0,4));
+        assertEquals(3, s.frameCounts().admitted); assertEquals(3, s.frameCounts().rejected);
+        assertEquals("snapshots remain immutable", 2, snapshot.admitted);
+        s.close();
+    }
+
+    @Test public void detectorFailureRevokesOldWorkWithoutReleasingItsBusySlot() throws Exception {
+        Manual worker = new Manual();
+        AtomicBoolean broken = new AtomicBoolean();
+        AtomicInteger captures = new AtomicInteger();
+        IllegalStateException failure = new IllegalStateException("detector failed");
+        config.livenessEnabled = false;
+        FaceSession<String> s = new FaceSession<>(config, f -> {
+            if (broken.get()) throw failure;
+            return faces;
+        }, (f,r) -> .95f, (f,r,k,c) -> { captures.incrementAndGet(); return () -> ALICE; },
+                () -> USERS, listener, worker);
+        try {
+            stable(s); assertEquals(1, captures.get());
+            broken.set(true);
+            try { frame(s); fail("detector error must propagate"); }
+            catch (IllegalStateException error) { assertSame(failure, error); }
+            assertEquals("failed detection was admitted, not a cheap skipped call", 4, s.frameCounts().admitted);
+            broken.set(false); stable(s);
+            assertEquals("old task still owns the engine", 1, captures.get());
+            worker.run(); assertTrue(events.isEmpty());
+            stable(s); worker.run();
+            assertTrue(s.finish(0)); assertEquals(1, events.size());
+        } finally { s.close(); }
+    }
+
+    @Test public void nullDetectorResultIsAnErrorRatherThanAnEmptyObservation() {
+        FaceSession<String> s = new FaceSession<>(config, f -> null, (f,r) -> .95f,
+                (f,r,k,c) -> () -> ALICE, () -> USERS, listener, Runnable::run);
+        try {
+            try { frame(s); fail("null is not a successful empty detection"); }
+            catch (IllegalStateException expected) { assertEquals("Detector returned null", expected.getMessage()); }
+            assertEquals(1, s.frameCounts().admitted); assertEquals(0, s.frameCounts().rejected);
+            assertFalse(s.shouldProcessFrame(time * 33));
+            assertTrue(s.shouldProcessFrame(time * 33 + 1));
+            assertTrue(s.finish(0)); assertTrue(events.isEmpty());
+        } finally { s.close(); }
+    }
+
+    @Test public void persistentDetectorFailureKeepsIdleCadenceAndRecoveryRestoresActiveCadence() {
+        config.idleFrameIntervalMs = 100;
+        AtomicBoolean broken = new AtomicBoolean(true);
+        AtomicInteger detections = new AtomicInteger();
+        IllegalStateException failure = new IllegalStateException("detector failed");
+        FaceSession<String> s = new FaceSession<>(config, f -> {
+            detections.incrementAndGet();
+            if (broken.get()) throw failure;
+            return faces;
+        }, (f,r) -> .95f, (f,r,k,c) -> () -> ALICE, () -> USERS, listener, Runnable::run);
+        try {
+            for (long at : new long[]{1000, 1100}) {
+                try { s.onFrame(new CameraFrame(pixels,320,240,0,at)); fail("must expose detection error"); }
+                catch (IllegalStateException error) { assertSame(failure, error); }
+                assertFalse(s.shouldProcessFrame(at));
+                assertFalse(s.shouldProcessFrame(at + 99));
+                s.onFrame(new CameraFrame(pixels,320,240,0,at + 99));
+                assertTrue(s.shouldProcessFrame(at + 100));
+            }
+            assertEquals(2, detections.get());
+            assertEquals(2, s.frameCounts().admitted); assertEquals(2, s.frameCounts().rejected);
+            broken.set(false);
+            s.onFrame(new CameraFrame(pixels,320,240,0,1200));
+            assertTrue("pending face returns to active admission", s.shouldProcessFrame(1201));
+            assertTrue(s.finish(0));
+        } finally { s.close(); }
+    }
+
+    @Test public void failedDetectionAllowsExplicitResetAndClockRollbackWithoutReopeningVerifier() {
+        config.idleFrameIntervalMs = 100;
+        FaceSession<String> s = new FaceSession<>(config, f -> { throw new IllegalStateException("detector failed"); },
+                (f,r) -> .95f, (f,r,k,c) -> () -> ALICE, () -> USERS, listener, Runnable::run);
+        try {
+            try { s.onFrame(new CameraFrame(pixels,320,240,0,1000)); fail("must fail"); }
+            catch (IllegalStateException expected) { }
+            assertFalse(s.shouldProcessFrame(1001));
+            assertTrue("new camera clock must not be stuck behind old retry time", s.shouldProcessFrame(3));
+            s.reset(); assertTrue(s.shouldProcessFrame(1000));
+            try { s.withVerifier(null); fail("reset must not make a started session configurable"); }
+            catch (IllegalStateException expected) { assertEquals("Session already started", expected.getMessage()); }
+        } finally { s.close(); }
+    }
+
+    @Test public void detectorFailureBetweenDecisionAndDeliveryDoesNotConsumeIdentityCooldown() throws Exception {
+        revokedSuccessDoesNotConsumeCooldown(true);
+    }
+
+    @Test public void resetBetweenDecisionAndDeliveryDoesNotConsumeIdentityCooldown() throws Exception {
+        revokedSuccessDoesNotConsumeCooldown(false);
+    }
+
+    private void revokedSuccessDoesNotConsumeCooldown(boolean detectorFailure) throws Exception {
+        config.livenessEnabled = false;
+        config.identityCooldownMs = 60_000;
+        Manual worker = new Manual();
+        AtomicReference<FaceSession<String>> ref = new AtomicReference<>();
+        AtomicBoolean intercept = new AtomicBoolean(true), broken = new AtomicBoolean();
+        IllegalStateException failure = new IllegalStateException("detector failed");
+        FaceSession.Listener<String> revokeBeforeDelivery = new FaceSession.Listener<String>() {
+            public void onFaces(List<FaceSession.FaceState<String>> f, CameraFrame frame) { lastFaces = f; }
+            public void onRecognized(FaceSession.RecognitionEvent<String> e) { events.add(e); }
+            public void onRecognitionFailed(long id, float score, FaceSession.Reason reason) { }
+            public void onMatchScored(long id, float score, float second, int fused, FaceSession.Liveness live,
+                                      FaceSession.Reason outcome) {
+                if (outcome != FaceSession.Reason.NONE || !intercept.getAndSet(false)) return;
+                // succeed() has committed, but its notification is still behind this one in the queue.
+                if (detectorFailure) {
+                    broken.set(true);
+                    try { frame(ref.get()); fail("must expose detection error"); }
+                    catch (IllegalStateException error) { assertSame(failure, error); }
+                    finally { broken.set(false); }
+                } else ref.get().reset();
+            }
+        };
+        FaceSession<String> s = new FaceSession<>(config, f -> {
+            if (broken.get()) throw failure;
+            return faces;
+        }, (f,r) -> .95f, (f,r,k,c) -> () -> ALICE, () -> USERS, revokeBeforeDelivery, worker);
+        ref.set(s);
+        try {
+            stable(s); worker.run(); assertFalse(intercept.get()); assertTrue(events.isEmpty());
+            stable(s); worker.run();
+            assertEquals("fresh authorized delivery is not suppressed by the revoked event", 1, events.size());
+            s.reset(); stable(s); worker.run();
+            assertEquals("an actually delivered event still consumes identity cooldown", 1, events.size());
+            assertTrue(s.finish(0));
+        } finally { s.close(); }
+    }
+
+    @Test public void queuedSameIdentitySuccessesStillDeduplicateAtDelivery() {
+        config.livenessEnabled = false;
+        faces = Arrays.asList(FACE.get(0), new Detection(new FaceRect(190,50,290,150),1));
+        FaceSession<String> s = session(Runnable::run, (f,r,k,c) -> () -> ALICE);
+        try {
+            stable(s);
+            assertEquals(2, lastFaces.size());
+            for (FaceSession.FaceState<String> face : lastFaces)
+                assertEquals(FaceSession.Recognition.SUCCEED, face.recognition);
+            assertEquals(1, events.size()); assertTrue(s.finish(0));
+        } finally { s.close(); }
+    }
+
     @Test public void admissionIsPureAndResetRollbackDuplicatesHaveExplicitSemantics() {
         config.idleFrameIntervalMs = 100;
         faces = Collections.emptyList();

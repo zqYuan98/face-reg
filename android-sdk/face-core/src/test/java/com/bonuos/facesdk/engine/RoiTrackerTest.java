@@ -1,7 +1,6 @@
 package com.bonuos.facesdk.engine;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.*;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -12,16 +11,22 @@ public class RoiTrackerTest {
     /** A scripted scene: the faces currently in frame; region() returns those inside the region. */
     private static final class Scene implements RoiTracker.Source {
         List<Detection> faces = new ArrayList<>();
-        int full, region;
+        int full, region, failRegionAt;
+        boolean nullFull, nullRegion;
+        RuntimeException fullFailure;
+        final RuntimeException regionFailure = new IllegalStateException("region failed");
         final List<FaceRect> regions = new ArrayList<>();
 
         @Override public List<Detection> full() {
             full++;
-            return new ArrayList<>(faces);
+            if (fullFailure != null) throw fullFailure;
+            return nullFull ? null : new ArrayList<>(faces);
         }
 
         @Override public List<Detection> region(FaceRect r) {
             region++;
+            if (region == failRegionAt) throw regionFailure;
+            if (nullRegion) return null;
             regions.add(r);
             List<Detection> out = new ArrayList<>();
             for (Detection d : faces)
@@ -69,6 +74,60 @@ public class RoiTrackerTest {
         assertEquals(1, tracker.next(scene).size());
         assertEquals(1, tracker.next(scene).size());
         assertEquals(2, tracker.next(scene).size()); // third frame: scheduled whole-frame scan
+    }
+
+    @Test public void failedScheduledFullDiscardsOldRegionsAndRetriesFull() {
+        Scene scene = new Scene(); scene.faces.add(face(100,100,100));
+        RoiTracker tracker = new RoiTracker(2,2f,.2f);
+        tracker.next(scene); tracker.next(scene);
+        RuntimeException failure = new IllegalStateException("full failed");
+        scene.fullFailure = failure;
+        try { tracker.next(scene); fail("must propagate"); }
+        catch (RuntimeException error) { assertSame(failure,error); }
+        scene.fullFailure = null;
+        scene.faces.set(0,face(600,100,100));
+        assertEquals(600f,tracker.next(scene).get(0).rect.left,0f);
+        assertEquals(3,scene.full); assertEquals(1,scene.region);
+        assertEquals(3,tracker.fullScans()); assertEquals(1,tracker.regionScans());
+    }
+
+    @Test public void laterRegionFailureRejectsTheWholeObservationAndForcesFull() {
+        Scene scene = new Scene();
+        scene.faces.add(face(100,100,100)); scene.faces.add(face(500,100,100));
+        RoiTracker tracker = new RoiTracker(10,2f,.2f);
+        tracker.next(scene); scene.failRegionAt = 2;
+        try { tracker.next(scene); fail("must not return the first successful ROI as a partial frame"); }
+        catch (RuntimeException error) { assertSame(scene.regionFailure,error); }
+        scene.faces.clear(); scene.faces.add(face(900,100,100));
+        assertEquals(900f,tracker.next(scene).get(0).rect.left,0f);
+        assertEquals(2,scene.full); assertEquals(2,scene.region);
+    }
+
+    @Test public void nullFullAndRegionResultsAreErrorsNotEmptyScenes() {
+        for (boolean full : new boolean[]{true,false}) {
+            Scene scene = new Scene(); scene.faces.add(face(100,100,100));
+            RoiTracker tracker = new RoiTracker(10,2f,.2f);
+            if (full) scene.nullFull = true;
+            else { tracker.next(scene); scene.nullRegion = true; }
+            try { tracker.next(scene); fail("null must fail"); }
+            catch (IllegalStateException expected) { assertEquals("Detector returned null",expected.getMessage()); }
+            scene.nullFull = scene.nullRegion = false;
+            assertEquals(1,tracker.next(scene).size()); assertEquals(2,scene.full);
+        }
+    }
+
+    @Test public void sourceErrorAlsoInvalidatesOldRegions() {
+        Scene scene = new Scene(); scene.faces.add(face(100,100,100));
+        RoiTracker tracker = new RoiTracker(10,2f,.2f); tracker.next(scene);
+        AssertionError failure = new AssertionError("native failure");
+        try {
+            tracker.next(new RoiTracker.Source() {
+                public List<Detection> full() { throw new AssertionError("expected ROI"); }
+                public List<Detection> region(FaceRect r) { throw failure; }
+            });
+            fail("must propagate Error");
+        } catch (AssertionError error) { assertSame(failure,error); }
+        tracker.next(scene); assertEquals(2,scene.full); assertEquals(0,scene.region);
     }
 
     @Test public void emptySceneScansEveryFrameAndResetRescans() {

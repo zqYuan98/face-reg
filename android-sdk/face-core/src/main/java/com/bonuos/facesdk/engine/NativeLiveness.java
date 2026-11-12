@@ -7,7 +7,7 @@ import android.content.res.AssetManager;
  * detection. Score and close share a monitor: interrupting a worker does not stop native inference,
  * so release must wait for the current native call before freeing its models and frame buffers.
  */
-final class NativeLiveness implements AutoCloseable {
+final class NativeLiveness implements AutoCloseable, ScrfdEngines.LivenessWorker {
     static {
         System.loadLibrary("faceengine");
     }
@@ -20,7 +20,7 @@ final class NativeLiveness implements AutoCloseable {
     }
 
     /** Sensor-orientation NV21 and an upright-frame minivision square (inclusive); NaN on failure. */
-    synchronized float score(byte[] nv21, int width, int height, int rotation, int left, int top, int right, int bottom) {
+    @Override public synchronized float score(byte[] nv21, int width, int height, int rotation, int left, int top, int right, int bottom) {
         return handle == 0 ? Float.NaN : nativeScore(handle, nv21, width, height, rotation, left, top, right, bottom);
     }
 

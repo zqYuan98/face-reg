@@ -5,29 +5,32 @@ import android.content.res.AssetManager;
 import java.nio.ByteBuffer;
 
 /** JNI handle for the native frame analyzer (SCRFD + silent liveness on one frame). Single thread. */
-public final class NativeAnalyzer implements AutoCloseable {
+public final class NativeAnalyzer implements AutoCloseable, ScrfdEngines.Analyzer {
     static {
         System.loadLibrary("faceengine");
     }
 
     private long handle;
+    private final int threads;
 
     NativeAnalyzer(AssetManager assets, String detectorAsset, int threads, String[] liveNames, float[] liveScales, int[] liveSizes) {
+        if (threads < 1) throw new IllegalArgumentException("Positive detector thread count required");
+        this.threads = threads;
         handle = nativeCreate(assets, detectorAsset, threads, liveNames, liveScales, liveSizes);
         if (handle == 0) throw new IllegalStateException("Native frame analyzer failed to load " + detectorAsset);
     }
 
-    boolean setNv21(byte[] nv21, int width, int height, int rotation) {
+    @Override public boolean setNv21(byte[] nv21, int width, int height, int rotation) {
         return handle != 0 && nativeSetNv21(handle, nv21, width, height, rotation);
     }
 
     /** Packed faces, 15 floats each: box (x1,y1,x2,y2), score, five points. */
-    float[] detect(int longSide, float threshold) {
+    @Override public float[] detect(int longSide, float threshold) {
         return handle == 0 ? null : nativeDetect(handle, longSide, threshold);
     }
 
     /** Packed faces found inside an upright-frame region (any position), in frame coordinates. */
-    float[] detectRegion(float x, float y, float w, float h, int longSide, float threshold) {
+    @Override public float[] detectRegion(float x, float y, float w, float h, int longSide, float threshold) {
         return handle == 0 ? null : nativeDetectRegion(handle, x, y, w, h, longSide, threshold);
     }
 
@@ -42,9 +45,11 @@ public final class NativeAnalyzer implements AutoCloseable {
         return nativePackNv21(width, height, y, yRowStride, u, v, uvRowStride, uvPixelStride, out);
     }
 
-    float liveness(int left, int top, int right, int bottom) {
+    @Override public float liveness(int left, int top, int right, int bottom) {
         return handle == 0 ? Float.NaN : nativeLiveness(handle, left, top, right, bottom);
     }
+
+    @Override public int threads() { return threads; }
 
     @Override
     public void close() {

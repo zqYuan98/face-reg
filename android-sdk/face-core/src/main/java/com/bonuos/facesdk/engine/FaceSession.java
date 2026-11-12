@@ -22,8 +22,8 @@ import java.util.concurrent.RejectedExecutionException;
  * handed to two workers in parallel, as in ArcSoft's demo: liveness (when the scorer is a
  * {@link LivenessEngine}) and feature extraction. Whichever finishes last decides at once, on its
  * own thread, under the session lock; nothing waits for the next frame. Once a track is
- * recognised it never runs a model again, which turns "every model on every frame" into "the
- * expensive models once per person".
+ * recognised it submits no further recognition/liveness work until invalidated; detection may
+ * still run on admitted frames.
  *
  * <p>Call {@link #onFrame} from one thread. {@link Listener#onFaces} runs on that thread; the other
  * callbacks may also run on a worker thread, outside session/dataset locks; keep them short.
@@ -260,8 +260,18 @@ public final class FaceSession<T> implements AutoCloseable {
         }
     }
 
+    /** Lifetime counters: hints do not count; reset does not erase admitted or rejected calls. */
+    public static final class FrameCounts {
+        public final long admitted, rejected;
+        private FrameCounts(long admitted, long rejected) {
+            this.admitted = admitted;
+            this.rejected = rejected;
+        }
+    }
+
     private final SessionTasks tasks = new SessionTasks();
     private long generation = 1, frameId;
+    private long admittedFrames, rejectedFrames;
     private volatile boolean inputStopped, drainFailed;
     private boolean analysing, hasAnalysed, closeCleaned;
     private final ArrayDeque<Runnable> notifications = new ArrayDeque<>();
@@ -341,7 +351,7 @@ public final class FaceSession<T> implements AutoCloseable {
     /** Adds the cascade's second stage; call before the first frame. */
     public FaceSession<T> withVerifier(Verifier<T> verifier) {
         synchronized (lock) {
-            if (hasAnalysed || inputStopped || closed) throw new IllegalStateException("Session already started");
+            if (admittedFrames != 0 || inputStopped || closed) throw new IllegalStateException("Session already started");
             this.verifier = verifier;
             return this;
         }
@@ -349,6 +359,10 @@ public final class FaceSession<T> implements AutoCloseable {
 
     /** Next track id; persist it and pass it back as {@link SessionConfig#firstTrackId} after a restart. */
     public long nextTrackId() { synchronized (lock) { return tracker.nextId(); } }
+
+    public FrameCounts frameCounts() {
+        synchronized (lock) { return new FrameCounts(admittedFrames, rejectedFrames); }
+    }
 
     /** A hint only: does not consume admission or touch the camera buffer. */
     public boolean shouldProcessFrame(long timestampMs) {
@@ -367,14 +381,15 @@ public final class FaceSession<T> implements AutoCloseable {
         final long acceptedGeneration;
         long now = frame.timestampMs;
         synchronized (lock) {
-            if (!admits(now)) return;
+            if (!admits(now)) { rejectedFrames++; return; }
             // A camera clock rollback starts new observations, not an endless throttle.
             if (hasAnalysed && now < lastAnalysedAt) {
                 resetLocked();
                 lastReported.clear(); // cooldowns in the previous clock domain cannot be compared
             }
             refreshDataset();
-            if (!tasks.reserveFrame()) return;
+            if (!tasks.reserveFrame()) { rejectedFrames++; return; }
+            admittedFrames++;
             acceptedGeneration = generation;
             analysing = true;
             hasAnalysed = true;
@@ -385,7 +400,24 @@ public final class FaceSession<T> implements AutoCloseable {
         }
         tasks.enter();
         try {
-            List<Detection> detections = detector.detect(frame);
+            final List<Detection> detections;
+            try {
+                detections = detector.detect(frame);
+                if (detections == null) throw new IllegalStateException("Detector returned null");
+            } catch (RuntimeException | Error failure) {
+                // An engine failure is not an empty scene; revoke stale work, then expose the error.
+                synchronized (lock) {
+                    if (generation == acceptedGeneration) {
+                        resetLocked();
+                        // Revoke evidence, not the failed call's admission: persistent errors retry
+                        // at the idle cadence rather than turning every camera frame into a retry.
+                        hasAnalysed = true;
+                        lastAnalysedAt = now;
+                        idle = true;
+                    }
+                }
+                throw failure;
+            }
             List<FaceState<T>> faces;
             synchronized (lock) {
                 if (closed || generation != acceptedGeneration) return;
@@ -470,7 +502,7 @@ public final class FaceSession<T> implements AutoCloseable {
     }
 
     private void process(TrackState<T> state, Track track, CameraFrame frame, long now) {
-        if (state.recognition == Recognition.SUCCEED) return; // decided; never run a model again
+        if (state.recognition == Recognition.SUCCEED) return; // decided; no more FR/FL for this track
         if (state.recognition == Recognition.FAILED) {
             if (now < state.retryAt) {
                 state.reason = Reason.UNKNOWN_PERSON;
@@ -696,7 +728,7 @@ public final class FaceSession<T> implements AutoCloseable {
     private void succeed(TrackState<T> state, Gallery.Match<T> m, long now) {
         TaskToken<T> token = state.token;
         if (valid(token) != state || !state.eligible || state.liveness != Liveness.ALIVE) return;
-        final boolean[] report = {false};
+        final boolean[] committed = {false};
         Runnable commit = () -> {
             // Authorization linearization point, under the shared publication monitor.
             if (valid(token) != state || !state.eligible || state.liveness != Liveness.ALIVE) return;
@@ -705,11 +737,7 @@ public final class FaceSession<T> implements AutoCloseable {
             state.score = m.score;
             state.reason = Reason.NONE;
             state.verifyTask = null;
-            Long last = lastReported.get(m.best);
-            if (last == null || now - last >= config.identityCooldownMs) {
-                lastReported.put(m.best, now);
-                report[0] = true;
-            }
+            committed[0] = true;
         };
         tasks.authorize(() -> {
             if (token.primary.epoch == null) commit.run();
@@ -717,17 +745,33 @@ public final class FaceSession<T> implements AutoCloseable {
         });
         // No user code under the dataset barrier. An asynchronous access consumer must
         // revalidate the event epoch at its own consumption/door-operation point.
-        if (report[0]) {
+        if (committed[0]) {
             RecognitionEvent<T> event = new RecognitionEvent<>(state.id, m.best, m.score, m.secondScore,
                     state.livenessScore, state.fusedCount, now, token);
             notifications.add(() -> {
+                final boolean[] deliver = {false};
                 synchronized (lock) {
-                    TrackState<T> current = states.get(token.trackId);
-                    if (closed || token.generation != generation || current == null || !current.visible
-                            || current.attemptId != token.attemptId
-                            || !snapshotsCurrent(token.primary, token.verification)) return;
+                    Runnable reserveDelivery = () -> {
+                        TrackState<T> current = states.get(token.trackId);
+                        if (closed || token.generation != generation || current == null || !current.visible
+                                || !current.eligible || current.recognition != Recognition.SUCCEED
+                                || current.liveness != Liveness.ALIVE || current.attemptId != token.attemptId
+                                || !snapshotsCurrent(token.primary, token.verification)) return;
+                        // A queued event that is revoked before delivery must not consume cooldown.
+                        // Reserve under the lock so concurrent flushers cannot report an identity twice.
+                        long reportedAt = now();
+                        Long last = lastReported.get(m.best);
+                        if (last == null || reportedAt - last >= config.identityCooldownMs) {
+                            lastReported.put(m.best, reportedAt);
+                            deliver[0] = true;
+                        }
+                    };
+                    tasks.authorize(() -> {
+                        if (token.primary.epoch == null) reserveDelivery.run();
+                        else token.primary.epoch.commit(token.primary.generation, reserveDelivery);
+                    });
                 }
-                listener.onRecognized(event);
+                if (deliver[0]) listener.onRecognized(event);
             });
         }
     }

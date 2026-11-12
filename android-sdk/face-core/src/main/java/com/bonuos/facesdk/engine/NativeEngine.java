@@ -39,6 +39,7 @@ public final class NativeEngine implements AutoCloseable {
     public static final String INSIGHTFACE_R50_INT8 = "insightface/w600k_r50_int8.onnx";
 
     private long handle;
+    private final int threads;
 
     /**
      * recognizer_v1_1024 pipeline.
@@ -52,6 +53,8 @@ public final class NativeEngine implements AutoCloseable {
     }
 
     private NativeEngine(AssetManager assets, int kind, String recognizerAsset, String detectorAsset, int threads) {
+        if (threads < 1) throw new IllegalArgumentException("Positive feature thread count required");
+        this.threads = threads;
         handle = nativeCreate(assets, kind, recognizerAsset, detectorAsset, threads);
         if (handle == 0) throw new IllegalStateException("Native face engine failed to load " + recognizerAsset);
     }
@@ -101,6 +104,9 @@ public final class NativeEngine implements AutoCloseable {
                                   int left, int top, int cropWidth, int cropHeight, byte[] out) {
         return nativeCropBgr(nv21, width, height, rotationDegrees, left, top, cropWidth, cropHeight, out);
     }
+
+    /** Intra-op setting passed to this engine's native session, not observed thread utilization. */
+    public int threads() { return threads; }
 
     @Override
     public synchronized void close() {

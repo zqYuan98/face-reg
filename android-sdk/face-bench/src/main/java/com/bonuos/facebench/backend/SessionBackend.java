@@ -4,6 +4,7 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.os.SystemClock;
 import com.bonuos.facebench.clip.ClipFile;
+import com.bonuos.facesdk.engine.AnalysisProfile;
 import com.bonuos.facesdk.engine.CameraFrame;
 import com.bonuos.facesdk.engine.FaceRect;
 import com.bonuos.facesdk.engine.FaceSession;
@@ -29,6 +30,7 @@ import java.util.List;
  */
 public final class SessionBackend implements FaceBackend {
     private final String name, recognizer;
+    private final AnalysisProfile profile;
     private final ScrfdEngines frames;
     private final NativeEngine engine;
     /** Cascade second stage (IResNet-50 int8), or null. Thresholds from tools/engine-eval/cascade_lfw.py. */
@@ -131,9 +133,8 @@ public final class SessionBackend implements FaceBackend {
     }
 
     public SessionBackend(Context context, String name, String recognizerAsset, String verifierAsset, String variant) {
-        if (!"baseline".equals(variant) && !"shared_capture".equals(variant))
-            throw new IllegalArgumentException("Unknown variant " + variant);
-        config.shareFeatureCapture = "shared_capture".equals(variant);
+        profile = AnalysisProfile.forVariant(variant);
+        profile.applyTo(config);
         this.name = name;
         this.recognizer = recognizerAsset;
         boolean r50 = !NativeEngine.INSIGHTFACE_MBF.equals(recognizerAsset);
@@ -141,9 +142,9 @@ public final class SessionBackend implements FaceBackend {
         config.thresholdHigh = r50 ? 0.31f : 0.33f;
         config.thresholdLow = r50 ? 0.26f : 0.28f;
         config.minFaceSize = 64;
-        frames = new ScrfdEngines(context.getAssets(), 320, 0.5f);
+        frames = new ScrfdEngines(context.getAssets(), profile);
         try {
-            engine = NativeEngine.insightFace(context.getAssets(), recognizerAsset, 4);
+            engine = NativeEngine.insightFace(context.getAssets(), recognizerAsset, profile.featureThreads);
         } catch (RuntimeException error) {
             frames.close();
             throw error;
@@ -151,7 +152,7 @@ public final class SessionBackend implements FaceBackend {
         NativeEngine second = null;
         if (verifierAsset != null) {
             try {
-                second = NativeEngine.insightFace(context.getAssets(), verifierAsset, 4);
+                second = NativeEngine.insightFace(context.getAssets(), verifierAsset, profile.featureThreads);
             } catch (RuntimeException error) {
                 engine.close();
                 frames.close();
@@ -307,10 +308,16 @@ public final class SessionBackend implements FaceBackend {
         settings.put("cascadeReject", CASCADE_REJECT);
         settings.put("cascadeThreshold", CASCADE_THRESHOLD);
         settings.put("frameIntervalMs", frameIntervalMs);
-        settings.put("detectorLongSide", 320);
-        settings.put("detectorThreshold", 0.5f);
-        settings.put("fullScanEvery", ScrfdEngines.FULL_SCAN_EVERY);
-        settings.put("regionLongSide", ScrfdEngines.REGION_LONG_SIDE);
+        java.util.Map<String, Object> detector = frames.effectiveSettings();
+        settings.put("detectorLongSide", detector.get("longSide"));
+        settings.put("detectorThreshold", detector.get("threshold"));
+        settings.put("fullScanEvery", detector.get("fullScanEvery"));
+        settings.put("regionLongSide", detector.get("regionLongSide"));
+        settings.put("detector", detector);
+        settings.put("featureThreads", engine.threads());
+        if (verifyEngine != null) settings.put("verificationThreads", verifyEngine.threads());
+        // This v2 writer does not yet produce the profile's requested timing level.
+        settings.put("requestedAnalysisProfile", profile.toMap());
         settings.put("livenessHistory", "valid_vote_completions");
         return settings;
     }

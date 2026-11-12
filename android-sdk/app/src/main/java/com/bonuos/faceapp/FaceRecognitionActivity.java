@@ -23,6 +23,7 @@ import androidx.core.content.ContextCompat;
 
 import com.bonuos.facesdk.FaceRecognizer;
 import com.bonuos.facesdk.FaceRepository;
+import com.bonuos.facesdk.engine.AnalysisProfile;
 import com.bonuos.facesdk.engine.CameraFrame;
 import com.bonuos.facesdk.engine.FaceRect;
 import com.bonuos.facesdk.engine.FaceSession;
@@ -126,11 +127,12 @@ public class FaceRecognitionActivity extends AppCompatActivity implements FaceSe
             if (cascade) verifyRecognizer = new FaceRecognizer(this, FaceRecognizer.Backend.INSIGHTFACE_R50_INT8);
             SessionConfig config = new SessionConfig();
             // Candidate switches are opt-in until the paired device comparison passes.
-            config.shareFeatureCapture = BuildConfig.SHARE_FEATURE_CAPTURE;
+            AnalysisProfile profile = AnalysisProfile.forVariant(BuildConfig.SHARE_FEATURE_CAPTURE ? "shared_capture" : "baseline");
+            profile.applyTo(config);
             FaceSession.Detector detector;
             FaceSession.LivenessScorer liveness;
             if (backend.insightFace()) {
-                ScrfdEngines scrfd = new ScrfdEngines(getAssets(), 320, 0.5f);
+                ScrfdEngines scrfd = new ScrfdEngines(getAssets(), profile);
                 frameEngines = scrfd;
                 detector = scrfd;
                 liveness = scrfd;

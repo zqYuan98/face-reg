@@ -17,6 +17,9 @@ class FrameAnalyzer {
 public:
     FrameAnalyzer(std::unique_ptr<NetSession> scrfd, AAssetManager *assets, std::vector<ModelConfig> live_configs);
 
+    /** Clears eligibility for detection/liveness after invalid input, retaining reusable capacity. */
+    void InvalidateFrame();
+
     /** Keeps a copy of a sensor-orientation NV21 frame; nothing is converted yet. */
     bool SetNv21(const uint8_t *nv21, int width, int height, int rotation_degrees);
 
