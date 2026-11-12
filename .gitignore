@@ -31,3 +31,12 @@ face_test/
 
 # InsightFace weights (research licence): mounted at deploy time, never committed
 FaceFeatureExtractorAPI/checkpoints/insightface/
+
+# Material extracted from licensed vendor SDKs (headers, sample code, disassembly, raw tool
+# output): kept locally for reference only. Our own reports and scripts in these folders are tracked.
+face-notes/linux-sdk-*/sources/
+face-notes/linux-sdk-*/supplement/
+face-notes/linux-sdk-*/static/
+face-notes/linux-sdk-*/static-corrected/
+face-notes/linux-sdk-*/evidence/
+face-notes/linux-sdk-*/derived/
