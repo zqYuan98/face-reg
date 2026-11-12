@@ -27,40 +27,34 @@ InsightFace 权重只允许非商业研究用途，不入库：服务端放在 `
 
 | 分支 | 末端提交 | 状态 | 处理建议 |
 |---|---|---|---|
-| `yuanzq/feat/offline-face-engine`（当前） | 最新 | **集成分支**：包含 main 之后的全部工作（Android 离线引擎、服务端优化、v2、找回的 search） | 评审后合并回 `main` 并推送 |
-| `yuanzq/feat/feature-search` | `4dc7d57` | 找回的 search 线，37 的 18001 端口跑的就是它的 `49eb6e7`；已合并进当前分支 | 保留到合并回 main 后再删除 |
-| `main` / `origin/main` | `6261b20` | 10-10 比对接口上线时的版本，当前分支领先它 36 个提交（含找回的 search 线 5 个和 1 个合并提交） | 等待合并 |
+| `yuanzq/feat/offline-face-engine` | 最新 | **集成分支**：包含全部工作（Android 离线引擎、服务端优化、v2、找回的 search）；37 的 `944765d` 上线验证通过后已合并进 `main` | 继续作为开发分支；验证后再合并 `main` |
+| `yuanzq/feat/feature-search` | `4dc7d57` | 找回的 search 线（原 37 线上版本 `49eb6e7`），已合并 | 可以删除 |
+| `main` | 与集成分支一致 | 37 升级验证通过后，由 `6261b20` 快进合并到集成分支 | 稳定分支：只合并已在服务器上验证过的提交 |
 | `origin/feat/TASK-2026-001-modular-face-algorithm-api` | `2966b34` | **另一套独立服务**（模块化算法 API 2.4.0，含可视化控制台），跑在 37 的 18002/18003 端口；与当前分支分叉，各有几十个提交互不包含 | 不要合并进本服务；它是不同的产品线。路径也用 `/api/v2/...`，与本服务的 `/api/v2/extract_feature` 只是名字相近，是两个服务 |
-| `origin/codex/backend-remediation-publish` | `cfad46f` | 已包含在当前分支里；37 的后端跑的就是它 | 可以删除 |
-| `origin/codex/deploy-feature-compare` | `6261b20` | 与 main 相同 | 可以删除 |
+| `origin/codex/backend-remediation-publish` | `cfad46f` | 已包含在当前分支里（37 上一版后端 `cfad46f`） | 可以删除 |
+| `origin/codex/deploy-feature-compare` | `6261b20` | 已包含在当前分支里（旧 main） | 可以删除 |
 | `origin/refactor/TASK-2026-000-platform-consolidation` | `d689452` | 已包含在当前分支里 | 可以删除 |
 
-部署过的提交都打了本地标签（`git tag -l "deployed/*"`）。标签和分支都还没有推送：本机访问远端仓库 `<git-server>:3000` 时认证失败。
+部署过的提交都打了标签（`git tag -l "deployed/*"`）。公开镜像 github.com/zqYuan98/face-reg 由 `D:/face-deps/publish-github.sh` 生成，已去掉模型、未授权二进制、部署记录和内网地址，`deployed/*` 标签不推送；不要从本地仓库直接推 GitHub。
 
 ## 3. 37 服务器（<server-37>）现状
 
+升级记录：[server37-platform-944765d-deployment.md](reports/server37-platform-944765d-deployment.md)。
+
 | 端口 | 容器 | 镜像 | 提交（标签） | 版本 / 接口 |
 |---|---|---|---|---|
-| 18001 | `face-algorithm` | `face-algorithm:search-49eb6e7-20261012` | `49eb6e7`（`deployed/server37/face-algorithm-18001`） | 1.3.0：health、ready、detect、extract（v1）、compare（v1）、search（v1）。限制 2 CPU / 4 GB |
-| 18080 | `face-backend` | `face-backend:cfad46f-20260930` | `cfad46f`（`deployed/server37/face-backend-18080`） | **不含**内存特征库、v2 和补提（这些都在 `070425f` 及之后） |
-| 13307 | `face-mysql` | `mysql:8.0` | — | 生产库 `face_db`，**尚未执行** `V20261016_01__user_feature.sql` |
+| 18001 | `face-algorithm` | `face-algorithm:platform-944765d` | `944765d`（`deployed/server37/face-algorithm-18001`） | 1.4.0，8 个接口；v1 + v2 均已加载；2 个进程；限制 2 CPU / 4 GB |
+| 18080 | `face-backend` | `face-backend:platform-944765d` | `944765d`（`deployed/server37/face-backend-18080`） | 注册时同时提取 v1 和 v2；**检索仍为 v1**（58 人中 2 人缺 v2 特征）；内存特征库；补提接口 |
+| 13307 | `face-mysql` | `mysql:8.0` | — | `face_db` 已执行 `V20261016_01`（新增 `sys_user_feature` 表） |
 | 18002 / 18003 | `face-algorithm-task-2026-001` / `-visual-console-…` | `face-algorithm:task-2026-001-a49670dc9123` | `a49670dc`（`deployed/server37/face-algorithm-task-2026-001-18002`） | 另一套模块化服务 2.4.0：`/api/v2/verify/*`、`/api/v2/portrait/generate` 等 |
 | 18000 | `smart-platform-auto-label` | 其他项目 | — | **注意**：仓库 `docker-compose.yml` 让算法服务占 18000，而 37 上这个端口被别的项目占用；37 用的是自己的 `/home/<user>/docker/docker-compose.yml`，算法服务在 18001。不要拿仓库里的 compose 覆盖 37 的配置 |
 
-部署记录：`docs/reports/2026-09-30-server37-deployment.md`、`2026-10-10-feature-comparison-deployment.md`、`2026-10-12-feature-search-deployment.md`，以及 `docs/DEPLOYMENT_HANDOFF_2026-10-14.md`。
+上一版线上提交保留了回滚标签 `deployed/server37/rollback/*`：算法服务 `49eb6e7`，后端 `cfad46f`。
 
-**当前分支相对 37 的变化**（升级前必读）：
-- **算法服务 1.3.0 → 1.4.0**：
-  - 原有 6 个接口的请求和返回格式不变，v1 特征和 v1 检索结果逐位不变（已用同一批请求与 37 对比）；
-  - 新增 v2 提取接口和 `/api/feature_versions`；
-  - 比对和检索接口也接受 v2；
-  - 忙时在超时内排队；
-  - 可以多进程部署。
-- **后端 `cfad46f` → 当前**：
-  - 检索改为内存特征库，返回值不再含 `featureData`；
-  - 新增特征版本相关配置和 `/api/features/*` 补提接口；
-  - 需要执行 `V20261016_01__user_feature.sql`；
-  - 默认配置下行为与 v1 相同。
+**37 的特殊配置**：
+- 不再挂载宿主机的 `FaceFeatureExtractorAPI/models`。旧做法会用宿主机上的旧代码覆盖镜像里的代码，新代码等于没生效。
+- v2 权重放在宿主机 `FaceFeatureExtractorAPI/insightface/`，挂载到容器的 `/app/insightface`。
+- 镜像在服务器上基于原镜像叠加新代码构建，配方见 `tools/deploy/server37/`。
 
 ## 4. 本次整理做了什么
 
