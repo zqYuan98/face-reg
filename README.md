@@ -1,5 +1,7 @@
 # 人脸识别平台
 
+> 公开镜像：模型权重、部分第三方二进制和内部部署记录未包含在本仓库中，详见 [docs/PUBLIC_MIRROR.md](docs/PUBLIC_MIRROR.md)。
+
 目录包含 Java 管理后台、Python 算法服务和 Android SDK。当前后台提供服务端分页、独立管理/设备鉴权，以及 v1 完整快照和 v2 分页增量同步。
 
 算法服务通过 `feature_comparison_server.py` 启动时提供检测、特征提取、1:1 特征比对和纯特征 1:N 检索四个计算接口。`POST /api/compare_feature` 比较两个特征；`POST /api/search_feature` 将一个特征与最多 1000 个候选比较并返回 Top-K。接口与旧服务升级方式见 [特征比对与检索](FaceFeatureExtractorAPI/FEATURE_COMPARISON.md)。
