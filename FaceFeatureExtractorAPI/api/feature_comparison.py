@@ -35,6 +35,24 @@ FeatureVector = Annotated[
 VersionName = Literal["recognizer_v1_1024", "arcface_r50_512"]
 
 
+def require_float32_numbers(value: Any) -> Any:
+    """Strict JSON-vector validation shared by comparison and search. The length must be one of the
+    supported feature dimensions; callers check it against the declared version."""
+    if type(value) is not list or len(value) not in FEATURE_DIMENSIONS.values():
+        raise ValueError("feature has an unsupported length")
+    for item in value:
+        # Do not coerce JSON booleans, strings, objects, or nested arrays.
+        if type(item) not in (int, float):
+            raise ValueError("feature values must be JSON numbers")
+        try:
+            number = float(item)
+        except (OverflowError, ValueError):
+            raise ValueError("feature value is outside float32 range") from None
+        if not math.isfinite(number) or abs(number) > _FLOAT32_MAX:
+            raise ValueError("feature values must be finite float32 numbers")
+    return value
+
+
 class FeatureComparisonRequest(BaseModel):
     """Both vectors must declare the supported, shared extraction protocol."""
 
@@ -50,19 +68,7 @@ class FeatureComparisonRequest(BaseModel):
     @field_validator("reference_feature", "probe_feature", mode="before")
     @classmethod
     def require_float32_numbers(cls, value: Any) -> Any:
-        if type(value) is not list or len(value) not in FEATURE_DIMENSIONS.values():
-            raise ValueError("feature has an unsupported length")
-        for item in value:
-            # Do not coerce JSON booleans, strings, objects, or nested arrays.
-            if type(item) not in (int, float):
-                raise ValueError("feature values must be JSON numbers")
-            try:
-                number = float(item)
-            except (OverflowError, ValueError):
-                raise ValueError("feature value is outside float32 range") from None
-            if not math.isfinite(number) or abs(number) > _FLOAT32_MAX:
-                raise ValueError("feature values must be finite float32 numbers")
-        return value
+        return require_float32_numbers(value)
 
     @model_validator(mode="after")
     def require_matching_versions(self):
